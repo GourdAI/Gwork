@@ -443,61 +443,61 @@ window.steerCollapseRemeasure = steerCollapseRemeasure;
    （noteProcessInsert 有 _replaying 门禁），且末尾 applyTurnCompact 会按页统一折叠，
    此处提前动既量不到游离节点、又会和它重复。
    全程原生 DOM（不依赖 jQuery），便于契约测试在 node:vm 里直接真跑。 */
- function settleSteerTurnBoundary(sess, opts) {
-     if (!sess || !sess.currentBubbleEl) return;
-     try {
-         if (sess._replaying || (typeof isDetachedRenderTarget === 'function' && isDetachedRenderTarget(sess))) return;
-         var oldBubble = sess.currentBubbleEl.parentNode;
-         if (!oldBubble) return;
-         // 向上找旧行：逐层 parentNode（原生 closest 在极简假 DOM 里不一定有）
-         var oldRow = null, p = oldBubble;
-         while (p) {
-             if (p.classList && p.classList.contains && p.classList.contains('msg-row')) { oldRow = p; break; }
-             p = p.parentNode || null;
-         }
-         // 旧行退出运行态：与 finishStream 的 liveFoldRow 收口同口径
-         if (oldRow && oldRow.classList) oldRow.classList.remove('agent-live');
-         // 操作按钮：流式中被 hide() 设了 inline display:none，旧行此后不会再有 finishStream 来显示
-         if (oldRow && oldRow.querySelectorAll) {
-             var acts = oldRow.querySelectorAll('.msg-actions');
-             for (var ai = 0; ai < acts.length; ai++) acts[ai].style.display = '';
-         }
+function settleSteerTurnBoundary(sess, opts) {
+    if (!sess || !sess.currentBubbleEl) return;
+    try {
+        if (sess._replaying || (typeof isDetachedRenderTarget === 'function' && isDetachedRenderTarget(sess))) return;
+        var oldBubble = sess.currentBubbleEl.parentNode;
+        if (!oldBubble) return;
+        // 向上找旧行：逐层 parentNode（原生 closest 在极简假 DOM 里不一定有）
+        var oldRow = null, p = oldBubble;
+        while (p) {
+            if (p.classList && p.classList.contains && p.classList.contains('msg-row')) { oldRow = p; break; }
+            p = p.parentNode || null;
+        }
+        // 旧行退出运行态：与 finishStream 的 liveFoldRow 收口同口径
+        if (oldRow && oldRow.classList) oldRow.classList.remove('agent-live');
+        // 操作按钮：流式中被 hide() 设了 inline display:none，旧行此后不会再有 finishStream 来显示
+        if (oldRow && oldRow.querySelectorAll) {
+            var acts = oldRow.querySelectorAll('.msg-actions');
+            for (var ai = 0; ai < acts.length; ai++) acts[ai].style.display = '';
+        }
 
-         var tcOff = false;
-         try { tcOff = (typeof localStorage !== 'undefined') && localStorage.getItem('gourd.turnCompact') === '0'; } catch (lsErr) { /* 隐私模式忽略 */ }
-         if (tcOff) return;
-         /* 运行批次收口是运行态自身的语义，必须与 turn-compact 模块是否存在无关，
+        var tcOff = false;
+        try { tcOff = (typeof localStorage !== 'undefined') && localStorage.getItem('gourd.turnCompact') === '0'; } catch (lsErr) { /* 隐私模式忽略 */ }
+        if (tcOff) return;
+        /* 运行批次收口是运行态自身的语义，必须与 turn-compact 模块是否存在无关，
             否则模块缺失时盖子永远停在「正在执行中」（与 finishStream 的接线形状锁
             同一条教训）。纯展示增强：异常只留痕，不许影响新气泡与后续流式。 */
-         var tbApi = (typeof window !== 'undefined') ? window.GourdTurnBatch : null;
-         var tcApi = (typeof window !== 'undefined') ? window.GourdTurnCompact : null;
-         if (tbApi && tbApi.closeBatchFor) {
-             try { tbApi.closeBatchFor(oldBubble); } catch (tbErr) { /* 展示增强 */ }
-         }
-         /* 整轮 Compact：必须在 closeBatchFor【之后】——分类要看到已收口的盖子形态
-             （与 finishStream 真收口分支、回放 rebuildBatches → applyTurnCompact 的顺序
-             完全同源）。ended:true 与回放同口径，否则「批次盖子让位」门禁会把带盖子的
-             旧轮整体短路，实时与历史形态分叉。 */
-         if (tcApi) {
-             /* 状态覆盖位要先于 compactBubble 写入：摘要文案由 readTurnMeta 当场读取，
-                晚写则本段仍回落「已完成」。 */
-             if (opts && opts.status && tcApi.markTurnStatus) {
-                 try { tcApi.markTurnStatus(oldBubble, opts.status); } catch (msErr) { /* 展示增强 */ }
-             }
-             if (tcApi.compactBubble) {
-                 try {
-                     tcApi.compactBubble(oldBubble, {
-                         ended: true,
-                         translate: (typeof GourdI18n !== 'undefined' && GourdI18n.t)
-                             ? function (k) { return GourdI18n.t(k); } : null
-                     });
-                 } catch (cbErr) { /* 展示增强 */ }
-             }
-         }
-     } catch (e) {
-         if (typeof console !== 'undefined' && console.error) console.error('[轮边界收口] 旧轮收口失败:', e);
-     }
- }
+        var tbApi = (typeof window !== 'undefined') ? window.GourdTurnBatch : null;
+        var tcApi = (typeof window !== 'undefined') ? window.GourdTurnCompact : null;
+        if (tbApi && tbApi.closeBatchFor) {
+            try { tbApi.closeBatchFor(oldBubble); } catch (tbErr) { /* 展示增强 */ }
+        }
+        /* 整轮 Compact：必须在 closeBatchFor【之后】——分类要看到已收口的盖子形态
+            （与 finishStream 真收口分支、回放 rebuildBatches → applyTurnCompact 的顺序
+            完全同源）。ended:true 与回放同口径，否则「批次盖子让位」门禁会把带盖子的
+            旧轮整体短路，实时与历史形态分叉。 */
+        if (tcApi) {
+            /* 状态覆盖位要先于 compactBubble 写入：摘要文案由 readTurnMeta 当场读取，
+               晚写则本段仍回落「已完成」。 */
+            if (opts && opts.status && tcApi.markTurnStatus) {
+                try { tcApi.markTurnStatus(oldBubble, opts.status); } catch (msErr) { /* 展示增强 */ }
+            }
+            if (tcApi.compactBubble) {
+                try {
+                    tcApi.compactBubble(oldBubble, {
+                        ended: true,
+                        translate: (typeof GourdI18n !== 'undefined' && GourdI18n.t)
+                            ? function (k) { return GourdI18n.t(k); } : null
+                    });
+                } catch (cbErr) { /* 展示增强 */ }
+            }
+        }
+    } catch (e) {
+        if (typeof console !== 'undefined' && console.error) console.error('[轮边界收口] 旧轮收口失败:', e);
+    }
+}
 
 /* 插话以【用户消息气泡】形态呈现：插话本质是用户在任务运行中补发的一句话，与正常发送、
    队列出队同属用户输入族系（右对齐用户气泡 + 附件真实缩略图），仅多一枚「插话」身份徽标
@@ -596,15 +596,126 @@ function appendSteerNote(sess, item) {
 }
 window.appendSteerNote = appendSteerNote;
 
+/* ===== 助手身份头（头像 + 名称，对标 WorkBuddy 消息头）=====
+   每条 assistant 消息行顶部一行：圆形 logo 头像 + 名称。名称默认 GWork，
+   可在设置页自定义（general.assistantName）。
+   【缓存而非每行拉接口】名称是全局设置，改一次全会话生效：localStorage 缓存
+   （ASSISTANT_NAME_KEY）是渲染时的唯一读取源；缓存的写入只有两处：
+     1) syncAssistantNameFromServer：启动期后端就绪后从 /web/settings/general
+        拉一次（__whenBackendReady 门闸，失败也放行）—— 没有它，在别端
+        （web 模式 / 另一台机器的桌面壳，localStorage 不互通）改过名称的用户
+        本端永远显示默认 GWork；
+     2) refreshAssistantIdentity：设置页保存成功后刷缓存与已渲染行。
+   【转义】名称是用户输入，进 innerHTML 前必须转义（与工具卡名称同口径）。 */
+var ASSISTANT_NAME_KEY = 'gwork.assistantName';
+var ASSISTANT_NAME_DEFAULT = 'GWork';
+var ASSISTANT_NAME_LOGO = '/img/logo.svg';
+function assistantDisplayName() {
+    try {
+        var v = localStorage.getItem(ASSISTANT_NAME_KEY);
+        if (v != null && v.trim()) return v.trim();
+    } catch (e) { /* 隐私模式忽略 */ }
+    return ASSISTANT_NAME_DEFAULT;
+}
+function assistantIdentityHeaderHtml() {
+    var name = assistantDisplayName();
+    var esc = (typeof escapeHtml === 'function') ? escapeHtml : function (s) {
+        return String(s).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; });
+    };
+    return '<div class="msg-head"><img class="msg-head-avatar" src="' + ASSISTANT_NAME_LOGO
+        + '" alt="" aria-hidden="true"><span class="msg-head-name">' + esc(name) + '</span></div>';
+}
+/* 设置页保存成功后调用：刷缓存 + 重写已渲染行的名称文本（头像不变）。
+   只改文本节点，不重建行 —— 重建会丢流式状态与折叠态。 */
+function refreshAssistantIdentity(name) {
+    try {
+        if (name == null || !name.trim()) localStorage.removeItem(ASSISTANT_NAME_KEY);
+        else localStorage.setItem(ASSISTANT_NAME_KEY, name.trim());
+    } catch (e) { /* 忽略 */ }
+    var els = document.querySelectorAll('.msg-row.assistant .msg-head-name');
+    var shown = assistantDisplayName();
+    for (var i = 0; i < els.length; i++) els[i].textContent = shown;
+}
+window.refreshAssistantIdentity = refreshAssistantIdentity;
+
+/* 启动期把服务端名称同步进缓存（见文件头注释写入源 1）。
+   只写缓存、不刷已渲染行：本回调在后端就绪门闸里触发，早于会话回放，
+   之后渲染的行自然读到新值；已渲染行由设置页路径的 refreshAssistantIdentity 负责。
+   门闸失败也放行（app-bootstrap settle 对 failed 同样 flush），失败即保持默认名，
+   与「拉不到设置」的其它模块同口径，不额外打扰用户。 */
+function syncAssistantNameFromServer() {
+    var boot = (typeof window !== 'undefined') ? window.__whenBackendReady : null;
+    var fetchIt = function () {
+        $.get('/web/settings/general', function (resp) {
+            if (!resp || resp.code !== 200 || !resp.data) return;
+            var name = resp.data.assistantName;
+            try {
+                if (name == null || !String(name).trim()) localStorage.removeItem(ASSISTANT_NAME_KEY);
+                else localStorage.setItem(ASSISTANT_NAME_KEY, String(name).trim());
+            } catch (e) { /* 隐私模式忽略 */ }
+        }).fail(function () { /* 拉取失败保持默认名，不打扰用户 */ });
+    };
+    if (typeof boot === 'function') boot(fetchIt); else fetchIt();
+}
+syncAssistantNameFromServer();
+
+/* 【同 run 续段省略身份头】ask（问答记录）/ 插话 / HITL 审批都会在 run 尚未结束时
+   清 currentBubbleEl 并另起新 assistant 行（resetStreamState / appendSteerNote）。
+   旧实现每条新行都带「头像 + 名称」身份头——同一 run 里每插话/作答/审批一次就
+   多冒一个 GWork 头（用户 2026-11 报障「ask/插话/审批每次都显示 Gwork 图标名称」）。
+   【判定单位不是 runId】按 runId 查旧行对 steer（插话）成立，但对 ask / HITL 不成立：
+   帧日志实证（work-mw4m8qep）：挂起 done（run-18ba47b8）→ 作答 → 恢复段带【全新 runId】
+   （run-fd81760b；HITL 同理 → run-717f870a）。按 runId 查旧行查不到 → 恢复段新气泡
+   仍带 GWork 头，报障只修了一半。故判定单位 = 【最近一条真实用户消息行】：
+   自上一条 .msg-row.user（不含 .steer-note 插话行——它不算打断）之后是否已有
+   assistant 行。用户行是天然的轮界：多轮对话每轮用户行后第一条 assistant 行带头；
+   插话/QA 记录/恢复段/HITL 续段都发生在同一用户轮内 → 省头。
+   rerun 兼容：rerun 按旧 runId 整批删除 assistant 行（含带头行）→ 用户行后已无
+   assistant 行 → 新回复照常带头。
+   无用户行（会话首条/异常/手工触发）按旧行为无条件带头——宁可多显示，
+   不可丢头。回放同规则：回放按序落行，同轮续段行在用户行之后自然省头。 */
+function assistantRowShouldShowHead(sess) {
+    var root = renderRoot(sess);
+    if (!root || !root.querySelector) return true;
+    try {
+        /* 最近一条【真实用户消息行】（.steer-note 插话行不算打断）：从它之后找
+           assistant 行。不存在用户行（会话首条）→ 无从判定续段，带头。 */
+        var rows = root.querySelectorAll('.msg-row');
+        var lastUser = -1;
+        for (var i = 0; i < rows.length; i++) {
+            var r = rows[i];
+            if (!r.classList || !r.classList.contains) continue;
+            if (r.classList.contains('user') && !r.classList.contains('steer-note')) { lastUser = i; continue; }
+            if (r.classList.contains('assistant')) continue;
+            /* 非用户非 assistant 的行（system-notice 等）不参与轮界判定，跳过 */
+        }
+        if (lastUser < 0) return true;
+        for (var j = lastUser + 1; j < rows.length; j++) {
+            var rj = rows[j];
+            if (rj.classList && rj.classList.contains && rj.classList.contains('assistant')) return false;
+        }
+        return true;
+    } catch (e) { return true; }
+}
+
 function ensureAssistantBubble(sess) {
     if (!sess.currentBubbleEl) {
         removeThinking(sess);
-        var row = $('<div>').addClass('msg-row assistant')[0];
+        /* agent-live = 「本轮正在跑」的运行态标记。CSS 据此把思考/工具/子代理卡
+           渲染成扁平语义轨迹（◇/$/▸ 前缀、去卡片边框底色）并强调当前活动行；
+           finishStream 收口时摘除、再按轮折叠成摘要。
+           回放（sess._replaying）不挂：历史消息没有「正在跑」的语义，
+           其形态由 .msg-row.assistant 常驻规则 + 按轮 Compact 负责。 */
+        var row = $('<div>').addClass('msg-row assistant' + (sess._replaying ? '' : ' agent-live'))[0];
         // 存储当前 runId，用于后续删除同一运行的消息
         if (sess.currentRunId) {
             row.setAttribute('data-run-id', sess.currentRunId);
         }
-        row.innerHTML = '<div class="msg-bubble"><div class="md-content"></div>'
+        // 同 run 续段（插话/问答/审批后恢复）不重复身份头，见 assistantRowShouldShowHead
+        var showHead = assistantRowShouldShowHead(sess);
+        if (!showHead) row.classList.add('no-identity-head');
+        row.innerHTML = (showHead ? assistantIdentityHeaderHtml() : '')
+            + '<div class="msg-bubble"><div class="md-content"></div>'
             + '<div class="msg-meta-row">'
             + '<div class="msg-time" style="display:none"></div>'
             + '</div>'
@@ -615,6 +726,15 @@ function ensureAssistantBubble(sess) {
             + '</div></div>';
         $(renderRoot(sess)).append(row);
         sess.currentBubbleEl = $(row).find('.md-content')[0];
+        /* 初始正文容器同样要盖插入序号。
+           它是 row.innerHTML 直接生成的，不经过 insertBeforeActions，若不补戳就没有
+           data-ins-seq —— 而回滚逻辑对「无序号 = 来源不明」一律豁免（宁可留重复也不敢
+           误删）。后果正是 turn 的<b>第一个</b>文本块永远清不掉：流中断重传后，半截答案
+           留在气泡里，新答案又追加一遍，用户看到同一句话出现两次。 */
+        if (sess.currentBubbleEl && sess.currentBubbleEl.setAttribute) {
+            sess._insSeq = (sess._insSeq || 0) + 1;
+            sess.currentBubbleEl.setAttribute('data-ins-seq', String(sess._insSeq));
+        }
         var copyBtn = $(row).find('.copy-btn')[0];
         // 复制目标为「最终答案」：统一从 .md-content 的 data-md-raw 读取。
         // 历史消息与流式结束后后端写入的最终答案都带该属性；流式接收过程中不写，故复制不到中间片段。
@@ -677,8 +797,10 @@ function ensureAssistantBubble(sess) {
         // 非流式（历史加载）保持原有显示逻辑。
         if (sess.isStreaming) {
             $(row).find('.msg-actions').hide();
-            // 流式中提前创建常驻的内联等待指示器（默认不可见但占位），避免后续显隐造成跳动。
-            ensureInlineThinking(sess);
+            // 【code review 修复 2026-11-24】此处原调 ensureInlineThinking「提前占位」，
+            // 但指示器已整体退役（showInlineThinking no-op 只清残留）：提前创建的元素
+            // 是 visibility:hidden 仍占高 ~35px 的幽灵行，收尾 purge 时整行移除 →
+            // 气泡高度塌陷，正是用户要消灭的「一跳一跳」。不再创建任何占位行。
         }
     }
     return sess.currentBubbleEl;
@@ -705,9 +827,12 @@ function createThinkingBlockEl(sess) {
          + '</span>'
          + '<span class="thinking-status-dot"></span>'
         + '</div>'
-        + '<div class="thinking-block-body"><div class="md-content"></div></div>';
+        /* 灰底内容块与工具输出同族（.thinking-inner-out ↔ .tool-plain-out）：
+           思考展开不再是无底色裸文本（2026-11 用户报「工具展开有阴影块，思考没有」）。 */
+        + '<div class="thinking-block-body"><div class="thinking-inner-out"><div class="md-content"></div></div></div>';
     $(block).find('.thinking-block-header').on('click', function() {
         $(block).toggleClass('expanded');
+        notifyBatchWindowResize(block);   // 思考卡体展开/收起同样触发批次窗重测
     });
     return block;
 }
@@ -923,7 +1048,13 @@ function ensureThinkingBlockCore(sess, h, opts) {
             // 重来（createStreamMd 的 !active 重置分支）。故新思考段落在同块体内的新 md-content：
             // 视觉上仍是一个思考块，上段内容保留在上、新段流式续在下。
             var reuseBody = $('<div>').addClass('md-content')[0];
-            if (h.thinkingBodyWrapEl) h.thinkingBodyWrapEl.appendChild(reuseBody);
+            /* 【code review 修复 2026-11】新段必须落进灰底块 .thinking-inner-out：
+               直接 append 到 wrap 会绕过灰底/34px 缩进层，第二段思考变裸文本贴左缘
+               （与首段形态分叉，正是用户报的「思考没有阴影块/缩进凸出」在复用路径回潮）。
+               旧历史块无 inner 层时回落 wrap（不改造历史 DOM）。 */
+            var reuseInner = h.thinkingBodyWrapEl
+                ? $(h.thinkingBodyWrapEl).find('.thinking-inner-out')[0] : null;
+            if (h.thinkingBodyWrapEl) (reuseInner || h.thinkingBodyWrapEl).appendChild(reuseBody);
             h.thinkingBodyMdEl = reuseBody;
             h.thinkingBuffer = '';
             resetThinkingPreview(h);   // 与上一行严格配对：复用块重开一段思考，跟踪器必须归零
@@ -1059,6 +1190,18 @@ function appendBodyContentCore(sess, h, text, append, ensureEl) {
     var clean = clearThinkTags(text);
     h.reasonBuffer = append ? (h.reasonBuffer || '') + clean : clean;
     var el = ensureEl();
+    /* 【Qoder 多折叠组】主线路正文到达 = 批次边界：把当前运行批次收口（成员折叠成
+        「执行工具 N 次」组），随后工具/思考行开新盖子。一轮里因此并列存在多个折叠组，
+        组间夹着常驻可见的正文 —— 与 Qoder 截图形态一致（用户 2026-11 指定）。
+        【方案A · 卡内同构】子代理卡体内的正文到达同样是卡内批次的边界：closeBatch
+        传 st（智能体状态）收口该卡体内部的 running 盖子（不动主气泡批次）。
+        closeBatch 幂等（无运行盖子即 no-op）。 */
+    if (typeof window !== 'undefined' && window.GourdTurnBatch) {
+        try {
+            if (h === sess) window.GourdTurnBatch.closeBatch(sess);
+            else if (h.bodyEl) window.GourdTurnBatch.closeBatch(sess, null, h);
+        } catch (e) { /* 展示增强 */ }
+    }
     // 增量渲染：stable 块只追加一次，tail 每帧重建（极小），消除逐帧全量 innerHTML 重建引起的闪烁
     var r = getStreamMd(el);
     r.afterRender = function() {
@@ -1131,7 +1274,7 @@ function ensureThinkingBlock(sess) {
     ensureAssistantBubble(sess);
     return ensureThinkingBlockCore(sess, sess, {
         placeFresh: function(el) { insertBeforeActions(sess, el); },
-        placeBlock: function(block, pointerEl) { $(pointerEl).before(block); }
+        placeBlock: function(block, pointerEl) { $(pointerEl).before(block); noteBatchInsert(sess, block); }
     });
 }
 
@@ -1145,9 +1288,19 @@ function setAssistantTime(sess, ts) {
 }
 
 function insertBeforeActions(sess, el) {
+    /* 插入序号：本函数是主气泡所有块级内容（正文/思考块/工具卡/徽标）的唯一插入漏斗，
+       故在这里给每个块盖一个会话内单调递增的章，就能回答「这个块是哪一次尝试产出的」。
+       用途只有一个——流中断重传时精确回滚（见 discardPartialRetryDom）。
+       不能用 data-run-id 代替：一个 run 只有一个 .msg-bubble，里面装着该 run 所有 turn
+       的块，而中断只作废<b>当前 turn</b>；按 runId 删会连带抹掉本 run 早前已执行完的
+       工具卡（写过的文件、跑过的测试），那是必须保留的证据。 */
+    if (sess && el && el.setAttribute) {
+        sess._insSeq = (sess._insSeq || 0) + 1;
+        el.setAttribute('data-ins-seq', String(sess._insSeq));
+    }
     // 若存在常驻的内联等待指示器，新内容应插在其上方，保证指示器始终在气泡底部。
     var anchor = (sess.inlineThinkingEl && sess.inlineThinkingEl.parentNode) ? sess.inlineThinkingEl : null;
-    if (anchor) { $(anchor).before(el); return; }
+    if (anchor) { $(anchor).before(el); noteBatchInsert(sess, el); return; }
     /* currentBubbleEl 兜底重建：空闲态（finishStream 后）与回放态（replaySession 遇 done 后
        都会 resetStreamState 把 currentBubbleEl 置 null）下，任何需要插入内容块的调用方
        （appendAgentBadge 建智能体卡、问答记录、HITL 卡等）都会在下一行裸解引用
@@ -1162,6 +1315,7 @@ function insertBeforeActions(sess, el) {
         if (!sess.currentBubbleEl || !sess.currentBubbleEl.parentNode) {
             var fallbackRoot = (typeof renderRoot === 'function') ? renderRoot(sess) : sess.container;
             if (fallbackRoot) $(fallbackRoot).append(el);
+            noteBatchInsert(sess, el);
             return;
         }
     }
@@ -1169,8 +1323,95 @@ function insertBeforeActions(sess, el) {
     // 正文一律累积在 meta 行之上。（曾有 bug：meta 行停在首个内容块之后，被后续流式内容顶到消息顶部。）
     var bubble = sess.currentBubbleEl.parentNode;
     var footer = $(bubble).find('.msg-meta-row').first()[0] || $(bubble).find('.msg-actions').first()[0];
-    if (footer) $(footer).before(el);
+    /* 【2026-11 用户报障「文件变更卡怎么跑到思考上面了」】变更卡宿主（.fch-host）
+       也钉在页脚之前：run 收口前落卡（挂起段/迟到帧）后，恢复段的正文/思考/工具若仍
+       以页脚为锚会插到宿主【后面】，卡片就压在过程区上方。新内容一律插到宿主【之前】
+       （宿主恒在内容流末尾、页脚之前），与 placeHostInBubble 的「正文之后」锚定配合，
+       恢复「过程 → 正文 → 变更卡 → 页脚」时序。多宿主（同 run 缝合）取首个。 */
+    var fchHost = null;
+    if (bubble.children) {
+        for (var fh = 0; fh < bubble.children.length; fh++) {
+            var fc = bubble.children[fh];
+            if (fc && fc.classList && fc.classList.contains && fc.classList.contains('fch-host')) { fchHost = fc; break; }
+        }
+    }
+    var refNode = fchHost || footer;
+    if (refNode) $(refNode).before(el);
     else $(bubble).append(el);
+    noteBatchInsert(sess, el);
+}
+
+/* 运行态批次折叠接线（app-turn-display.js 统一模块）：过程行落 DOM 后归入当前批次盖子。
+   【Qoder 多折叠组】智能体卡（.agent-card）是批次边界：落 DOM 即把当前运行批次收口
+   （成员折叠成「执行工具 N 次」组），其后的过程行开新盖子。
+   【空壳不是边界 · code review 修复】.md-content 在这里【不】收口：本接线点收到的
+   md 全部是 advanceBodyPointer 指针推进插的【空壳】（真正文 chunk 写进既有壳、不走
+   insertBeforeActions），每个 action_end 都推进一次指针 —— 若空壳也收口，一轮 4 个
+   工具会碎成 4 个「执行工具 1 次」单成员组（实证复现），正是用户报的碎组形态。
+   真正文到达的收口由 appendBodyContentCore 的 closeBatch 负责（那里才有真文本）。
+   纯展示增强：模块缺失 / 任何异常都不得影响主渲染链路（与 turn-compact 接线同口径）。 */
+function noteBatchInsert(sess, el) {
+    try {
+        if (typeof window !== 'undefined' && window.GourdTurnBatch) {
+            if (el && el.classList) {
+                if (el.classList.contains('md-content')) return;   // 指针空壳：非边界，不收口
+                /* 【交互卡边界 · 2026-11 用户报障「只要展示 HITL/智能体这两个，页面就会错乱」】
+                   待审批 HITL 卡带 .tool-card 类，若走下方 noteProcessInsert 会被当成
+                   过程行收进批次成员 → 批次收口时审批按钮随成员隐藏；问答记录同理被吞。
+                   二者是等用户拍板 / 已拍板的交互边界：收口当前运行批次、自身永不进成员，
+                   与 .agent-card 同口径（模块内 isInteractiveCard 单一判定源）。
+                   【codereview 修复】宿主判定必须与模块 noteProcessInsert 的白名单一致
+                   （msg-bubble + agent-card-body）：旧写法只认 msg-bubble，卡内待审批卡
+                   （子代理派发需授权工具）会在此提前 return，既不收口卡内 running 盖子、
+                   也不落到模块边界分支 = 静默失效。宿主校验整体下放给模块，不再本地复刻。 */
+                if (window.GourdTurnBatch.isInteractiveCard
+                        && window.GourdTurnBatch.isInteractiveCard(el)) {
+                    window.GourdTurnBatch.noteProcessInsert(sess, el);
+                    return;
+                }
+                if (el.classList.contains('agent-card')) {
+                    var bubble = el.parentNode;
+                    if (bubble && bubble.classList && bubble.classList.contains('msg-bubble')) {
+                        window.GourdTurnBatch.closeBatchFor(bubble);
+                    }
+                    return;
+                }
+            }
+            window.GourdTurnBatch.noteProcessInsert(sess, el);
+        }
+    } catch (e) { /* 展示增强失败静默 */ }
+}
+
+/* 交互卡（待审批 HITL 卡 / 问答记录）落 DOM 后的批次边界接线：与 noteBatchInsert 的
+   交互卡分支同一语义，供【接管骨架卡】等不走 insertBeforeActions 漏斗的插入路径调用
+   （appendHitlCard 接管分支：节点早已在消息流里，漏斗不会再见它一次）。
+   纯展示增强：模块缺失 / 异常一律静默，绝不影响主渲染链路。 */
+function noteInteractiveInsert(sess, el) {
+    try {
+        if (typeof window !== 'undefined' && window.GourdTurnBatch
+                && window.GourdTurnBatch.isInteractiveCard
+                && window.GourdTurnBatch.isInteractiveCard(el)) {
+            noteBatchInsert(sess, el);
+        }
+    } catch (e) { /* 展示增强失败静默 */ }
+}
+
+/* 【放行/恢复后重算折叠 · 2026-11 codereview 修复】hitl-pending 的【每次】增删都要调一次。
+   卡内穿透例外（模块 hasInteractiveCardInside）依赖该类名存在：
+   · 摘除（批准 / 拒绝 / hitl_released 放行 / 切完全访问兜底）→ 例外失效，所在轮该重新折叠，
+     但 classifyChildren 是纯函数、DOM 标记不会自动跟随 → 旧实现留下【永久常驻】的智能体卡
+     与同轮其余过程卡形态分叉（探针实测 CONFIRMED：实时不折、刷新走回放才折）；
+   · 加回（提交失败 restoreHitlCardPending）→ 例外重新成立，若之前已折则审批按钮仍被
+     display:none 藏住，用户点不到 = 任务卡死。
+   模块侧 refreshInteractiveBoundary 自带保守门禁：只重算【已折叠过】的气泡，
+   不会给未折叠气泡凭空插按钮。纯展示增强：模块缺失 / 异常一律静默。 */
+function refreshHitlFoldBoundary(card) {
+    try {
+        if (typeof window !== 'undefined' && window.GourdTurnCompact
+                && window.GourdTurnCompact.refreshInteractiveBoundary) {
+            window.GourdTurnCompact.refreshInteractiveBoundary(card);
+        }
+    } catch (e) { /* 展示增强失败静默 */ }
 }
 
 function finishThinkingBlock(sess) {
@@ -1796,6 +2037,7 @@ function ensureBatchGroup(sess, meta, insertAgentBody) {
     if (insertAgentBody) {
         $(insertAgentBody).append(group);
         followAgentCardBody(insertAgentBody, findAgentStateByBody(sess, insertAgentBody));
+        noteBatchInsert(sess, group);
     } else {
         insertBeforeActions(sess, group);
     }
@@ -1942,6 +2184,7 @@ function appendActionDraftChunk(sess, toolName, toolTitle, actionId, args) {
     if (insertAgentBody) {
         $(insertAgentBody).append(card);
         followAgentCardBody(insertAgentBody, findAgentStateByBody(sess, insertAgentBody));
+        noteBatchInsert(sess, card);
     } else {
         insertBeforeActions(sess, card);
     }
@@ -2146,6 +2389,7 @@ function appendActionStartChunk(sess, toolName, args, toolTitle, actionId, agent
         } else if (insertAgentBody) {
             $(insertAgentBody).append(card);
             followAgentCardBody(insertAgentBody, findAgentStateByBody(sess, insertAgentBody));
+            noteBatchInsert(sess, card);
         } else {
             insertBeforeActions(sess, card);
         }
@@ -2156,6 +2400,7 @@ function appendActionStartChunk(sess, toolName, args, toolTitle, actionId, agent
         if (insertAgentBody) {
             $(insertAgentBody).append(card);
             followAgentCardBody(insertAgentBody, findAgentStateByBody(sess, insertAgentBody));
+            noteBatchInsert(sess, card);
         } else {
             insertBeforeActions(sess, card);
         }
@@ -2320,7 +2565,27 @@ function bindToolCardToggle(card) {
     $(card).find('.tool-card-header').on('click', function() {
         $(card).toggleClass('expanded');
         ensureToolCardBody(card);
+        /* 【滚动窗重测】卡体展开/收起改变成员高度：closed 批次窗没有流式触发源，
+           不补这一次重测，clip/overflow/负 margin 全按旧几何裁（内容被裁/重叠）。 */
+        notifyBatchWindowResize(card);
     });
+}
+
+/* 成员高度变化（卡体展开/收起）后通知所属批次窗重测。
+   盖子 = 成员上方最近的 .turn-batch-header 直接兄弟；无盖子/无窗时 no-op。 */
+function notifyBatchWindowResize(el) {
+    try {
+        if (!el || !el.parentNode || typeof window === 'undefined' || !window.GourdTurnDisplay) return;
+        var kids = el.parentNode.children || [];
+        var idx = Array.prototype.indexOf.call(kids, el);
+        for (var i = idx - 1; i >= 0; i--) {
+            var k = kids[i];
+            if (k.classList && k.classList.contains('turn-batch-header')) {
+                if (k.classList.contains('turn-batch-windowed')) window.GourdTurnDisplay.refreshWindow(k, false);
+                return;
+            }
+        }
+    } catch (e) { /* 展示增强失败静默 */ }
 }
 
 /* action_end 各配对/兜底路径共用：展示模型、参数、头部元数据与结果体一次回填。 */
@@ -2539,6 +2804,10 @@ function appendErrorChunk(sess, text) {
     ensureAssistantBubble(sess);
     var errEl = $('<div>').addClass('chunk-error').text(text)[0];
     insertBeforeActions(sess, errEl);
+    // 错误到达同为批次边界：失败证据留在批次外保持可见，批次自身收口折叠
+    if (typeof window !== 'undefined' && window.GourdTurnBatch) {
+        try { window.GourdTurnBatch.closeBatch(sess); } catch (e) { /* 展示增强 */ }
+    }
     if (sess.sessionId === activeSessionId) scrollToBottom();
 }
 
@@ -2622,20 +2891,126 @@ function clearRetryChunk(sess) {
     }
 }
 
-/* ===== Trace Badge =====
-   只展示耗时。token 用量（输入/缓存/输出）故意不在此展示：
-   本行数据源为 trace.getMetrics()，是「本轮累计」口径（所有 ReAct 迭代求和）；
-   而工具栏的上下文进度环是「本次推理」口径（每轮 onReasonEnd 覆盖一次）。
-   两者分母不同，数字天然对不上（尤其缓存命中率：累计值含首次冷缓存，按输入量加权后必然低于末次），
-   并列展示会让用户误以为统计出错。故用量统一只在进度环展示一处。
-   例外：outputTokens 仅作为 TPS 的分子参与计算，不以绝对量形式显示，不构成口径歧义。 */
+/**
+ * 流中断重传：丢弃本次尝试已经渲染出来的半成品 DOM。
+ *
+ * <p><b>为什么必须有这一步</b>：后端 transport 层重发请求时，react 会清掉自己的累加器
+ * （content_buf / tool_calls / args_progress），但那些 delta <b>早已下发到前端并渲染成
+ * DOM</b>。只清引擎状态的话，屏幕上是「半截答案 + 重传后又追加一遍完整答案」，外加几张
+ * 参数永远不会补齐的骨架工具卡。前后端必须对「这次尝试没发生过」达成一致。</p>
+ *
+ * <p><b>判据 = 插入序号 &gt; 已提交水位</b>。insertBeforeActions 给每个块盖了会话内单调
+ * 递增的 data-ins-seq，advanceCommitWatermark 在不可逆帧（action_end / hitl_released /
+ * question_answered / context_size / trace）上把水位推到当前最大序号。序号在水位之上的
+ * 块就是「本次尝试产出、且尚未产生任何真实副作用」的部分，可以安全删。</p>
+ *
+ * <p><b>刻意豁免的三类</b>：</p>
+ * <ul>
+ *   <li><b>无序号的块</b>：来源不明（历史回放、旧数据、其它路径直插）。误删的代价远大于
+ *       留一个重复块，故一律放行。</li>
+ *   <li><b>.agent-card</b>：子代理容器由 agent_start 创建，而 agent_start 只在工具执行
+ *       阶段发出 —— 中断发生在 LLM 流式阶段，所以现存卡片必然属于<b>上一 turn</b> 或
+ *       仍在跑的<b>后台子代理</b>。删掉等于把活跃后台任务的可视载体和已落盘的产出抹掉。</li>
+ *   <li><b>页脚（.msg-meta-row / .msg-actions）</b>：气泡骨架，不是内容。</li>
+ * </ul>
+ *
+ * @param {SessionState} sess - 会话状态
+ * @returns {number} 实际移除的块数（0 表示无需回滚）
+ */
+function discardPartialRetryDom(sess) {
+    if (!sess) return 0;
+    var watermark = sess._commitSeq || 0;
+    if (!(sess._insSeq > 0)) return 0;   // 从未盖过序号：无判据，不动 DOM
 
-/** HTML 转义（与 appendTraceBadge 内部 esc 同口径，供耗时详情卡复用）。 */
-function traceEsc(s) {
-    return String(s).replace(/[&<>"]/g, function (c) {
-        return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c];
-    });
+    var row = sess.currentBubbleEl ? $(sess.currentBubbleEl).closest('.msg-row')[0] : null;
+    if (!row) {
+        // 指针已丢：退回容器内最后一个助手气泡
+        row = $(renderRoot(sess)).find('.msg-row.assistant').last()[0] || null;
+    }
+    if (!row) return 0;
+    var bubble = $(row).find('.msg-bubble').last()[0];
+    if (!bubble) return 0;
+
+    /* 先收敛，再摘除：thinking-block 挂着 setInterval 计时器，.md-content 挂着增量渲染器
+       （其 tail 区有未提交的挂起帧）。直接 remove 会让计时器与 rAF 永久失联，表现为
+       「已消失的思考块还在偷偷计时、内存不降」。 */
+    try { finishThinkingBlock(sess); } catch (e) { /* 收敛失败不阻断回滚 */ }
+    try { finishPendingTool(sess); } catch (e) {}
+    try { disposeSessionStreamMd(sess); } catch (e) {}
+
+    var removed = 0;
+    var children = $(bubble).children().toArray();
+    for (var i = 0; i < children.length; i++) {
+        var el = children[i];
+        if (!el || !el.getAttribute) continue;
+        if ($(el).is('.msg-meta-row, .msg-actions')) continue;      // 页脚骨架
+        if ($(el).is('.agent-card')) continue;                      // 子代理容器（见上）
+        var seqAttr = el.getAttribute('data-ins-seq');
+        if (!seqAttr) continue;                                     // 无序号 → 豁免
+        var seq = parseInt(seqAttr, 10);
+        if (!isFinite(seq) || seq <= watermark) continue;           // 已提交，保留
+        try {
+            if (el._streamMd && el._streamMd.dispose) el._streamMd.dispose();
+        } catch (e) {}
+        if (el.parentNode) el.parentNode.removeChild(el);
+        removed++;
+    }
+
+    /* 回滚后批次盖子可能失去全部成员（成员序号在水位之上被删）：空盖子必须移除，
+       否则屏幕上留一个「正在执行中 · Ns」却无任何内容的孤儿盖子。 */
+    if (removed > 0 && typeof window !== 'undefined' && window.GourdTurnBatch) {
+        try { window.GourdTurnBatch.sweepOrphanBatchHeaders(bubble); } catch (e) { /* 展示增强 */ }
+    }
+
+    if (removed > 0) {
+        clearRetryChunk(sess);
+        /* 登记表里指向已摘除节点的引用必须清掉，否则后续 action_end 回填会写进游离节点
+           （界面上「工具卡永远停在 loading」），且这些引用会钉住整棵已删子树不释放。 */
+        var k;
+        if (sess.toolCardsById) {
+            for (k in sess.toolCardsById) {
+                if (!Object.prototype.hasOwnProperty.call(sess.toolCardsById, k)) continue;
+                var c = sess.toolCardsById[k];
+                if (!c || !c.parentNode) delete sess.toolCardsById[k];
+            }
+        }
+        if (sess.toolBatchesById) {
+            for (k in sess.toolBatchesById) {
+                if (!Object.prototype.hasOwnProperty.call(sess.toolBatchesById, k)) continue;
+                var b = sess.toolBatchesById[k];
+                if (!b || !b.groupEl || !b.groupEl.parentNode) delete sess.toolBatchesById[k];
+            }
+        }
+        if (sess.pendingToolCard && !sess.pendingToolCard.parentNode) sess.pendingToolCard = null;
+        if (sess.approvedToolCard && !sess.approvedToolCard.parentNode) sess.approvedToolCard = null;
+        if (sess.thinkingBlockEl && !sess.thinkingBlockEl.parentNode) sess.thinkingBlockEl = null;
+        if (sess.retryEl && !sess.retryEl.parentNode) sess.retryEl = null;
+
+        /* 文本缓冲区与指针一并归零：引擎侧 content_buf 已清空，前端若留着 reasonBuffer，
+           下一次增量渲染会把旧尾巴重新提交上去。 */
+        sess.reasonBuffer = '';
+        sess.thinkingBuffer = '';
+        sess.thinkingBodyMdEl = null;
+        sess.thinkingBodyWrapEl = null;
+        sess._lastFinishedThinkingBlockEl = null;
+
+        /* 正文指针若被删掉，必须在<b>原气泡内</b>重建一个空容器。
+           置 null 会让 ensureAssistantBubble 另起一个 .msg-row —— 同一 run 出现两个气泡。 */
+        if (!sess.currentBubbleEl || !sess.currentBubbleEl.parentNode) {
+            var fresh = $('<div>').addClass('md-content')[0];
+            insertBeforeActions(sess, fresh);   // 顺带盖上新序号
+            sess.currentBubbleEl = fresh;
+        }
+        if (sess.sessionId === activeSessionId) scrollToBottom();
+    }
+    return removed;
 }
+
+/* ===== Trace Badge =====
+    只展示耗时（一个时钟图标 + 文本）。用户已要求把 TPS / 首 Token 延迟 / 总用时
+    统一收进底部「上下文用量」明细卡（app-context.js 的 buildContextRows），
+    这里不再挂 hover/点击详情弹层，也不再计算速率。token 用量同理只在进度环展示一处
+    （累计口径 vs 本次推理口径不同，并列会误以为统计错）。 */
 
 /**
  * 耗时徽标文本。
@@ -2655,74 +3030,6 @@ function traceElapsedText(chunk, fmtSec) {
     return null;
 }
 
-/**
- * 输出速度（TPS）文本。
- * <p><b>口径</b>：{@code generatedTokens / generationMs}——两个值由后端成对产出，
- * 统计范围严格一致：只计模型真正在解码的时间与那些解码段产出的 token，
- * 工具执行、审批等待、子代理调度均不在内。所以这是真实解码速度，可用于模型间横向比较。</p>
- * <p><b>为何不用 outputTokens 与 elapsedMs</b>：前者是整轮累计（还会并入子代理产出），
- * 后者含大量非解码时间，二者相除既不是解码速度也不是可比的吞吐量。</p>
- * <p><b>缺失即不展示</b>：旧历史帧没有这对字段，此时返回 null 让该行整行省略。
- * 绝不退回用总时长顶替——那会把一个口径不同的数字伪装成同一个指标。</p>
- * @param {Object} chunk - trace 帧
- * @returns {?string} 数据不足时返回 null
- */
-function traceTpsText(chunk) {
-    var tokens = chunk.generatedTokens;
-    var genMs = chunk.generationMs;
-    if (tokens == null || !(tokens > 0)) return null;
-    if (genMs == null || !(genMs > 0)) return null;
-
-    var tps = tokens / (genMs / 1000);
-    if (!isFinite(tps) || !(tps > 0)) return null;
-
-    var num = tps >= 100 ? Math.round(tps) : Math.round(tps * 10) / 10;
-    return GourdI18n.t('chat.tps_unit').replace('{n}', num);
-}
-
-/**
- * 首 Token 延迟文本（不足 1 秒用 ms，否则用 2 位小数的秒）。
- * <p>该字段本次改动才新增，旧历史消息恒为 null，此时该行整行省略而非显示 0。</p>
- * @param {Object} chunk - trace 帧
- * @returns {?string} 无值时返回 null
- */
-function traceTtftText(chunk) {
-    if (chunk.ttftMs == null || !(chunk.ttftMs >= 0)) return null;
-    var ms = chunk.ttftMs;
-    if (ms < 1000) return Math.round(ms) + 'ms';
-    return (Math.round(ms / 10) / 100).toFixed(2) + 's';
-}
-
-/**
- * 构建耗时详情卡 HTML（悬停/聚焦 trace 徽标展开）。
- * <p><b>全部用 span 而非 div</b>：宿主 .trace-item 是 span，内嵌 div 会被 HTML 解析器
- * 提前断开 span，卡片会被抛出到徽标外面；块级布局全靠 CSS display 达成。</p>
- * <p>仅有总用时一项（TPS 与 TTFT 都缺失，如旧历史帧）时返回空串，
- * 调用方会退回原生 title 提示——只有一行与徽标重复的卡片没有信息增量。</p>
- * @param {Object} chunk - trace 帧
- * @param {string} elapsedTxt - 已格式化的总用时文本
- * @returns {string} 卡片 HTML，不值得展示时为空串
- */
-function buildTracePop(chunk, elapsedTxt) {
-    function row(label, value) {
-        return '<span class="trace-pop-row">'
-            + '<span class="trace-pop-label">' + traceEsc(label) + '</span>'
-            + '<span class="trace-pop-value">' + traceEsc(value) + '</span>'
-            + '</span>';
-    }
-    var tps = traceTpsText(chunk);
-    var ttft = traceTtftText(chunk);
-    if (!tps && !ttft) return '';
-
-    var html = '<span class="trace-pop">'
-        + '<span class="trace-pop-title">' + TRACE_TIME_SVG
-        + traceEsc(GourdI18n.t('chat.turn_timing')) + '</span>'
-        + row(GourdI18n.t('chat.elapsed_total'), elapsedTxt);
-    if (tps) html += row(GourdI18n.t('chat.output_tps'), tps);
-    if (ttft) html += row(GourdI18n.t('chat.ttft'), ttft);
-    return html + '</span>';
-}
-
 function appendTraceBadge(sess, chunk) {
     ensureAssistantBubble(sess);
     // 后端携带的最终答案为权威复制源，写到当前 .md-content 的 data-md-raw（与历史消息统一属性名），供复制按钮读取。
@@ -2737,29 +3044,17 @@ function appendTraceBadge(sess, chunk) {
         if (s >= 60) { var m = Math.floor(s / 60), r = s % 60; return r > 0 ? m + 'min ' + r + 's' : m + 'min'; }
         return s + 's';
     }
-    // 图标化：以小图标替代“耗时”文字标签，节省横向空间；悬停/点击展开耗时详情卡承载完整语义
     function esc(s) { return String(s).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); }
-    /**
-     * 渲染一个耗时徽标。
-     * <p>有详情卡时做成可聚焦的 disclosure（支持键盘与触屏）；无卡时退回纯展示 + 原生 title。
-     * 属性按数组拼接而非在三元表达式里接半截引号：后者漏一个引号就会静默生成破碎 HTML。</p>
-     */
-    function item(icon, val, pop) {
-        var cls = 'trace-item' + (pop ? ' has-pop' : '');
-        var attrs = ' class="' + cls + '"';
-        if (pop) {
-            // 触屏与读屏软件依赖显式语义：纯 CSS :hover 在触屏上不可靠
-            attrs += ' tabindex="0" role="button" aria-expanded="false"'
-                + ' aria-label="' + esc(GourdI18n.t('chat.turn_timing')) + '"';
-        } else {
-            attrs += ' title="' + esc(GourdI18n.t('chat.elapsed_time')) + '"';
-        }
-        return '<span' + attrs + '><span class="trace-ic" aria-hidden="true">' + icon + '</span>'
-            + esc(val) + (pop || '') + '</span>';
+    /** 纯展示的耗时徽标（时钟图标 + 文本）。TPS / TTFT / 总用时明细已移到底部用量卡，
+     *  这里不再是可展开的 disclosure，仅保留一个带原生 title 的静态徽标。 */
+    function item(icon, val) {
+        return '<span class="trace-item" title="' + esc(GourdI18n.t('chat.elapsed_time')) + '">'
+            + '<span class="trace-ic" aria-hidden="true">' + icon + '</span>'
+            + esc(val) + '</span>';
     }
     var parts = [];
     var elapsedTxt = traceElapsedText(chunk, fmtSec);
-    if (elapsedTxt != null) parts.push(item(TRACE_TIME_SVG, elapsedTxt, buildTracePop(chunk, elapsedTxt)));
+    if (elapsedTxt != null) parts.push(item(TRACE_TIME_SVG, elapsedTxt));
     if (parts.length === 0) return;
 
     // 创建或更新 trace 元素
@@ -2778,43 +3073,18 @@ function appendTraceBadge(sess, chunk) {
         var badge = $('<span>').addClass('msg-trace');
         badge[0].innerHTML = parts.join('');
         $(metaRow).append(badge[0]);
+        traceEl = badge[0];
+    }
+    // data 属性挂在徽标容器上（innerHTML 重建不影响容器属性）；
+    // 重复回放时以最新帧覆盖，与 innerHTML 更新同口径。
+    if (traceEl && traceEl.setAttribute) {
+        var em = (chunk.elapsedMs != null && chunk.elapsedMs >= 0) ? String(Math.round(chunk.elapsedMs)) : null;
+        if (em != null) traceEl.setAttribute('data-elapsed-ms', em); else traceEl.removeAttribute('data-elapsed-ms');
+        traceEl.setAttribute('data-turn-status', chunk.stopped ? 'stopped' : (chunk.suspended ? 'suspended' : 'done'));
     }
 
     if (sess.sessionId === activeSessionId) scrollToBottom();
 }
-
-/* ---- 耗时详情卡：触屏/键盘开合 ----
-   纯 CSS :hover 在触屏设备上不可靠（需要二次点击且无法关闭），故叠加一层显式开合：
-   点击徽标切换 is-open，点击外部或按 Escape 关闭。所有绑定走 document 委托，
-   因为徽标会被流式渲染与历史回放反复重建，直接绑定会失效。 */
-function closeAllTracePops(exceptEl) {
-    $('.trace-item.has-pop.is-open').each(function () {
-        if (exceptEl && this === exceptEl) return;
-        $(this).removeClass('is-open').attr('aria-expanded', 'false');
-    });
-}
-
-$(document).on('click', '.trace-item.has-pop', function (e) {
-    // 卡片内部点击（如选中数值）不应触发关闭
-    if ($(e.target).closest('.trace-pop').length) return;
-    e.stopPropagation();
-    var willOpen = !$(this).hasClass('is-open');
-    closeAllTracePops(this);
-    $(this).toggleClass('is-open', willOpen).attr('aria-expanded', willOpen ? 'true' : 'false');
-});
-
-$(document).on('keydown', '.trace-item.has-pop', function (e) {
-    // 键盘可达：Enter/Space 开合，Escape 关闭并保留焦点
-    if (e.key === 'Enter' || e.key === ' ' || e.key === 'Spacebar') {
-        e.preventDefault();
-        $(this).trigger('click');
-    } else if (e.key === 'Escape') {
-        $(this).removeClass('is-open').attr('aria-expanded', 'false');
-    }
-});
-
-$(document).on('click', function () { closeAllTracePops(null); });
-$(document).on('keydown', function (e) { if (e.key === 'Escape') closeAllTracePops(null); });
 
 /* ===== Agent Card (子代理智能体卡片 — 容器型)
    结构：
@@ -2843,6 +3113,40 @@ function appendAgentResultSummary(cardEl, chunk) {
     if (typeof processMermaidBlocks === 'function') processMermaidBlocks(summaryMd);
     bodyEl.appendChild(summaryMd);
     return true;
+}
+
+/* 判定一个子代理 agent 帧是否属于「上一轮」（陈旧帧）。两处判据共用此出口，避免漂移：
+   1) app-streaming.js 的 agent_start/agent_end 分支（决定要不要做 finishThinkingBlock 收敛）；
+   2) 本文件的 appendAgentBadge 收卡分支（决定要不要重建主对话的正文指针）。
+
+   为何需要它：`args.background` 只描述帧的**来源**，而危险来自帧的**到达时机**。前台子代理的
+   委派跑在 detach 的任务上（tools/agent.rs 前台分支），父 run 被取消/结束后它仍能跑完收尾，
+   于是 agent_end 可能落在「用户已发下一条消息、新一轮正在流式输出」之后。此时 background=false，
+   旧判据放行，会把新 run 的思考块提前定稿、并重建正文指针清空 reasonBuffer（内容丢/被撕成两段）。
+
+   判据 = 该卡片建房时记下的 data-run-id 与**主代理当前活跃的 run**不同。
+
+   为何用 sess.activeRunId 而不是 sess.currentRunId（实际踩过的坑）：onWebChunk 会在进入
+   switch 之前无条件执行 `if (chunk.runId) sess.currentRunId = chunk.runId`
+   （app-streaming.js:838）——迟到帧一到，currentRunId 就被**它自己**覆写，两边恒相等，
+   判据永远失效（首版实现就因此完全没生效，被真实浏览器探针抓出）。
+   activeRunId 恰好被那段代码刻意排除在 agent 帧之外（:840-841 明确跳 agent_start/agent_end），
+   所以它才真正代表「主代理正在跑哪一轮」，能在迟到帧到达时保持 run-2 不变。
+
+   卡片不存在时返回 false（非陈旧）：agent_start 的常态就是「还没建房」，此时必须保持原有
+   行为；同理任一侧缺 run 信息（旧帧、历史回放）也返回 false，宁可按旧行为走也不误杀正常收敛。 */
+function isStaleAgentFrame(sess, args) {
+    var active = sess && (sess.activeRunId || sess.currentRunId);
+    if (!sess || !active || !args || !sess.agentCards) return false;
+    var agentName = args.agentName;
+    var agentDesc = (args.description != null) ? args.description : ((args.agentDesc != null) ? args.agentDesc : '');
+    var key = args.invocationId || (agentName ? agentName + ':' + agentDesc : '');
+    if (!key) return false;
+    var card = sess.agentCards[key];
+    if (!card && args.invocationId && agentName) card = sess.agentCards[agentName + ':' + agentDesc];
+    if (!card || !card.getAttribute) return false;
+    var cardRunId = card.getAttribute('data-run-id');
+    return !!(cardRunId && cardRunId !== active);
 }
 
 /* 后台子代理的进度心跳：把「当前正在调用哪个工具」写进卡片头部的一行状态文本。
@@ -2943,21 +3247,51 @@ function updateAgentProgress(sess, chunk) {
                 appendAgentResultSummary(existCard, chunk);
             }
 
+            /* 【必须先算再删登记】2778 行那个判据依赖 sess.agentCards 里还有这张卡，
+               而本段开头的 `delete sess.agentCards[agentId]` 会把登记拿掉。先删再算会让
+               helper 恒返回 false（卡片不存在→保守不拦）——整个修复静默失效，而所有单测
+               依然绿，因为单测不会走这段删除顺序。真实浏览器探针正是撞在这里：
+               trace 显示 isStaleAgentFrame 第一次 true、第二次 false，而决定重建的是第二次。 */
+            var agentCardStaleRun = isStaleAgentFrame(sess, chunk.args);
+
+            /* 【方案A · 卡内批次收口】agent_end 收卡前把卡体内 running 盖子定格为
+               closed（成员折叠成「执行工具 N 次」组）。与 purgeEmptyMdBlocks 同一
+               收口位（摘要追加之前），保证卡体终态 = 外部气泡终态同构。 */
+            try {
+                if (window.GourdTurnBatch) {
+                    window.GourdTurnBatch.closeBatchFor(endState ? endState.bodyEl : $(existCard).find('.agent-card-body')[0]);
+                }
+            } catch (e) { /* 展示增强 */ }
+
             $(existCard).removeClass('agent-card-streaming');
             delete sess.agentCards[agentId];
             if (sess.agentStates) delete sess.agentStates[agentId];
             
             /* 恢复 currentBubbleEl：在卡片后创建新的 md-content，让主代理后续正文不跑进智能体容器。
 
-               <b>后台帧必须跳过这一段</b>：前台子代理期间主代理阻塞在 ACTION 段，它的正文指针
-               确实被「借走」了（内容渲染进卡片），收卡后重建是必要的。而后台 agent_end 到达时，
-               主代理可能<b>正在往自己的 currentBubbleEl 里流式输出正文</b>（这正是 background 模式的
-               目的：主代理提交后继续推进）。此时重建指针会造成三重破坏：
+               【判据是「这张卡属于哪一轮」，不是「这个子代理是不是后台任务」。】
+               前台子代理期间主代理阻塞在 ACTION 段，它的正文指针确实被「借走」过（内容渲染进
+               卡片），收卡后重建是必要的；而后台 agent_end 到达时主代理可能正在往自己的
+               currentBubbleEl 里流式输出正文（这正是 background 模式的目的：提交后继续推进）。
+               此时重建指针会造成三重破坏：
                ① sess.reasonBuffer 被清空，已累积但尚未 flush 的增量丢失；
                ② getStreamMd 的增量渲染器仍绑在旧元素上，指针一换，下一个 text 帧会用新元素
                   另建一个渲染器实例，旧实例的未 flush 缓冲永久丢失；
-               ③ 主代理的一段连续正文被撕裂成「旧 div + 新 div」两块。 */
-            if ((chunk.args && chunk.args.background) !== true) {
+               ③ 主代理的一段连续正文被撕裂成「旧 div + 新 div」两块。
+
+               原有 `args.background` 判据描述的是帧的**来源**，而危险来自帧的**到达时机**：
+               前台子代理的委派跑在 detach 的任务上（tools/agent.rs 前台分支），父 run 被取消
+               后它仍会跑完收尾，于是 agent_end 可能落在「用户已发下一条消息、新一轮正在流式
+               输出」之后。此时 background=false，旧判据放行，正好在新正文上执行上面三步破坏。
+
+               改用「卡片所属 run ≠ 当前 run」判定陈旧帧（app-message.js:2754 建房时已把
+               sess.currentRunId 记到 data-run-id）：两轮 runId 不相等时，这个指针已经不属于
+               该卡片所在的轮次，后续正文不归它所有，跳过重建；两轮相等时（含正常的阻塞式
+               前台场景与一切无 run 信息的旧帧）保持原有行为。注意不能用 sess.isStreaming
+               当判据——正常前台场景下它恒为 true，会把必要的重建一并跳过。 */
+            /* agentCardStaleRun 已在删除登记之前算好（见上方注释）。切勿在此重算：
+               此处卡片登记已删，重算恒为 false，会让修复静默失效。 */
+            if ((chunk.args && chunk.args.background) !== true && !agentCardStaleRun) {
                 var newMdAfter = $('<div>').addClass('md-content')[0];
                 insertBeforeActions(sess, newMdAfter);
                 sess.currentBubbleEl = newMdAfter;
@@ -3163,17 +3497,19 @@ function advanceAgentBodyPointer(sess, st) {
     advanceBodyPointer(sess, st, function(el) { st.bodyEl.appendChild(el); });
 }
 
-/* 在子智能体块内创建 thinking-block（复用主线路核心，新思考块按时序落在已有内容之后） */
-function ensureAgentThinkingBlock(sess, st) {
-    if (!st) return;
-    ensureThinkingBlockCore(sess, st, {
-        placeFresh: function(el) { st.bodyEl.appendChild(el); },
-        placeBlock: function(block, pointerEl) {
-            if (pointerEl && pointerEl.parentNode) $(pointerEl).before(block);
-            else st.bodyEl.appendChild(block);
-        }
-    });
-}
+    /* 在子智能体块内创建 thinking-block（复用主线路核心，新思考块按时序落在已有内容之后）。
+       placeBlock 与主线路 1229 行同构：落 DOM 后接 noteBatchInsert 归入卡内批次盖子。 */
+    function ensureAgentThinkingBlock(sess, st) {
+        if (!st) return;
+        ensureThinkingBlockCore(sess, st, {
+            placeFresh: function(el) { st.bodyEl.appendChild(el); },
+            placeBlock: function(block, pointerEl) {
+                if (pointerEl && pointerEl.parentNode) $(pointerEl).before(block);
+                else st.bodyEl.appendChild(block);
+                noteBatchInsert(sess, block);
+            }
+        });
+    }
 
 /* 结束子智能体的 thinking-block。不传 st 时结束所有正打开的智能体思考块。 */
 function finishAgentThinkingBlock(sess, st) {
@@ -3255,52 +3591,39 @@ function applyPhaseLabel(el, phase) {
     $(el).attr('data-phase', phase || waitKey);
 }
 
-// 启动等待指示器：尚无气泡时，在消息区独立显示一行「圆点 + 相位文案 + Ns」
+// 启动等待指示器（历史职责，2026-11 用户拍板后已退役为 no-op）：
+// 用户报障「底部的那个思考中不要再展示了，整个页面总是一跳一跳的」——
+// 该行随首帧到达整行移除（margin-bottom 28px 一并消失）、间隙期又重建，
+// 消息流高度反复变化正是跳动根因。运行反馈已由三层常驻 UI 承担：
+//   · 停止按钮（setBtnStopMode）表达「任务在跑、可中断」；
+//   · 批次盖子「正在执行中 · Ns」秒级计时（app-turn-display.js）；
+//   · 过程行自身状态点（loading 闪烁 / done 常亮）。
+// 函数与 removeThinking / applyPhaseLabel 调用点全部保留：各收尾路径
+// （resetStreamState / finishStream / 会话切换）仍统一调用做幂等清理，
+// 历史会话里已落 DOM 的残留行也能被清掉；此处只是不再【新建】。
 function showThinking(sess) {
     removeThinking(sess);
-    sess.thinkingEl = $('<div>').addClass('thinking-row')[0];
-    sess.thinkingEl.innerHTML = '<div class="thinking-bubble">' + DOTS_HTML
-        + '<span class="thinking-phase-label"></span>'
-        + '<span class="thinking-timer-wrap">'
-        + '<span class="thinking-current-timer">0s</span>'
-        + '</span></div>';
-    $(renderRoot(sess)).append(sess.thinkingEl);
-    applyPhaseLabel(sess.thinkingEl, sess.phase);
-    var currentTimerSpan = $(sess.thinkingEl).find('.thinking-current-timer')[0];
-    startThinkingTimer(sess, 'thinkingTimerId', 'thinkingStartTime', currentTimerSpan);
-    if (sess.sessionId === activeSessionId) scrollToBottom(true);
 }
 function removeThinking(sess) {
     stopThinkingTimer(sess, 'thinkingTimerId', 'thinkingStartTime');
     if (sess.thinkingEl) { $(sess.thinkingEl).remove(); sess.thinkingEl = null; }
 }
 
-// 气泡内的间隙等待指示器（「圆点 + 相位文案 + Ns」）。
-// 关键：元素一旦创建便常驻气泡底部（actions 之前），不可见时用 visibility:hidden 占位，
-// 避免显隐导致的高度跳动；流式结束时再由 purgeInlineThinking 彻底移除。
+// 气泡内的间隙等待指示器（「圆点 + 相位文案 + Ns」）——2026-11 用户拍板整体退役：
+// 「底部的那个思考中不要再展示了，整个页面总是一跳一跳的」。即便有 visibility:hidden
+// 占位，行本身仍常驻占高、且 showInlineThinking 每次都触发 scrollToBottom，
+// 帧间隙反复显隐/置底正是跳动的另一半来源。showInlineThinking 已改为 no-op。
+// 【code review 修复 2026-11-24】ensureInlineThinking 原本还留着「创建隐藏占位行」
+// 的函数体且被 ensureAssistantBubble 流式分支调用——hidden-reserve 是
+// visibility:hidden（仍占高 ~35px），收尾 purge 整行移除时气泡塌陷，跳动复发。
+// 现函数体一并退役为 no-op：不建任何 DOM，历史残留由 remove/purge 统一清理。
 function ensureInlineThinking(sess) {
-    if (!sess.currentBubbleEl) return null;
-    if (sess.inlineThinkingEl && sess.inlineThinkingEl.parentNode) return sess.inlineThinkingEl;
-    var el = $('<div>').addClass('inline-thinking hidden-reserve')[0];
-    el.innerHTML = DOTS_HTML + '<span class="thinking-phase-label"></span>'
-        + '<span class="thinking-timer-wrap">'
-        + '<span class="thinking-current-timer">0s</span>'
-        + '</span>';
-    sess.inlineThinkingEl = el;
-    // 指示器固定在正文底部、页脚（meta 行/操作按钮）之上，使正文与用量行的相对顺序恒为「正文 → meta」。
-    var bubble = sess.currentBubbleEl.parentNode;
-    var footer = $(bubble).find('.msg-meta-row').first()[0] || $(bubble).find('.msg-actions').first()[0];
-    if (footer) $(footer).before(el);
-    return el;
+    return null;
 }
+// no-op（2026-11 用户拍板：底部「思考中」指示器退役，见 ensureInlineThinking 注释）。
+// 调用方 showPhaseIndicator 保留原相位判定逻辑，便于未来按需恢复；此处只清残留。
 function showInlineThinking(sess, phase) {
-    var el = ensureInlineThinking(sess);
-    if (!el) return;
-    $(el).removeClass('hidden-reserve');
-    applyPhaseLabel(el, phase || sess.phase);
-    var currentTimerSpan = $(el).find('.thinking-current-timer')[0];
-    startThinkingTimer(sess, 'inlineThinkingTimerId', 'inlineThinkingStartTime', currentTimerSpan);
-    if (sess.sessionId === activeSessionId) scrollToBottom();
+    removeInlineThinking(sess);
 }
 function removeInlineThinking(sess) {
     stopThinkingTimer(sess, 'inlineThinkingTimerId', 'inlineThinkingStartTime');
@@ -3321,22 +3644,6 @@ function purgeInlineThinking(sess) {
 /* 审批卡待定态的警示图标：appendHitlCard 初始渲染与 restoreHitlCardPending 失败恢复共用。 */
 var HITL_WARN_SVG = '<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" aria-hidden="true"><line x1="12" y1="6" x2="12" y2="14"/><line x1="12" y1="18" x2="12.01" y2="18"/></svg>';
 
-/* 【放行/恢复后重算折叠 · 2026-11 codereview 修复】与 desktop 侧同名函数完全一致。
-   hitl-pending 的【每次】增删都要调一次：卡内穿透例外（模块 hasInteractiveCardInside）
-   依赖该类名存在，而 classifyChildren 是纯函数 —— DOM 上的 data-turn-process 标记
-   不会自动跟随重算。摘除后宿主智能体卡永久常驻（实时不折、刷新走回放才折，形态分叉）；
-   加回后例外重新成立，若之前已折则审批按钮仍被 display:none 藏住，用户点不到 = 卡死。
-   模块侧 refreshInteractiveBoundary 自带保守门禁：只重算【已折叠过】的气泡，
-   不会给未折叠气泡凭空插按钮。纯展示增强：模块缺失 / 异常一律静默。 */
-function refreshHitlFoldBoundary(card) {
-    try {
-        if (typeof window !== 'undefined' && window.GourdTurnCompact
-                && window.GourdTurnCompact.refreshInteractiveBoundary) {
-            window.GourdTurnCompact.refreshInteractiveBoundary(card);
-        }
-    } catch (e) { /* 展示增强失败静默 */ }
-}
-
 function appendHitlCard(sess, toolName, command, actionId) {
     ensureAssistantBubble(sess);
     var presentation = resolveToolPresentation(toolName, null);
@@ -3349,6 +3656,13 @@ function appendHitlCard(sess, toolName, command, actionId) {
     var card = takeoverArgsStreamingCard(sess, toolName, actionId);
     if (card) {
         $(card).addClass('hitl-pending expanded');
+        /* 【HITL 接管吞卡修复】骨架卡已入批（data-turn-batch=1）：转交互态必须
+           立即摘成员标记 + 折叠类 + 窗绘制，否则批次收口把待审批卡 display:none，
+           批准/拒绝按钮消失、任务表面卡死。noteInteractiveInsert 里还有一道
+           detachInteractiveMember 双保险，这里先摘保证收口前几何已正确。 */
+        if (window.GourdTurnDisplay && window.GourdTurnDisplay.detachInteractiveMember) {
+            window.GourdTurnDisplay.detachInteractiveMember(card);
+        }
     } else {
         card = $('<div>').addClass('tool-card hitl-pending expanded')[0];
         // 存储当前 runId，用于后续删除同一运行的消息
@@ -3381,6 +3695,10 @@ function appendHitlCard(sess, toolName, command, actionId) {
 
     // 接管骨架卡时节点已在消息流中（可能在智能体卡内），重插会把它搬到主对话底部
     if (!card.parentNode) insertBeforeActions(sess, card);
+    /* 【交互卡边界接线】审批卡是等用户拍板的交互边界：收口当前运行批次、自身永不进
+       批次成员（否则收口时审批按钮随成员隐藏 = 用户报「展示 HITL 页面就错乱」）。
+       接管分支不走 insertBeforeActions 漏斗，必须在此补一次边界判定。 */
+    noteInteractiveInsert(sess, card);
     /* 加回 .hitl-pending = 卡内穿透例外重新成立。接管的骨架卡可能位于【已折叠】的智能体
        卡内，不重算则审批按钮仍被 display:none 藏住（与 restoreHitlCardPending 同一机理）。
        helper 自带保守门禁：只对已折叠气泡生效，普通新建卡场景是空操作。 */
@@ -3479,6 +3797,10 @@ function restoreHitlCardPending(sess, card) {
             + '</div>');
     }
     $(card).addClass('hitl-pending');
+    /* 恢复待审批态同样要摘批次成员标记（卡可能仍是旧批成员，下次收口会被吞） */
+    if (window.GourdTurnDisplay && window.GourdTurnDisplay.detachInteractiveMember) {
+        window.GourdTurnDisplay.detachInteractiveMember(card);
+    }
     refreshHitlFoldBoundary(card);   // 例外重新成立：若之前已折，必须重算才能露出审批按钮
     if (sess.approvedToolCard === card) sess.approvedToolCard = null;
     if (sess.pendingHitlCard === card) sess.pendingHitlCard = null;
@@ -3530,8 +3852,8 @@ function releaseHitlCards(sess, actionId) {
     }
     if (!root) root = document;
     /* 收集本轮真正被解除的卡：折叠重算必须放在 .each 遍历【之后】统一做。
-       compactBubble 会重排气泡子节点，没有必要把「正在改类名的卡」与「正在被搬动的节点」
-       交织在一起承担那种风险。 */
+       compactBubble 会重排气泡子节点，在遍历中途重排虽然集合已物化、迭代仍安全，
+       但会把「正在改类名的卡」与「正在被搬动的节点」交织在一起，没有必要承担这种风险。 */
     var releasedCards = [];
     $(root).find('.hitl-pending').each(function () {
         var $card = $(this);
@@ -4858,23 +5180,22 @@ function handleQuestionResponse(sess, state) {
     if (state.actionId) fields.actionId = String(state.actionId);
     postChatInput(sess, fields, null, {
         onDone: function(resp) {
-            // 提交成功即就地闭环问答卡，不再单纯依赖 question_answered 帧。
-            // 【实测事故】work-mw205svw：恢复轮零正文时后端不下发 question_answered，
-            // 卡片永远停在「已提交…」、不转 qa-record；就地闭环保证「提交→收起」必然发生。
-            // 镜像自 Rust 壳（自审修复 F1）：Java 壳此前只有 onFail，同一事故在此原样存在。
-            // 回执只带状态不带内容（answers 原文不下发），故用本地 state.answers 组装记录。
-            if (!resp || resp.code !== 200) return;
-            if (sess._questionState !== state) return; // 已被 answered 帧/探测收掉则不重复
-            var rec = document.createElement('div');
-            rec.className = 'qa-record';
-            rec.innerHTML = renderQuestionAnswersHtml(state, buildQuestionAnswersPayload(state));
-            var cardEl = state.cardEl;
-            if (cardEl && cardEl.parentNode) {
-                cardEl.parentNode.insertBefore(rec, cardEl);
-                cardEl.parentNode.removeChild(cardEl);
-            }
-            state.cardEl = null;
+            /* 提交成功即就地闭环问答卡，不再单纯依赖 question_answered 帧。
+               【实测事故】work-mw205svw：后端已消费挂起任务并落盘 answered 帧，
+               但恢复轮只吐 thinking、零正文零工具调用，卡片仍停在「已提交」，
+               用户看到的是「答完了任务却没执行」。answer 记录按 actionId 幂等，
+               故随后到达的 question_answered 帧不会重复落记录。 */
+            if (resp && resp.code && Number(resp.code) !== 200) return;
+            var st = sess._questionState;
+            if (!st || st !== state) return;      // 另一道题已接管，不越权收卡
+            try {
+                appendQuestionAnswerRecord(sess, st, {
+                    actionId: st.actionId,
+                    args: { answers: buildQuestionAnswersPayload(st) }
+                });
+            } catch (e) { console.error('[question] 提交后问答记录渲染失败', e); }
             sess._questionState = null;
+            if (sess.sessionId === activeSessionId) syncQuestionCard();
         },
         onFail: function(err) {
             console.error('Question answer error:', err);

@@ -259,9 +259,17 @@ fn is_loopback_host(host: &str) -> bool {
 }
 
 /// The loopback names themselves, with a trailing dot (FQDN form) tolerated.
+///
+/// `0.0.0.0` is deliberately **not** here. It is a wildcard *bind* address, not a
+/// loopback name: accepting it would tell the guard "any host that reached us
+/// through the wildcard interface is local", which is exactly the assumption the
+/// Host check exists to break (DNS rebinding sends `Host: attacker.example`, but a
+/// kernel started with `--host 0.0.0.0` would also see `Host: 0.0.0.0` from any
+/// LAN client). Reaching the kernel from a non-loopback address now requires
+/// explicit HTTP Basic Auth instead of being treated as local by accident.
 fn is_loopback_name(h: &str) -> bool {
     let h = h.trim_end_matches('.');
-    matches!(h, "127.0.0.1" | "localhost" | "::1" | "0.0.0.0")
+    matches!(h, "127.0.0.1" | "localhost" | "::1")
 }
 
 /// The Tauri webview's page origin. `http(s)://tauri.localhost` on Windows,

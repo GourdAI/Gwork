@@ -1,33 +1,756 @@
 <template>
 	<view class="app-chat-bubble" :class="message.role === 'user' ? 'app-chat-bubble--user' : 'app-chat-bubble--ai'">
-		<!-- 思考中：正文未出，先给 loading + 文案（对齐 uni-ai-x 的 pending spinner） -->
-		<view v-if="message.thinking" class="app-chat-bubble__pending">
-			<loading class="app-chat-bubble__spinner"></loading>
-			<text class="app-chat-bubble__pending-text">{{ t('chat.thinking') }}</text>
+		<!-- 身份头：对齐桌面 .msg-head（22px 圆形 logo + 13px/600 名称）。
+			 同轮续段（插话/问答/审批恢复）由宿主按「最近一条用户消息之后是否已有 assistant 行」省头 -->
+		<view v-if="showIdentity" class="app-chat-bubble__head">
+			<image class="app-chat-bubble__avatar" :src="avatarSrc" mode="aspectFit"></image>
+			<text class="app-chat-bubble__name">{{ assistantName }}</text>
 		</view>
-		<text v-else-if="message.text.length > 0" class="app-chat-bubble__text"
-			:class="message.role === 'user' ? 'app-chat-bubble__text--user' : 'app-chat-bubble__text--ai'">{{ message.text }}</text>
-		<!-- 停止且无正文：占位文案，对齐 uni-ai-x 的「回答被终止」 -->
-		<text v-else-if="message.status === 'stopped'" class="app-chat-bubble__text app-chat-bubble__text--ai">{{ t('chat.stoppedEmpty') }}</text>
+		<!-- 【2026-11 指示器已退役 · PC showThinking/showInlineThinking no-op 同口径】
+			 旧「思考中…」pending 行随首帧到达整行移除（高度塌陷），reason_start 又重建
+			 （thinking 置 true），一轮内反复增删正是用户报障「页面总是一跳一跳」的移动端
+			 真因。运行反馈由三层常驻 UI 承担：输入区停止按钮（processing）、批次盖子
+			 「正在执行中 · Ns」秒级计时（batchLabel）、过程行自身状态点（rowDotClass）。
+			 message.thinking 状态字段保留：正文分支的 !message.thinking 守卫仍依赖它。 -->
+		<!-- 首帧前空占位：仅当本轮还没有任何可见内容（无正文/无过程块/无摘要）时渲染
+			 定高 22px 空行（与过程行头同高）。首帧到达即让位给真实内容，此后整轮不再
+			 出现「内容→空→内容」的高度震荡；历史回放/重连缝合的 processing 尾条同受益。 -->
+		<view v-if="showIdleSlot" class="app-chat-bubble__idle-slot"></view>
+	<!-- 桌面 .turn-compact-toggle 的移动端定稿：摘要头（状态+耗时）+ 图标数字 chips。
+			 不再拼「已完成 · N 次工具调用 · M 段思考 …」长文本——窄屏必然折行，
+			 第二行与过程区叠字（用户两轮报障「遮挡」的真因）。chips 单行恒放得下，
+			 语义靠 PC 同源图标；长按 chip 弹 toast 全文案（chat.turn.* 词条，
+			 原生 image/text 无 title 提示能力，不能假装有）。箭头仍是 CSS 边框箭头。 -->
+		<view v-if="message.summary.length > 0" class="app-chat-bubble__compact" @click.stop="onToggleCompact">
+			<view class="app-chat-bubble__chevron" :class="message.compactOpen ? 'app-chat-bubble__chevron--down' : 'app-chat-bubble__chevron--right'"></view>
+			<text class="app-chat-bubble__compact-label">{{ message.summary }}</text>
+			<view v-for="chip in summaryChips" :key="chip.key" class="app-chat-bubble__chip" @longpress.stop="onChipTip(chip)">
+				<image class="app-chat-bubble__chip-icon" :src="chip.icon" mode="aspectFit"></image>
+				<text class="app-chat-bubble__chip-num">{{ chip.count }}</text>
+			</view>
+		</view>
+
+		<view v-if="showProcess" class="app-chat-bubble__process">
+			<!-- 分段渲染（2026-11 用户拍板「正在执行中限高 + 内部滚动」，PC 同款）：
+				 批次盖子 + 其成员为一段；展开批次成员 ≥4 行时成员进限高 scroll-view
+				 （显式高度=min(内容估算,232px)，UCSS 不支持 overflow:scroll，必须真滚动容器），
+				 运行中默认展开、贴底自动跟随、用户上滑暂停、滑回底部恢复（watch + @scroll）。
+				 常驻行（agent 徽章/错误/交互卡）单独成段，绝不进滚动窗。 -->
+			<template v-for="seg in segments" :key="seg.key">
+				<!-- 批次盖子：对齐 PC「▾ 正在执行中 · Ns」——箭头左置、状态文案+耗时跟排，
+					 点盖子折叠/展开组内成员。不再右侧堆图标+计数+箭头+彩点（截图里乱窜的来源）。
+					 无成员批次没有可折叠内容，不绑点击，避免「点了没反应」。 -->
+				<view v-if="seg.head != null" class="app-chat-bubble__batch" @click.stop="onToggleBatch(seg.head!)">
+					<view class="app-chat-bubble__chevron app-chat-bubble__chevron--sm"
+						:class="seg.head!.batchCollapsed ? 'app-chat-bubble__chevron--right' : 'app-chat-bubble__chevron--down'"></view>
+					<!-- PC 盖子只有「箭头 + label」两元素：无行尾状态点/spinner、收口不显耗时。
+						 label 运行中「正在执行中」常规文字色（PC 恒二级灰，不 primary 高亮），
+						 耗时跟排在 label 后（PC labelText「正在执行中 · Ns」同款）。
+						 【缩进修复】label 不再自带 margin-left——盖子文本列必须与
+						 __compact-label / __row-label（前导件统一右缘 15px）同列，
+						 否则成员行比盖子左缩 7px（用户报障「下面的缩进都在上面的前面」）。 -->
+					<view class="app-chat-bubble__batch-main">
+						<text class="app-chat-bubble__batch-label">{{ batchLabel(seg.head!) }}</text>
+					</view>
+				</view>
+				<!-- 限高滚动窗：高度=内容估算封顶 232px（windowStyle）。
+					 【不能靠 max-height 自然收缩】uni-app x 纵向 scroll-view 无确定高度时
+					 按默认高度布局，成员少时留一大段空白（用户实机报障真因），必须显式给高 -->
+				<!-- 【⑳ Qoder 层级 · 移动端】引导线+成员区包进 group 容器：1px 极淡竖线
+					 贴盖子箭头中列（left 7px），absolute top:0/bottom:0 自动随成员增减伸缩
+					 （UCSS 无 ::before/无 JS 量高，真 view 画线是唯一可靠路径）。
+					 scroll-view 高度仍由 windowStyle 显式给定，限高/贴底几何零改动。 -->
+				<view v-if="seg.windowed && seg.members.length > 0" class="app-chat-bubble__group">
+					<view class="app-chat-bubble__group-guide"></view>
+					<scroll-view :id="'tbwin-' + seg.key" class="app-chat-bubble__batch-window"
+					:style="windowStyle(seg)"
+					direction="vertical" :show-scrollbar="true" :scroll-top="segScrollTop(seg.key)"
+					:lower-threshold="24" @scroll="onWindowScroll(seg.key, $event)"
+					@scrolltolower="onWindowLower(seg.key)"
+					@touchstart="onWindowTouchStart(seg.key)" @touchend="onWindowTouchEnd(seg.key)">
+					<view v-for="item in seg.members" :key="item.id" :class="memberWrapClass(item)">
+						<app-interact-card v-if="item.interact.length > 0" :block="item"
+							@approve="onInteractApprove" @answer="onInteractAnswer" @edit="onInteractEdit"></app-interact-card>
+						<view v-else-if="item.args === 'fileChanges'" class="app-chat-bubble__changes">
+							<view class="app-chat-bubble__changes-head">
+								<text class="iconfont app-chat-bubble__changes-icon">&#xe69f;</text>
+								<text class="app-chat-bubble__changes-title">{{ item.label }}</text>
+								<text v-if="item.body.length > 0" class="app-chat-bubble__changes-stat">{{ item.body }}</text>
+							</view>
+							<view v-for="(row, index) in visibleChanges(item)" :key="row.path" class="app-chat-bubble__changes-row">
+								<text class="app-chat-bubble__changes-kind" :class="changeKindClass(row.kind)">{{ row.kind }}</text>
+								<text class="app-chat-bubble__changes-path">{{ row.path }}</text>
+								<text v-if="row.additions > 0" class="app-chat-bubble__changes-add">+{{ row.additions }}</text>
+								<text v-if="row.deletions > 0" class="app-chat-bubble__changes-del">-{{ row.deletions }}</text>
+							</view>
+							<text v-if="item.changes.length > 3" class="app-chat-bubble__changes-more"
+								@click.stop="onToggleChanges(item)">{{ item.changesOpen ? t('chat.changes.collapse') : t('chat.changes.more', { n: (item.changes.length - 3).toString() }) }}</text>
+						</view>
+						<!-- 错误块（PC .chunk-error）：红底 + 左红条 + 纯错误文本，无图标无标题 -->
+						<view v-else-if="item.kind === 'error'" class="app-chat-bubble__error">
+							<text class="app-chat-bubble__error-text">{{ item.body }}</text>
+						</view>
+						<view v-else class="app-chat-bubble__row">
+							<view class="app-chat-bubble__row-head" @click.stop="onToggleRow(item)">
+								<image v-if="useSvg(item)" class="app-chat-bubble__row-svg" :src="svgIconOf(item)" mode="aspectFit"></image>
+								<view v-else class="app-chat-bubble__row-icon"><rice-icon :name="iconOf(item)" size="13px" color="var(--color-text-tertiary)" /></view>
+								<view class="app-chat-bubble__row-main">
+									<text class="app-chat-bubble__row-label" :class="item.failed ? 'app-chat-bubble__row-label--failed' : ''">{{ item.label }}</text>
+									<text v-if="item.fileName.length > 0" class="app-chat-bubble__row-file">{{ item.fileName }}</text>
+									<text v-if="item.diffAdd.length > 0" class="app-chat-bubble__row-diff-add">{{ item.diffAdd }}</text>
+									<text v-if="item.diffDel.length > 0" class="app-chat-bubble__row-diff-del">{{ item.diffDel }}</text>
+									<text v-if="item.args.length > 0" class="app-chat-bubble__row-args">{{ item.args }}</text>
+									<text v-else-if="item.preview.length > 0" class="app-chat-bubble__row-preview">{{ item.preview }}</text>
+								</view>
+								<text v-if="rowDuration(item).length > 0" class="app-chat-bubble__row-duration" :class="item.failed ? 'app-chat-bubble__row-duration--failed' : ''">{{ rowDuration(item) }}</text>
+								<view class="app-chat-bubble__dot" :class="rowDotClass(item)"></view>
+							</view>
+							<!-- 过程正文段（'text' 块）：markdown 渲染（与最终正文同管道），
+								 绝不 dump 原文——产物链接/标题/列表必须是渲染态（用户报障
+								 「产物卡片跑正文上面 + 框里裸露注释文本」的第二真因）。 -->
+							<view v-if="item.kind === 'text' && item.body.length > 0" class="app-chat-bubble__process-md">
+								<app-md-text :text="item.body" :complete="item.status !== 'loading'"></app-md-text>
+							</view>
+							<!-- 思考全文/工具结果默认折叠（2026-11 用户拍板），点行头才展开 -->
+							<text v-else-if="item.rowOpen && item.body.length > 0" class="app-chat-bubble__row-body">{{ displayText(item.body) }}</text>
+						</view>
+					</view>
+					</scroll-view>
+				</view>
+				<!-- 平铺段：常驻行 / 收起批次（空成员）/ 成员少的批次（不足限高阈值）。
+					 v-if 与 v-for 不同节点（Vue3 同节点 v-if 优先会读不到 item）。
+					 【⑳ Qoder 层级】有成员的平铺批次同样包 group 容器画引导线；
+					 成员经 flatMembers 过滤：进 group 的批次段在下方通用循环里出空数组，
+					 不重复渲染（常驻行段 head=null 不受影响）。 -->
+				<template v-if="!seg.windowed">
+				<view v-if="seg.head != null && seg.members.length > 0" class="app-chat-bubble__group">
+					<view class="app-chat-bubble__group-guide"></view>
+					<view class="app-chat-bubble__group-body">
+						<view v-for="item in seg.members" :key="item.id" :class="memberWrapClass(item)">
+							<app-interact-card v-if="item.interact.length > 0" :block="item"
+								@approve="onInteractApprove" @answer="onInteractAnswer" @edit="onInteractEdit"></app-interact-card>
+							<view v-else-if="item.args === 'fileChanges'" class="app-chat-bubble__changes">
+								<view class="app-chat-bubble__changes-head">
+									<text class="iconfont app-chat-bubble__changes-icon">&#xe69f;</text>
+									<text class="app-chat-bubble__changes-title">{{ item.label }}</text>
+									<text v-if="item.body.length > 0" class="app-chat-bubble__changes-stat">{{ item.body }}</text>
+								</view>
+								<view v-for="(row, index) in visibleChanges(item)" :key="row.path" class="app-chat-bubble__changes-row">
+									<text class="app-chat-bubble__changes-kind" :class="changeKindClass(row.kind)">{{ row.kind }}</text>
+									<text class="app-chat-bubble__changes-path">{{ row.path }}</text>
+									<text v-if="row.additions > 0" class="app-chat-bubble__changes-add">+{{ row.additions }}</text>
+									<text v-if="row.deletions > 0" class="app-chat-bubble__changes-del">-{{ row.deletions }}</text>
+								</view>
+								<text v-if="item.changes.length > 3" class="app-chat-bubble__changes-more"
+									@click.stop="onToggleChanges(item)">{{ item.changesOpen ? t('chat.changes.collapse') : t('chat.changes.more', { n: (item.changes.length - 3).toString() }) }}</text>
+							</view>
+							<view v-else-if="item.kind === 'error'" class="app-chat-bubble__error">
+								<text class="app-chat-bubble__error-text">{{ item.body }}</text>
+							</view>
+							<view v-else class="app-chat-bubble__row">
+								<view class="app-chat-bubble__row-head" @click.stop="onToggleRow(item)">
+									<image v-if="useSvg(item)" class="app-chat-bubble__row-svg" :src="svgIconOf(item)" mode="aspectFit"></image>
+									<view v-else class="app-chat-bubble__row-icon"><rice-icon :name="iconOf(item)" size="13px" color="var(--color-text-tertiary)" /></view>
+									<view class="app-chat-bubble__row-main">
+										<text class="app-chat-bubble__row-label" :class="item.failed ? 'app-chat-bubble__row-label--failed' : ''">{{ item.label }}</text>
+										<text v-if="item.fileName.length > 0" class="app-chat-bubble__row-file">{{ item.fileName }}</text>
+										<text v-if="item.diffAdd.length > 0" class="app-chat-bubble__row-diff-add">{{ item.diffAdd }}</text>
+										<text v-if="item.diffDel.length > 0" class="app-chat-bubble__row-diff-del">{{ item.diffDel }}</text>
+										<text v-if="item.args.length > 0" class="app-chat-bubble__row-args">{{ item.args }}</text>
+										<text v-else-if="item.preview.length > 0" class="app-chat-bubble__row-preview">{{ item.preview }}</text>
+									</view>
+									<text v-if="rowDuration(item).length > 0" class="app-chat-bubble__row-duration" :class="item.failed ? 'app-chat-bubble__row-duration--failed' : ''">{{ rowDuration(item) }}</text>
+									<view class="app-chat-bubble__dot" :class="rowDotClass(item)"></view>
+								</view>
+								<view v-if="item.kind === 'text' && item.body.length > 0" class="app-chat-bubble__process-md">
+									<app-md-text :text="item.body" :complete="item.status !== 'loading'"></app-md-text>
+								</view>
+								<text v-else-if="item.rowOpen && item.body.length > 0" class="app-chat-bubble__row-body">{{ displayText(item.body) }}</text>
+							</view>
+						</view>
+					</view>
+				</view>
+				<view v-for="item in flatMembers(seg)" :key="item.id">
+					<!-- 交互卡（内核 ask 挂起 / HITL 审批 / 已闭环回显）：手机可直接作答。
+						 必须排在通用过程行分支之前——notice 帧原本走 else 只渲染一行摘要，
+						 卡片永远只是「等待在桌面客户端处理」，点不了任何按钮。 -->
+					<app-interact-card v-if="item.interact.length > 0" :block="item"
+						@approve="onInteractApprove" @answer="onInteractAnswer" @edit="onInteractEdit"></app-interact-card>
+					<!-- 文件变更卡：对齐桌面 .msg-run-changes-card——头部「已编辑 N 个文件 +x -y」，
+						 body 是 A/M/D 徽标 + 路径 + 增删统计的文件行（默认 3 行，超出折叠）。
+						 绝不 dump 内核 manifest 原文（status/runId/revision… 是协议字段不是给人看的） -->
+					<view v-else-if="item.args === 'fileChanges'" class="app-chat-bubble__changes">
+						<view class="app-chat-bubble__changes-head">
+							<!-- 项目 iconfont 文件图标码点（加号面板同款）：rice-icon 字体集没有裸 file 名 -->
+							<text class="iconfont app-chat-bubble__changes-icon">&#xe69f;</text>
+							<text class="app-chat-bubble__changes-title">{{ item.label }}</text>
+							<text v-if="item.body.length > 0" class="app-chat-bubble__changes-stat">{{ item.body }}</text>
+						</view>
+						<view v-for="(row, index) in visibleChanges(item)" :key="row.path" class="app-chat-bubble__changes-row">
+							<text class="app-chat-bubble__changes-kind" :class="changeKindClass(row.kind)">{{ row.kind }}</text>
+							<text class="app-chat-bubble__changes-path">{{ row.path }}</text>
+							<text v-if="row.additions > 0" class="app-chat-bubble__changes-add">+{{ row.additions }}</text>
+							<text v-if="row.deletions > 0" class="app-chat-bubble__changes-del">-{{ row.deletions }}</text>
+						</view>
+						<text v-if="item.changes.length > 3" class="app-chat-bubble__changes-more"
+							@click.stop="onToggleChanges(item)">{{ item.changesOpen ? t('chat.changes.collapse') : t('chat.changes.more', { n: (item.changes.length - 3).toString() }) }}</text>
+					</view>
+					<!-- 错误块（PC .chunk-error）：红底 + 左红条 + 纯错误文本，无图标无标题 -->
+					<view v-else-if="item.kind === 'error'" class="app-chat-bubble__error">
+						<text class="app-chat-bubble__error-text">{{ item.body }}</text>
+					</view>
+					<view v-else class="app-chat-bubble__row">
+						<view class="app-chat-bubble__row-head" @click.stop="onToggleRow(item)">
+							<image v-if="useSvg(item)" class="app-chat-bubble__row-svg" :src="svgIconOf(item)" mode="aspectFit"></image>
+							<!-- 字体图标钉进 13×13 定宽槽：字形实际宽随字体漂移，不定宽时
+								 同批行文本列参差（与 __row-svg 同槽位，右缘恒 15px） -->
+							<view v-else class="app-chat-bubble__row-icon"><rice-icon :name="iconOf(item)" size="13px" color="var(--color-text-tertiary)" /></view>
+							<!-- 主区吃满剩余宽度（UCSS 不认 margin-left:auto）：label+args/preview 挤在中间，
+								 状态点钉在行尾固定槽位，不随内容长度漂移 -->
+							<view class="app-chat-bubble__row-main">
+								<text class="app-chat-bubble__row-label" :class="item.failed ? 'app-chat-bubble__row-label--failed' : ''">{{ item.label }}</text>
+								<text v-if="item.fileName.length > 0" class="app-chat-bubble__row-file">{{ item.fileName }}</text>
+								<text v-if="item.diffAdd.length > 0" class="app-chat-bubble__row-diff-add">{{ item.diffAdd }}</text>
+								<text v-if="item.diffDel.length > 0" class="app-chat-bubble__row-diff-del">{{ item.diffDel }}</text>
+								<text v-if="item.args.length > 0" class="app-chat-bubble__row-args">{{ item.args }}</text>
+								<!-- args 与 preview 互斥：两者同排会互相挤压成两条截断串（用户截图里的「堆叠」观感） -->
+								<text v-else-if="item.preview.length > 0" class="app-chat-bubble__row-preview">{{ item.preview }}</text>
+							</view>
+							<text v-if="rowDuration(item).length > 0" class="app-chat-bubble__row-duration" :class="item.failed ? 'app-chat-bubble__row-duration--failed' : ''">{{ rowDuration(item) }}</text>
+							<view class="app-chat-bubble__dot" :class="rowDotClass(item)"></view>
+						</view>
+						<!-- 过程正文段（'text' 块）：markdown 渲染（与最终正文同管道），
+							 绝不 dump 原文——产物链接/标题/列表必须是渲染态 -->
+						<view v-if="item.kind === 'text' && item.body.length > 0" class="app-chat-bubble__process-md">
+							<app-md-text :text="item.body" :complete="item.status !== 'loading'"></app-md-text>
+						</view>
+						<!-- 思考/工具全文默认折叠（2026-11 用户拍板：点行头才展开），
+							 卡体透明无底色。margin 拆单边同上。 -->
+						<text v-else-if="item.rowOpen && item.body.length > 0" class="app-chat-bubble__row-body">{{ displayText(item.body) }}</text>
+					</view>
+				</view>
+				</template>
+			</template>
+		</view>
+		<!-- 插话徽标（PC .steer-note-badge 同款）：用户气泡顶部的「插话」身份胶囊，
+				 标明这条用户消息是任务运行中补发的一句话，而非空闲期发送。
+				 steer_applied 专用分支建行（PC appendSteerNote 同口径），旧的 notice
+				 工具行形态已废弃——插话是用户说的话，必须以用户气泡呈现 -->
+		<text v-if="message.steer" class="app-chat-bubble__steer-badge">{{ t('chat.segment.steer') }}</text>
+		<!-- 用户消息图片附件（PC .user-attach-imgs 同款）：imagePaths 经 meta 换回的 dataUrl
+				 缩略图网格，点击 previewImage 看大图。占位文案（[图片N]）仍由 text 承载，
+				 图片本体全在 imageUrls——纯图片消息（生成插画）此前在移动端永远看不到图 -->
+		<view v-if="message.role === 'user' && message.imageUrls.length > 0" class="app-chat-bubble__attach-imgs">
+			<image v-for="(url, index) in message.imageUrls" :key="index"
+				class="app-chat-bubble__attach-img" :src="url" mode="aspectFill"
+				@click="onPreviewAttach(url)"></image>
+		</view>
+		<!-- 最终正文：桌面 .md-content 的常驻正文区。
+			 AI 正文走 markdown 渲染（自研纯 UTS 解析 + rich-text，全平台零原生依赖，
+			 标题/加粗/列表/代码块/表格），标准基座直接生效；用户消息保持纯文本。 -->
+		<app-md-text v-if="!message.thinking && message.text.length > 0 && message.role === 'ai'"
+			:text="message.text" :complete="message.status === 'done' || message.status === 'stopped'"></app-md-text>
+		<text v-else-if="!message.thinking && message.text.length > 0" class="app-chat-bubble__text app-chat-bubble__text--user">{{ message.text }}</text>
+		<text v-else-if="!message.thinking && message.status === 'stopped' && message.blocks.length === 0" class="app-chat-bubble__text app-chat-bubble__text--ai">{{ t('chat.stoppedEmpty') }}</text>
+		<!-- 变更卡恒钉内容流末尾：最终正文之后、页脚 meta 之前（PC「正文 → 变更卡 →
+		     时长徽章」同口径）。不进 showProcess，故不会被批次折叠连坐隐藏，也不会
+		     夹进限高滚动窗被 translateY/负 margin 视觉错位。 -->
+		<view v-for="item in changesBlocks" :key="item.id" class="app-chat-bubble__changes">
+			<view class="app-chat-bubble__changes-head">
+				<text class="iconfont app-chat-bubble__changes-icon">&#xe69f;</text>
+				<text class="app-chat-bubble__changes-title">{{ item.label }}</text>
+				<text v-if="item.body.length > 0" class="app-chat-bubble__changes-stat">{{ item.body }}</text>
+			</view>
+			<view v-for="(row, index) in visibleChanges(item)" :key="row.path" class="app-chat-bubble__changes-row">
+				<text class="app-chat-bubble__changes-kind" :class="changeKindClass(row.kind)">{{ row.kind }}</text>
+				<text class="app-chat-bubble__changes-path">{{ row.path }}</text>
+				<text v-if="row.additions > 0" class="app-chat-bubble__changes-add">+{{ row.additions }}</text>
+				<text v-if="row.deletions > 0" class="app-chat-bubble__changes-del">-{{ row.deletions }}</text>
+			</view>
+			<text v-if="item.changes.length > 3" class="app-chat-bubble__changes-more"
+				@click.stop="onToggleChanges(item)">{{ item.changesOpen ? t('chat.changes.collapse') : t('chat.changes.more', { n: (item.changes.length - 3).toString() }) }}</text>
+		</view>
 		<text v-if="message.meta.length > 0" class="app-chat-bubble__meta">{{ message.meta }}</text>
 	</view>
 </template>
 
 <script setup lang="ts">
-	import type { ChatMessage } from '@/data/app-data'
+	import { computed, nextTick, onUnmounted, ref, watch } from 'vue'
+	import type { ComputedRef, Ref } from 'vue'
+	import type { AskAnswer, ChatBlock, ChatFileChange, ChatMessage } from '@/data/app-data'
 	import { i18n } from '@/locale/i18n.ts'
+	import { formatBatchElapsed } from '@/utils/tools.ts'
+	import { toolIconUri, thinkingIconUri, agentIconUri, processTextIconUri, hasSvgIcon } from '@/utils/tool-presentation.ts'
+	import { useTheme } from '@/hooks/useTheme'
+	import { useAssistantIdentity } from '@/hooks/useAssistantIdentity'
+	import AppInteractCard from '@/components/app-interact-card/app-interact-card.uvue'
+	import AppMdText from '@/components/app-md-text/app-md-text.uvue'
 
 	defineOptions({
 		name: 'app-chat-bubble',
 		styleIsolation: 'app-and-page'
 	})
 
-	defineProps<{
-		message: ChatMessage
+	const emit = defineEmits<{
+		(e: 'approve', actionId: string, approved: boolean): void
+		(e: 'answer', actionId: string): void
+		(e: 'edit', actionId: string, index: number, patch: AskAnswer): void
 	}>()
 
-	function t(key: string): string {
-		return i18n.global.t(key)
+	const props = withDefaults(defineProps<{
+		message: ChatMessage
+		/** 是否渲染身份头（头像 + 名称）：由宿主按「最近一条用户消息之后是否已有 AI 行」决定 */
+		showHead?: boolean
+	}>(), {
+		showHead: false
+	})
+
+	const { isDark } = useTheme()
+	const { assistantName } = useAssistantIdentity()
+
+	// AI 行是否显示身份头；用户气泡永远不显示（桌面用户行没有头像）
+	const showIdentity: ComputedRef<boolean> = computed<boolean>((): boolean => {
+		return props.message.role === 'ai' && props.showHead
+	})
+
+	// 与桌面 /img/logo.svg 同源：亮色黑底白 G / 暗色近白底黑 G
+	const avatarSrc: ComputedRef<string> = computed<string>((): string => {
+		return isDark.value ? '/static/logo-inverse.png' : '/static/logo.png'
+	})
+
+	/* 【变更卡钉底 · 模板层 2026-11 用户「产物卡片应该放在最后面」】
+	   卡片不是过程行：blocks 数组末尾 ≠ 消息流末尾。模板里 showProcess 过程区
+	   恒排在最终正文 message.text 之前，只要卡片还留在 segments 里就永远是
+	   「卡片 → 正文」，上一版只改 hook 的 sinkChangesBlocks 改错了层级。
+	   这里把卡片从过程区数据里摘出，改由尾部 changesBlocks 在最终正文之后、
+	   meta 之前常驻渲染（折叠态也常驻，与 PC KEEP_VISIBLE 白名单同口径），
+	   同时不再污染批次分段 / 限高滚动窗 / 26px 成员缩进。 */
+	const changesBlocks: ComputedRef<ChatBlock[]> = computed<ChatBlock[]>((): ChatBlock[] => {
+		return props.message.blocks.filter((item: ChatBlock): boolean => item.args === 'fileChanges')
+	})
+
+	const visibleBlocks: ComputedRef<ChatBlock[]> = computed<ChatBlock[]>((): ChatBlock[] => {
+		// 变更卡由尾部循环单独渲染：过程区只保留真正的轨迹行 / 常驻证据行。
+		const list: ChatBlock[] = props.message.blocks.filter((item: ChatBlock): boolean => item.args !== 'fileChanges')
+		// 轮结束：非交互过程行随 Compact 一起隐藏（桌面 [data-turn-process] 同款）；
+		// 错误/重试/等待/问答凭据/子智能体徽章 process=false，始终常驻。
+		if (props.message.summary.length > 0 && !props.message.compactOpen) {
+			return list.filter((item: ChatBlock): boolean => !item.process)
+		}
+		const collapsed: string[] = []
+		list.forEach((item: ChatBlock): void => {
+			if (item.kind === 'batch' && item.batchCollapsed) collapsed.push(item.id)
+		})
+		// 子智能体徽章不受批次折叠影响：桌面 appendAgentBadge 挂在气泡上而不在过程容器里，
+		// 收口一个批次不该让子智能体行整块消失（否则用户看到「智能体消息没了」）
+		return list.filter((item: ChatBlock): boolean => {
+			if (item.kind === 'batch') return true
+			if (item.kind === 'agent') return true
+			return collapsed.indexOf(item.batchId) < 0
+		})
+	})
+
+	const showProcess: ComputedRef<boolean> = computed<boolean>((): boolean => visibleBlocks.value.length > 0)
+
+	/* 【2026-11 指示器退役后的首帧前占位】仅 processing 且尚无任何可见内容
+	   （无正文/无过程块/无摘要）时渲染定高 22px 空行；首帧到达即让位，
+	   此后整轮不再出现「内容→空→内容」的高度震荡（PC no-op 同口径）。 */
+	const showIdleSlot: ComputedRef<boolean> = computed<boolean>((): boolean => {
+		const msg: ChatMessage = props.message
+		return msg.role === 'ai' && msg.status === 'processing'
+			&& msg.text.length === 0 && msg.blocks.length === 0 && msg.summary.length === 0
+	})
+
+	/* 【⑳ Qoder 层级 · 移动端】批次成员整体右移一列（PC app.css ⑳ 26px 同口径）：
+	   盖子/摘要头保持第一列（前导件右缘 15px），成员 wrapper 加 margin-left 26px。
+	   UCSS 不认 :not() 复合选择器，HITL/问答/已闭环交互卡的豁免在这里按数据判定
+	   （PC :not(.hitl-pending) 同语义）；agent 徽章是常驻段（head=null）天然不缩进。 */
+	function memberWrapClass(item: ChatBlock): string {
+		return item.interact.length === 0 ? 'app-chat-bubble__member' : ''
+	}
+
+	/* 平铺段通用循环的成员源：有成员的批次段已在上方 group 容器渲染（带引导线+缩进），
+	   这里必须出空数组防重复；常驻行段（head=null）原样平铺。 */
+	function flatMembers(seg: BubbleSegment): ChatBlock[] {
+		if (seg.head != null && seg.members.length > 0) return []
+		return seg.members
+	}
+
+	/* 摘要 chips：图标 + 数字（2026-11 用户拍板「前面用图标，后面加上对应数字」）。
+	   图标复用 PC 同源 SVG（工具=扳手兜底 / 思考=星芒 / 子代理=机器人 / 过程文本=文档），
+	   计数为 0 的类别不占位；每枚 chip ≈ 30px，四类全出也远小于最窄屏，单行永不折行。 */
+	type SummaryChip = { key: string; icon: string; count: string; tipKey: string }
+	const summaryChips: ComputedRef<SummaryChip[]> = computed<SummaryChip[]>((): SummaryChip[] => {
+		const out: SummaryChip[] = []
+		if (props.message.summary.length === 0) return out
+		const dark: boolean = isDark.value
+		const c = props.message.counts
+		if (c.tools > 0) out.push({ key: 'tools', icon: toolIconUri('', '', dark, false), count: c.tools.toString(), tipKey: 'chat.turn.tools' } as SummaryChip)
+		if (c.reasons > 0) out.push({ key: 'reasons', icon: thinkingIconUri(dark, false), count: c.reasons.toString(), tipKey: 'chat.turn.reasons' } as SummaryChip)
+		if (c.agents > 0) out.push({ key: 'agents', icon: agentIconUri(dark, false), count: c.agents.toString(), tipKey: 'chat.turn.agents' } as SummaryChip)
+		if (c.texts > 0) out.push({ key: 'texts', icon: processTextIconUri(dark), count: c.texts.toString(), tipKey: 'chat.turn.texts' } as SummaryChip)
+		return out
+	})
+
+	/** 长按 chip 弹全文案 toast（「N 次工具调用」等，chat.turn.* 12 语言词条）。
+	 *  .stop 阻断冒泡：长按不该顺带折叠/展开整轮过程区。 */
+	function onChipTip(chip: SummaryChip): void {
+		uni.showToast({ title: t(chip.tipKey, { n: chip.count }), icon: 'none' })
+	}
+
+	/* ---- 批次限高滚动窗（2026-11 用户拍板：运行中/历史展开一律限高 ≈8 行内部滚动，
+	   PC app-turn-display.js 的 WINDOW_MAX_PX 同款语义）----
+	   UCSS 不支持 overflow:scroll，平铺 view 无法内滚，必须真 scroll-view 容器。
+	   分段规则：批次盖子起一段（head + members）；agent 徽章/错误等常驻行各自成段
+	   （head=null，绝不进滚动窗——它们是批次边界/常驻证据，PC 同口径）。
+	   windowed 判定：批次展开且可见成员 ≥ WINDOW_MIN_ROWS（4 行，约 116px 起才可能
+	   超过 232px 视窗；成员少时平铺，避免小批次也套滚动容器吃掉手势）。 */
+	const WINDOW_MIN_ROWS = 4
+	/* 视窗上限（PC WINDOW_MAX_PX=232 同款）。scroll-view 高度必须显式给定：
+	   uni-app x 纵向 scroll-view 无确定高度时按默认高度布局（max-height 不定容器），
+	   成员少时容器留白——「已处理」与「正在执行中」之间的大段空白真因。 */
+	const WINDOW_MAX_PX = 232
+
+	type BubbleSegment = {
+		key: string
+		head: ChatBlock | null
+		members: ChatBlock[]
+		windowed: boolean
+		/** 内容估算高度（未封顶）：windowStyle 取 min(est, WINDOW_MAX_PX) 作显式高度 */
+		estHeight: number
+	}
+
+	/** 单个成员行的估算高度：行头 ≈29px + 展开卡体折算（每 40 字符 ≈ 一行 18px，
+	 *  上限 2400 字符）。'text' 过程正文段恒渲染 markdown（不随 rowOpen 折叠），
+	 *  其 body 必须始终计入；其余行 body 只有点开（rowOpen）才占高。 */
+	function memberHeight(item: ChatBlock): number {
+		let h: number = 29
+		const bodyLen: number = (item.rowOpen || item.kind === 'text') ? Math.min(item.body.length, 2400) : 0
+		if (bodyLen > 0) h += Math.ceil(bodyLen / 40) * 18
+		else if (item.preview.length > 0) h += 18
+		if (item.args.length > 0) h += 18
+		return h
+	}
+
+	/** 滚动窗显式高度样式：内容不足 232px 时按内容收缩（无空白），超出封顶内部滚动。
+	 *  +2px 容差吸收估算与真实行高的微小偏差（宁可多 2px 也不裁掉半行）。 */
+	function windowStyle(seg: BubbleSegment): string {
+		const h: number = Math.min(seg.estHeight + 2, WINDOW_MAX_PX)
+		return 'height:' + h.toString() + 'px;'
+	}
+
+	const segments: ComputedRef<BubbleSegment[]> = computed<BubbleSegment[]>((): BubbleSegment[] => {
+		const out: BubbleSegment[] = []
+		/* 【code review 修复 · 分段劈断】旧实现遇 agent 徽章把 cur 置空，
+		   徽章之后的同批成员全部平铺逃逸出限高窗（子代理场景必现）。
+		   改为：批次段按 batchId 聚合（成员可被常驻行隔断，仍归同一滚动窗），
+		   常驻行（agent/无归属）独立成段插在中间，批次上下文不丢。 */
+		const byBatch: Map<string, BubbleSegment> = new Map<string, BubbleSegment>()
+		visibleBlocks.value.forEach((item: ChatBlock): void => {
+			if (item.kind === 'batch') {
+				const seg: BubbleSegment = { key: item.id, head: item, members: [], windowed: false, estHeight: 0 } as BubbleSegment
+				out.push(seg)
+				byBatch.set(item.id, seg)
+				return
+			}
+			const owner: BubbleSegment | undefined = item.batchId.length > 0 ? byBatch.get(item.batchId) : undefined
+			if (owner != null && item.kind !== 'agent') {
+				owner!.members.push(item)
+				return
+			}
+			out.push({ key: item.id, head: null, members: [item], windowed: false, estHeight: 0 } as BubbleSegment)
+		})
+		out.forEach((seg: BubbleSegment): void => {
+			/* 【阈值口径】按估算高度而非行数：3 个长 body 成员也能超 232px。
+			   估算超窗才套 scroll-view；窗高由 windowStyle 显式给定（min(est,232)），
+			   内容不足时随之收缩——绝不能依赖 scroll-view「自然收缩」（不存在）。 */
+			if (seg.head == null || seg.head!.batchCollapsed) { seg.windowed = false; return }
+			let est: number = 0
+			seg.members.forEach((item: ChatBlock): void => { est += memberHeight(item) })
+			seg.estHeight = est
+			// 空成员批次不建窗：group 容器/引导线只包真实成员（⑳ 层级），
+			// 也避免 2px 空 scroll-view 白占一条缝
+			seg.windowed = seg.members.length > 0 && (est > WINDOW_MAX_PX || seg.members.length >= WINDOW_MIN_ROWS)
+		})
+		return out
+	})
+
+	/* 滚动跟随状态（每段一份）：pinned=贴底自动跟随；top=scroll-top 绑定值。
+	   scroll-view 的 scroll-top 只在【值变化】时生效，跟随用「大数限幅震荡」
+	   （app-chat.uvue list-view 同款经验：持续递增会累计到数百万导致内部状态异常）。 */
+	const winPinned: Map<string, boolean> = new Map<string, boolean>()
+	const winTops: Ref<Map<string, number>> = ref<Map<string, number>>(new Map<string, number>())
+
+	function segScrollTop(key: string): number {
+		return winTops.value.get(key) ?? 0
+	}
+
+	/* 【历史首窗从头看】closed 批次首窗不贴底（PC 展开历史批次从第一行看起）：
+	   onToggleBatch 置 winPinned=false 覆盖折叠/展开路径；历史回放首次渲染
+	   （盖子非 loading 且无 pinned 记录）也默认不跟随，用户滚到底后自然恢复。 */
+	function isPinned(key: string): boolean {
+		const rec: boolean | undefined = winPinned.get(key)
+		if (rec != null) return rec!
+		const seg: BubbleSegment | undefined = segments.value.find((s: BubbleSegment): boolean => s.key === key)
+		if (seg != null && seg!.head != null && seg!.head!.status !== 'loading') return false
+		return true
+	}
+
+	function followBottom(key: string): void {
+		if (!isPinned(key)) return
+		const cur: number = winTops.value.get(key) ?? 0
+		// 限幅震荡：两个足够大的值互换，保证每次赋值都触发 scroll-top 变更
+		const next: number = cur > 100000 ? 100000 : 200000
+		const m: Map<string, number> = new Map<string, number>()
+		winTops.value.forEach((v: number, k: string): void => { m.set(k, v) })
+		m.set(key, next)
+		winTops.value = m
+	}
+
+	/* 【code review 修复 · 手势门控】只有用户手势期间的 scroll 才允许把 pinned 置 false：
+	   部分端（Android scroll-anchoring）内容长高也派发 scroll 事件，此刻 scrollTop 未动
+	   而 scrollHeight 已增 → gap>24 会被误判「上滑」终止跟随。touchstart 置标志、
+	   touchend 延迟 300ms 清除（覆盖惯性滚动），程序贴底滚动不受影响。 */
+	const winTouching: Map<string, boolean> = new Map<string, boolean>()
+	function onWindowTouchStart(key: string): void {
+		winTouching.set(key, true)
+	}
+	function onWindowTouchEnd(key: string): void {
+		setTimeout((): void => { winTouching.set(key, false) }, 300)
+	}
+
+	/** 用户滚动：距底部 ≤24px（lower-threshold 同值）视为贴底恢复跟随，离开即暂停 */
+	function onWindowScroll(key: string, e: UniScrollEvent): void {
+		const d = e.detail
+		const gap: number = d.scrollHeight - d.scrollTop - (winHeightOf(key))
+		if (gap <= 24) { winPinned.set(key, true); return }
+		// 离开底部：仅用户手势期间才暂停跟随（内容长高的 anchoring 事件不算）
+		if (winTouching.get(key) == true) winPinned.set(key, false)
+	}
+
+	/** scrolltolower 兜底：部分端 scroll 事件的 scrollHeight 不可靠，触底事件必真 */
+	function onWindowLower(key: string): void {
+		winPinned.set(key, true)
+	}
+
+	/* 视窗高度：scroll-view 显式高度 = min(内容估算, 232)（windowStyle）。
+	   优先元素实测高度算 gap（最准）；量不到时回落当前段的估算封顶值，
+	   绝不回落固定 232——内容不足时窗高更小，固定回落会把「已在底部」误判成
+	   「离底很远」而永久暂停贴底跟随。 */
+	const winHeights: Map<string, number> = new Map<string, number>()
+	function winHeightOf(key: string): number {
+		const measured: number | undefined = winHeights.get(key)
+		if (measured != null) return measured!
+		const seg: BubbleSegment | undefined = segments.value.find((s: BubbleSegment): boolean => s.key === key)
+		if (seg != null) return Math.min(seg!.estHeight + 2, WINDOW_MAX_PX)
+		return WINDOW_MAX_PX
+	}
+	function measureWindow(key: string): void {
+		const el = uni.getElementById('tbwin-' + key)
+		if (el == null) return
+		const rect = el.getBoundingClientRect()
+		if (rect.height > 0) winHeights.set(key, rect.height)
+	}
+
+	/* 内容签名：段内成员数 + 各行 body/preview 长度。任何可见高度变化都触发
+	   贴底跟随（新步骤到达 / 工具结果长高）；用户上滑（pinned=false）时不动。 */
+	const windowSig: ComputedRef<string> = computed<string>((): string => {
+		const parts: string[] = []
+		segments.value.forEach((seg: BubbleSegment): void => {
+			if (!seg.windowed) return
+			let w: number = seg.members.length
+			seg.members.forEach((item: ChatBlock): void => {
+				// args 流式增长与 changesOpen/rowOpen 展开同样改变高度，一并计入签名；
+				// body 默认折叠不占高（rowOpen 才计入），否则收起态估算虚高误开滚动窗
+				if (item.rowOpen || item.kind === 'text') w += Math.min(item.body.length, 2400)
+				w += item.preview.length + item.args.length + (item.changesOpen ? 1000 : 0)
+			})
+			parts.push(seg.key + ':' + w.toString())
+		})
+		return parts.join('|')
+	})
+
+	/* 【code review 修复 · pre-flush 时序】watch 默认先于组件重渲染执行：
+	   直接 followBottom 会把 scroll-top 设到【旧】内容底部，新成员渲染后长高
+	   却无后续触发 → 最后一帧永远差一截。nextTick 等 DOM 更新后再量高+跟随，
+	   并补一次 60ms 延迟补滚（app-chat.uvue list-view 同款经验）。 */
+	watch(windowSig, (): void => {
+		nextTick((): void => {
+			segments.value.forEach((seg: BubbleSegment): void => {
+				if (!seg.windowed) return
+				measureWindow(seg.key)
+				followBottom(seg.key)
+			})
+			setTimeout((): void => {
+				segments.value.forEach((seg: BubbleSegment): void => {
+					if (!seg.windowed) return
+					measureWindow(seg.key)
+					followBottom(seg.key)
+				})
+			}, 60)
+		})
+	})
+
+	// 运行批次盖子的「正在执行中 · Ns」：每秒只翻一个响应式 tick，
+	// formatBatchElapsed 读 tick 建立重渲染依赖，保证同一帧内所有运行中批次口径一致。
+	// 有 loading 批次才起定时器；收口/卸载立即停，避免 list-view 复用单元格后空转。
+	const nowTick: Ref<number> = ref<number>(Date.now())
+	const hasLiveBatch: ComputedRef<boolean> = computed<boolean>((): boolean => {
+		return props.message.blocks.some((item: ChatBlock): boolean => item.kind === 'batch' && item.status === 'loading')
+	})
+	let tickTimer: number = 0
+
+	function stopTick(): void {
+		if (tickTimer != 0) {
+			clearInterval(tickTimer)
+			tickTimer = 0
+		}
+	}
+
+	watch(hasLiveBatch, (live: boolean): void => {
+		if (live) {
+			nowTick.value = Date.now()
+			if (tickTimer == 0) {
+				tickTimer = setInterval((): void => {
+					nowTick.value = Date.now()
+				}, 1000)
+			}
+			return
+		}
+		stopTick()
+	}, { immediate: true })
+
+	onUnmounted((): void => {
+		stopTick()
+	})
+
+	function t(key: string, values?: Record<string, string>): string {
+		if (values == null) return i18n.global.t(key)
+		return i18n.global.t(key, values)
+	}
+
+	function iconOf(item: ChatBlock): string {
+		return item.icon.length > 0 ? item.icon : 'app'
+	}
+
+	/* PC 同源 SVG 图标（工具 17 类 + 思考星芒 + 智能体机器人）：data-uri image 渲染，
+	   按主题/运行态着色；其余块（notice/retry 等）仍走 rice-icon。 */
+	function svgIconOf(item: ChatBlock): string {
+		const dark: boolean = isDark.value
+		const live: boolean = item.status === 'loading'
+		if (item.kind === 'thinking') return thinkingIconUri(dark, live)
+		if (item.kind === 'agent') return agentIconUri(dark, live)
+		return toolIconUri(item.bareTool, '', dark, live)
+	}
+	function useSvg(item: ChatBlock): boolean {
+		return hasSvgIcon(item.kind)
+	}
+	/** 行尾常驻状态点（PC .tool-status-icon）：loading 绿闪 / done 绿 / warn 橙 / reject 红 */
+	function rowDotClass(item: ChatBlock): string {
+		if (item.status === 'loading') return 'app-chat-bubble__dot--loading'
+		if (item.status === 'warn') return 'app-chat-bubble__dot--warn'
+		if (item.status === 'reject') return 'app-chat-bubble__dot--reject'
+		return 'app-chat-bubble__dot--done'
+	}
+	/** 工具行耗时（PC .tool-duration）：状态点前展示，失败红色由 label--failed 同族类承担 */
+	function rowDuration(item: ChatBlock): string {
+		return item.kind === 'tool' ? item.duration : ''
+	}
+
+	/** 批次盖子 label（PC labelText 同口径）：
+	 *  - 运行中：「正在执行中 · Ns」（formatBatchElapsed 整秒进位，每秒 tick 现算）；
+	 *  - 收口后：closeBatch 已落「执行工具 N 次 · 思考 M 次」分类计数，无耗时。 */
+	function batchLabel(item: ChatBlock): string {
+		if (item.status === 'loading' && item.startedAt > 0) {
+			return item.label + ' · ' + formatBatchElapsed(item.startedAt, nowTick.value)
+		}
+		return item.label
+	}
+
+	function dotClass(status: string): string {
+		if (status === 'done') return 'app-chat-bubble__dot--done'
+		if (status === 'warn') return 'app-chat-bubble__dot--warn'
+		if (status === 'reject') return 'app-chat-bubble__dot--reject'
+		return 'app-chat-bubble__dot--loading'
+	}
+
+	function onToggleCompact(): void {
+		props.message.compactOpen = !props.message.compactOpen
+	}
+
+	/** 点批次盖子折叠/展开组内成员。无成员的空批次不响应：点了也看不出变化，
+	 *  与「交互态与文案相符」对齐；成员归属按 batchId 实时查，不依赖可能滞后的 batchCount。 */
+	function onToggleBatch(head: ChatBlock): void {
+		const hasMember: boolean = props.message.blocks.some((item: ChatBlock): boolean =>
+			item.kind !== 'batch' && item.batchId === head.id)
+		if (!hasMember) return
+		head.batchCollapsed = !head.batchCollapsed
+		/* 【code review 修复 · 状态重置】收起销毁 scroll-view 后 winTops/winPinned
+		   残留：历史批次再展开会带着旧大数 scroll-top 直接落底（违背 PC「从头看」），
+		   暂停态也跨折叠残留。展开时重置：closed 首窗 pos=0 不跟随（从头看），
+		   running 首窗贴底跟随；收起时清掉两表条目防泄漏。 */
+		const key: string = head.id
+		if (head.batchCollapsed) {
+			winTops.value.delete(key)
+			winPinned.delete(key)
+			winHeights.delete(key)
+			return
+		}
+		const live: boolean = head.status === 'loading'
+		winPinned.set(key, live)
+		const m: Map<string, number> = new Map<string, number>()
+		winTops.value.forEach((v: number, k: string): void => { m.set(k, v) })
+		m.set(key, live ? 200000 : 0)
+		winTops.value = m
+	}
+
+	// 原生 text 节点承载超长工具结果容易卡顿；只展示有界预览（与点击态无关）
+	function displayText(text: string): string {
+		return text.length > 2400 ? text.slice(0, 2400) + '\n…' : text
+	}
+
+	/** 点过程行头展开/收起思考全文/工具结果（2026-11 用户拍板：默认折叠）。
+	 *  无 body 的行不响应：点了也看不出变化，与批次盖子「无成员不响应」同口径。 */
+	function onToggleRow(item: ChatBlock): void {
+		if (item.body.length === 0) return
+		item.rowOpen = !item.rowOpen
+	}
+
+	/* ---- 文件变更卡：默认 3 行（桌面 COLLAPSED_ROWS 同口径），点「再显示 N 个」展开 ---- */
+
+	function visibleChanges(item: ChatBlock): ChatFileChange[] {
+		if (item.changesOpen || item.changes.length <= 3) return item.changes
+		return item.changes.slice(0, 3)
+	}
+
+	function changeKindClass(kind: string): string {
+		if (kind === 'A') return 'app-chat-bubble__changes-kind--add'
+		if (kind === 'D') return 'app-chat-bubble__changes-kind--del'
+		return 'app-chat-bubble__changes-kind--mod'
+	}
+
+	function onToggleChanges(item: ChatBlock): void {
+		item.changesOpen = !item.changesOpen
+	}
+
+	/* ---- 交互卡事件：气泡只做转发，真正的提交在 app-chat 里调 hook ---- */
+
+	function onInteractApprove(actionId: string, approved: boolean): void {
+		emit('approve', actionId, approved)
+	}
+
+	function onInteractAnswer(actionId: string): void {
+		emit('answer', actionId)
+	}
+
+	function onInteractEdit(actionId: string, index: number, patch: AskAnswer): void {
+		emit('edit', actionId, index, patch)
+	}
+
+	/** 附件缩略图点击：系统大图预览（同张消息内全部图一起预览，可滑动切换）。
+	 *  必须用 props.message——script setup 无裸 message 标识符（codereview P1）。 */
+	function onPreviewAttach(url: string): void {
+		uni.previewImage({ urls: props.message.imageUrls, current: url })
 	}
 </script>
 
@@ -35,27 +758,87 @@
 	.app-chat-bubble {
 		/* 宽度上限由父级 app-chat__bubble-wrap 定宽控制（UCSS 的 max-width 不支持百分比） */
 		flex-shrink: 1;
-		padding: 11px 14px;
-		border-radius: 17px;
 		flex-direction: column;
 
+		/* 用户气泡：桌面 .msg-row.user .msg-bubble（右圆角收窄的实色气泡） */
 		&--user {
 			/*UCSS 布局默认由父级控制，用户气泡靠父容器 justify-content: flex-end 右对齐 */
 			align-items: flex-end;
+			padding: 11px 14px;
+			border-radius: 17px;
 			border-bottom-right-radius: 6px;
 			background-color: var(--color-primary);
 		}
 
+		/* 助手消息【无气泡框】：桌面 .msg-row.assistant .msg-bubble 就是通栏透明容器，
+		   没有边框 / 底色 / 圆角 / 内边距（用户多次报障「桌面没有框，移动端有框」）。
+		   padding 只保留纵向 0，横向留给 .app-chat__msg 的 18px 行内边距。 */
 		&--ai {
-			align-items: flex-start;
-			border-width: 1px;
-			border-style: solid;
-			border-color: var(--color-border);
-			background-color: var(--color-bg-card);
+			align-items: stretch;
+			padding: 0;
+			border-width: 0;
+			border-radius: 0;
+			background-color: transparent;
+		}
+
+		/* 身份头：桌面 .msg-head（22px 圆形头像 + 13px/600 名称，下缘 6px） */
+		&__head {
+			flex-direction: row;
+			align-items: center;
+			margin-bottom: 6px;
+		}
+
+		&__avatar {
+			width: 22px;
+			height: 22px;
+			border-radius: 11px;
+			margin-right: 8px;
+			flex-shrink: 0;
+		}
+
+		&__name {
+			font-size: 13px;
+			font-weight: 600;
+			line-height: 16px;
+			color: var(--color-text);
+			overflow: hidden;
+			text-overflow: ellipsis;
+			white-space: nowrap;
+		}
+
+		/* 插话徽标（PC .steer-note-badge 同形态）：胶囊 + 下缘 6px。
+		   PC 是 accent 淡底胶囊叠在浅色用户气泡上；移动端用户气泡是 primary 实色底，
+		   用半透明白底 + 主题反色字，与 PC 同等对比度口径。 */
+		&__steer-badge {
+			align-self: flex-start;
+			padding: 2px 8px;
+			margin-bottom: 6px;
+			border-radius: 999px;
+			background-color: rgba(255, 255, 255, 0.18);
+			font-size: 11px;
+			font-weight: 600;
+			line-height: 17px;
+			color: var(--color-text-inverse);
+		}
+
+		/* 用户附件缩略图（PC .user-attach-imgs：网格瓦片，可点开大图） */
+		&__attach-imgs {
+			flex-direction: row;
+			flex-wrap: wrap;
+			margin-top: 6px;
+			margin-bottom: 6px;
+		}
+
+		&__attach-img {
+			width: 78px;
+			height: 78px;
+			border-radius: 8px;
+			margin-right: 6px;
+			margin-bottom: 6px;
 		}
 
 		&__text {
-			font-size: 13.5px;
+			font-size: 14px;
 			line-height: 22px;
 
 			&--user {
@@ -67,27 +850,434 @@
 			}
 		}
 
-		&__pending {
+		/* 首帧前空占位（指示器退役后的唯一等待形态）：定高 22px 与过程行头同高，
+		   无 spinner 无文案——首帧到达即让位给真实内容，不再反复增删行。 */
+		&__idle-slot {
+			height: 22px;
+		}
+
+		/* 【⑳ Qoder 层级 · 移动端】成员区容器：relative 供引导线 absolute 定位。
+		   PC 把线画在盖子 ::before 上（UCSS 无伪元素），移动端改为成员区自带
+		   1px 竖线 view：top:0/bottom:0 自动随成员增减/限高窗伸缩，无需 JS 量高。 */
+		&__group {
+			position: relative;
+			flex-direction: column;
+			align-self: stretch;
+		}
+
+		/* 引导线：贴盖子箭头中列（盖子 padding-left 2 + ml 2 + 箭头半宽 3 ≈ 7px），
+		   1px 极淡（PC --border-color + opacity .6 同口径，用 border-light 变量等效）。 */
+		&__group-guide {
+			position: absolute;
+			left: 7px;
+			top: 0;
+			bottom: 0;
+			width: 1px;
+			background-color: var(--color-border-light);
+		}
+
+		/* 平铺批次的成员列（滚动窗段的 scroll-view 自身即列容器，无需再包） */
+		&__group-body {
+			flex-direction: column;
+			align-self: stretch;
+		}
+
+		/* 成员整体右移一列：26px = 盖子箭头列宽（PC ⑳ padding-left 26px 同口径）。
+		   margin 写在 wrapper 上而非行头 padding：行内前导件/文本列几何零改动，
+		   限高窗估算高度（memberHeight）也不受影响。交互卡豁免见 memberWrapClass。 */
+		&__member {
+			margin-left: 26px;
+		}
+
+		/* 桌面端 .turn-compact-toggle：透明底、无边框、13px/1.6 单行摘要 */
+		&__compact {
+			flex-direction: row;
+			align-items: center;
+			align-self: stretch;
+			margin-top: 2px;
+			margin-bottom: 6px;
+			padding-top: 4px;
+			padding-bottom: 4px;
+			padding-left: 2px;
+			padding-right: 2px;
+		}
+
+		/* CSS 边框箭头（取代字符 ▸/›）：字符箭头在不同字体下基线与字宽不一致，
+		   row 里 align-items:center 也无法真正居中（用户报障「箭头不居中」的根因）。
+		   改为固定 7x7 视图 + 右/下边框 + rotate，几何中心即视觉中心，跨端稳定。 */
+		&__chevron {
+			width: 7px;
+			height: 7px;
+			margin-right: 6px;
+			margin-left: 2px;
+			flex-shrink: 0;
+			border-right-width: 1.5px;
+			border-right-style: solid;
+			border-right-color: var(--color-text-tertiary);
+			border-bottom-width: 1.5px;
+			border-bottom-style: solid;
+			border-bottom-color: var(--color-text-tertiary);
+
+			/* 右向：右+下边框逆时针转 45°；下向：顺时针转 45° */
+			&--right {
+				transform: rotate(-45deg);
+			}
+
+			&--down {
+				transform: rotate(45deg);
+			}
+
+			/* 批次盖子用小一号箭头，与 13px 标签更协调 */
+			&--sm {
+				width: 6px;
+				height: 6px;
+			}
+		}
+
+		/* 摘要头只承载「状态+耗时」短文本：不再 flex:1 吃满整行（旧长文本折行遮挡真因），
+		   按内容收缩，右侧留给 chips；极端长耗时词也单行截断，绝不折行。 */
+		&__compact-label {
+			flex-shrink: 1;
+			min-width: 0;
+			font-size: 13px;
+			line-height: 21px;
+			/* UCSS lines 已废弃（编译告警且不生效），单行截断与 __batch-label 同口径 */
+			white-space: nowrap;
+			text-overflow: ellipsis;
+			overflow: hidden;
+			color: var(--color-text-tertiary);
+		}
+
+		/* 图标+数字 chip：13px 图标 + 12px 数字，枚宽 ≈30px，四类全出单行也放得下 */
+		&__chip {
+			flex-direction: row;
+			align-items: center;
+			flex-shrink: 0;
+			margin-left: 10px;
+		}
+
+		&__chip-icon {
+			width: 13px;
+			height: 13px;
+			flex-shrink: 0;
+		}
+
+		&__chip-num {
+			margin-left: 3px;
+			font-size: 12px;
+			line-height: 21px;
+			color: var(--color-text-tertiary);
+		}
+
+		&__process {
+			flex-direction: column;
+			align-self: stretch;
+			margin-top: 2px;
+		}
+
+		/* 批次限高滚动窗（PC WINDOW_MAX_PX=232 同款）：【必须写死 height 而非
+		   max-height】uni-app x 的 scroll-view 在 direction=vertical 下若无确定
+		   高度会按默认高度布局（max-height 只裁内容不定容器）——成员不足时容器
+		   仍占默认高，「已处理」盖子与「正在执行中」盖子之间出现一大段空白
+		   （2026-11 用户实机报障真因）。
+		   高度改为按内容实测估算（windowHeights，29px/行 + 展开卡体折算，
+		   上限 232px）：内容少时容器随之收缩无空白，超出时封顶内部滚动。
+		   透明底无边框：与平铺过程行同一形态，只是多了一层可滚动裁剪。 */
+		&__batch-window {
+			align-self: stretch;
+			flex-direction: column;
+			background-color: transparent;
+			border-width: 0;
+		}
+
+		/* 过程行：严格对齐 PC「无竖条 / 无圆角 / 透明底 / 紧凑单行」契约 */
+		&__batch,
+		&__row-head {
+			flex-direction: row;
+			align-items: center;
+			padding-top: 4px;
+			padding-bottom: 4px;
+			padding-left: 2px;
+			padding-right: 2px;
+			min-height: 22px;
+		}
+
+		/* 桌面后发 Qoder 对齐层：主标签 13px / 次要摘要 12.5px */
+		&__row-label {
+			margin-left: 7px;
+			font-size: 13px;
+			font-weight: 500;
+			line-height: 21px;
+			color: var(--color-text);
+			flex-shrink: 0;
+		}
+
+		/* 批次盖子：PC 形态——箭头左置、状态文案+整批耗时跟排、
+		   状态指示（spinner/点）钉死在行尾固定槽位。
+		   旧版右侧堆「图标+计数+箭头+彩点」导致状态点随内容长度来回跑（用户报障）。 */
+		&__batch {
+			justify-content: flex-start;
+		}
+
+		/* 主区吃满剩余宽度，把行尾状态槽推到固定位置（UCSS 不认 margin-left:auto） */
+		&__batch-main,
+		&__row-main {
+			flex: 1;
+			min-width: 0;
 			flex-direction: row;
 			align-items: center;
 		}
 
-		// loading 组件的圈色由 border-color 控制（对齐 uni-ai-x），颜色走主题变量
-		&__spinner {
-			width: 16px;
-			height: 16px;
-			margin-right: 8px;
-			border-color: var(--color-text-tertiary);
+		/* PC .tool-batch-label：11.5px 常规字重二级灰（手机 ×1.17 ≈ 13px），
+		   运行中不 primary 高亮（PC 恒二级灰）；耗时跟排在 label 内，单行截断。
+		   【缩进修复】文本列与 __compact-label / __row-label 同列（前导件右缘恒 15px）：
+		   字号/字重/行高补齐共享规则拆分后的缺口，且不得再加 margin-left。 */
+		&__batch-label {
+			font-size: 13px;
+			line-height: 21px;
+			font-weight: 400;
+			color: var(--color-text-secondary);
+			flex-shrink: 1;
+			/* UCSS lines 已废弃（编译告警且不生效），单行截断与同文件 __name 同口径 */
+			white-space: nowrap;
+			text-overflow: ellipsis;
+			overflow: hidden;
 		}
 
-		&__pending-text {
-			font-size: 13.5px;
+		/* ── 错误块（PC .chunk-error：红底 + 左 2px 红条 + 纯错误文本，无图标无标题） ── */
+		&__error {
+			margin-top: 4px;
+			margin-bottom: 4px;
+			padding: 8px 10px;
+			border-radius: 6px;
+			background-color: rgba(229, 72, 77, 0.08);
+			border-left-width: 2px;
+			border-left-style: solid;
+			border-left-color: var(--color-error);
+		}
+
+		&__error-text {
+			font-size: 13px;
+			line-height: 19px;
+			color: var(--color-error);
+			word-break: break-all;
+		}
+
+		/* PC 同源 SVG 行图标（13px，PC .tool-icon 同尺寸） */
+		&__row-svg {
+			width: 13px;
+			height: 13px;
+			flex-shrink: 0;
+		}
+
+		/* 字体图标定宽槽：与 __row-svg 同 13×13，保证行文本列右缘恒 15px 不随字形漂移 */
+		&__row-icon {
+			width: 13px;
+			height: 13px;
+			flex-shrink: 0;
+			align-items: center;
+			justify-content: center;
+		}
+
+		/* PC .tool-file-name：等宽字体文件名（手机系统等宽字体不可控，用次级色小字） */
+		&__row-file {
+			margin-left: 5px;
+			font-size: 12px;
+			color: var(--color-text-secondary);
+			white-space: nowrap;
+			text-overflow: ellipsis;
+			overflow: hidden;
+		}
+
+		/* PC .tool-diff：+N 绿 / -N 红小字 */
+		&__row-diff-add {
+			margin-left: 5px;
+			font-size: 11px;
+			color: var(--color-success-text);
+			flex-shrink: 0;
+		}
+
+		&__row-diff-del {
+			margin-left: 4px;
+			font-size: 11px;
+			color: var(--color-error);
+			flex-shrink: 0;
+		}
+
+		/* PC .tool-duration：行尾耗时小字，失败红色 */
+		&__row-duration {
+			margin-left: 6px;
+			margin-right: 2px;
+			font-size: 10px;
 			color: var(--color-text-tertiary);
+			flex-shrink: 0;
+		}
+
+		&__row-duration--failed {
+			color: var(--color-error);
+		}
+
+		&__dot {
+			flex-shrink: 0;
+			margin-left: 6px;
+			margin-right: 2px;
+			width: 8px;
+			height: 8px;
+			border-radius: 4px;
+			background-color: var(--color-text-tertiary);
+
+			&--loading { background-color: var(--color-primary); }
+			&--done { background-color: #4ac26b; }
+			&--warn { background-color: #e5a13b; }
+			&--reject { background-color: var(--color-error); }
+		}
+
+		&__row {
+			flex-direction: column;
+			align-self: stretch;
+			border-width: 0;
+			background-color: transparent;
+		}
+
+		&__row-label--failed {
+			color: var(--color-error);
+		}
+
+		&__row-args,
+		&__row-preview {
+			/* 单行摘要：吃掉剩余宽度，超长用省略号收口，右侧留给行尾状态槽。
+			   两者模板上互斥（args 优先），CSS 不再各给 flex:1 造成互相挤压重叠。 */
+			flex: 1;
+			min-width: 0;
+			margin-left: 8px;
+			font-size: 13px;
+			line-height: 20px;
+			color: var(--color-text-tertiary);
+			overflow: hidden;
+			text-overflow: ellipsis;
+			white-space: nowrap;
+		}
+
+		&__row-preview {
+			font-size: 12px;
+		}
+
+			/* 桌面卡体透明无底色；过程 text 用 DIM 次级文字与最终正文分层 */
+		&__row-body {
+			margin-top: 2px;
+			margin-bottom: 6px;
+			margin-left: 20px;
+			padding-top: 6px;
+			padding-bottom: 6px;
+			padding-left: 8px;
+			padding-right: 8px;
+			font-size: 13px;
+			line-height: 20px;
+			color: var(--color-text-secondary);
+			background-color: transparent;
+		}
+
+		/* 过程正文段容器：markdown 渲染态（app-md-text 自带字号/行距/主题变量），
+		   与行头保持缩进层次；替代旧纯文本 row-body--process-text（原文 dump 已废） */
+		&__process-md {
+			margin-top: 4px;
+			margin-bottom: 6px;
+			margin-left: 20px;
 		}
 
 		&__meta {
 			margin-top: 6px;
-			font-size: 10.5px;
+			font-size: 11px;
+			color: var(--color-text-tertiary);
+		}
+
+		/* 文件变更卡：桌面 .msg-run-changes-card——浅底圆角小卡，头部统计 + 文件行 */
+		&__changes {
+			align-self: stretch;
+			margin: 4px 0 6px;
+			padding: 8px 10px;
+			border-radius: 10px;
+			background-color: var(--color-bg-card);
+			flex-direction: column;
+		}
+
+		&__changes-head {
+			flex-direction: row;
+			align-items: center;
+		}
+
+		&__changes-icon {
+			flex-shrink: 0;
+			font-size: 13px;
+			color: var(--color-text-tertiary);
+		}
+
+		&__changes-title {
+			margin-left: 7px;
+			font-size: 13px;
+			font-weight: 500;
+			line-height: 20px;
+			color: var(--color-text);
+		}
+
+		&__changes-stat {
+			margin-left: 8px;
+			font-size: 12px;
+			line-height: 20px;
+			color: var(--color-text-tertiary);
+		}
+
+		&__changes-row {
+			flex-direction: row;
+			align-items: center;
+			margin-top: 5px;
+		}
+
+		&__changes-kind {
+			flex-shrink: 0;
+			width: 16px;
+			font-size: 11px;
+			font-weight: 700;
+			line-height: 18px;
+			text-align: center;
+
+			&--add { color: var(--color-success-text); }
+			&--mod { color: var(--color-warning); }
+			&--del { color: var(--color-error); }
+		}
+
+		&__changes-path {
+			flex: 1;
+			min-width: 0;
+			margin-left: 7px;
+			font-size: 12px;
+			line-height: 18px;
+			color: var(--color-text-secondary);
+			overflow: hidden;
+			text-overflow: ellipsis;
+			white-space: nowrap;
+		}
+
+		&__changes-add {
+			flex-shrink: 0;
+			margin-left: 6px;
+			font-size: 11px;
+			line-height: 18px;
+			color: var(--color-success-text);
+		}
+
+		&__changes-del {
+			flex-shrink: 0;
+			margin-left: 4px;
+			font-size: 11px;
+			line-height: 18px;
+			color: var(--color-error);
+		}
+
+		&__changes-more {
+			margin-top: 6px;
+			font-size: 12px;
+			line-height: 18px;
 			color: var(--color-text-tertiary);
 		}
 	}

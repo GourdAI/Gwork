@@ -1,0 +1,892 @@
+/**
+ * 自研流式 Markdown → 语义 HTML 解析器（纯 UTS，零原生依赖）。
+ *
+ * 为什么自研（2026-11 用户拍板）：uni-ai-md 是 Android arm64 so + 鸿蒙 har 的原生插件，
+ * 标准调试基座不含原生代码 → 真机调试永远纯文本回退（必须打自定义基座才能看效果），
+ * 且 iOS 无实现。自研纯 UTS 解析在 Android / iOS / 鸿蒙 / Web 全平台同一份代码，
+ * 标准基座直接生效，包体甩掉 10.8MB 原生产物。
+ *
+ * 契约（app-md-text 消费）：
+ * - parseMarkdownBlocks(text, complete)：按行切块，产出「无样式语义 HTML」块数组，
+ *   交给 utils/markdown-html.ts 的 prepareMdHtml 注入内联样式后进 rich-text。
+ * - complete=false（流式中）：最后一个块标记 stable=false，下一帧整体替换；
+ *   stable=true 的块在纯追加式流式增长中内容与序号恒定（组件按 index 钉 key 防闪屏）。
+ * - 行内支持：`code`、粗体（双星/双下划线）、斜体（单星/单下划线）、~~del~~、![img](src)、[link](href)、
+ *   （注意：块注释里严禁出现「星+斜杠」相邻序列——会提前终止注释，语法直接炸）
+ *   <url> 自动链接、裸 http(s) 链接、硬换行（行尾两空格 / 反斜杠）。
+ * - 块级支持：ATX 标题、```/~~~ 围栏代码（流式未闭合也成块）、> 引用（可嵌套）、
+ *   有序/无序列表（缩进嵌套 + 松列表段落）、setext 标题、表格（| 语法）、分隔线、段落。
+ * - math（$$…$$）/mermaid 围栏不渲染图形，按源码/代码块展示（原生插件专属能力，优雅降级）。
+ * - 所有文本一律 HTML 转义，链接协议白名单（http/https/mailto），杜绝注入。
+ *
+ * 编写约束（与 speech-recognizer.uts 同口径）：
+ * - 只用 TS/UTS 双兼容子集：显式类型、无正则、无 any、无解构；字符串按码元扫描。
+ * - 不 import 任何 .ts / uni / vue（.uts 依赖链只走 .uts）；本文件零依赖。
+ * - build/verify-mobile-fixes.cjs 会剥离类型注解后在 node 里跑行为断言。
+ */
+
+export type MdBlock = {
+	/** 语义 HTML（未注入样式；样式由 markdown-html.ts 管道负责） */
+	html: string
+	/** false = 流式未收口尾块，下一帧会整体替换；true = 已稳定块 */
+	stable: boolean
+}
+
+/* ---------------- 基础工具 ---------------- */
+
+function mdEscape(text: string): string {
+	let out = ''
+	for (let i = 0; i < text.length; i++) {
+		const ch = text.charAt(i)
+		if (ch === '&') out += '&amp;'
+		else if (ch === '<') out += '&lt;'
+		else if (ch === '>') out += '&gt;'
+		else if (ch === '"') out += '&quot;'
+		else out += ch
+	}
+	return out
+}
+
+/** 去掉行首至多 3 个空格（CommonMark 块级容差） */
+function mdStripIndent(line: string): string {
+	let i = 0
+	while (i < line.length && i < 3 && line.charAt(i) === ' ') i++
+	return line.substring(i)
+}
+
+function mdTrim(text: string): string {
+	return text.trim()
+}
+
+function mdIsBlank(line: string): boolean {
+	return mdTrim(line).length === 0
+}
+
+/** 行首缩进宽度（空格=1，tab=4） */
+function mdIndentWidth(line: string): number {
+	let w = 0
+	for (let i = 0; i < line.length; i++) {
+		const ch = line.charAt(i)
+		if (ch === ' ') w += 1
+		else if (ch === '\t') w += 4
+		else break
+	}
+	return w
+}
+
+/** 去掉行首恰好 width 个空格当量（tab 按 4 计，不足部分保留） */
+function mdRemoveIndent(line: string, width: number): string {
+	let rest = width
+	let i = 0
+	while (i < line.length && rest > 0) {
+		const ch = line.charAt(i)
+		if (ch === ' ') { rest -= 1; i++ }
+		else if (ch === '\t') { rest -= 4; i++ }
+		else break
+	}
+	return line.substring(i)
+}
+
+/* ---------------- 块级识别 ---------------- */
+
+/** ATX 标题：#{1,6} + 空格；返回级别，0 = 不是标题 */
+function mdHeadingLevel(line: string): number {
+	const s = mdStripIndent(line)
+	let n = 0
+	while (n < s.length && s.charAt(n) === '#') n++
+	if (n === 0 || n > 6) return 0
+	if (n === s.length) return n
+	if (s.charAt(n) !== ' ' && s.charAt(n) !== '\t') return 0
+	return n
+}
+
+/** 标题正文（去掉尾部可选的 ### 收口） */
+function mdHeadingContent(line: string, level: number): string {
+	let content = mdTrim(mdStripIndent(line).substring(level))
+	let end = content.length
+	while (end > 0 && content.charAt(end - 1) === '#') end--
+	if (end < content.length && (end === 0 || content.charAt(end - 1) === ' ')) {
+		content = mdTrim(content.substring(0, end))
+	}
+	return content
+}
+
+/** 围栏代码开栏：```/~~~ ≥3；返回 fence 字符串，'' = 不是开栏 */
+function mdFenceOpen(line: string): string {
+	const s = mdStripIndent(line)
+	if (s.length < 3) return ''
+	const ch = s.charAt(0)
+	if (ch !== '`' && ch !== '~') return ''
+	let n = 0
+	while (n < s.length && s.charAt(n) === ch) n++
+	if (n < 3) return ''
+	// 反引号围栏的 info string 不能再含反引号
+	if (ch === '`' && s.substring(n).indexOf('`') >= 0) return ''
+	return s.substring(0, n)
+}
+
+/** 闭栏：同字符、长度 ≥ 开栏、后面只有空白 */
+function mdFenceClose(line: string, fence: string): boolean {
+	const s = mdTrim(mdStripIndent(line))
+	if (s.length < fence.length) return false
+	const ch = fence.charAt(0)
+	for (let i = 0; i < s.length; i++) {
+		if (s.charAt(i) !== ch) return false
+	}
+	return true
+}
+
+/** 围栏 info string（语言标签）；math/mermaid 也走代码块展示 */
+function mdFenceLang(line: string, fence: string): string {
+	const info = mdTrim(mdStripIndent(line).substring(fence.length))
+	const sp = info.indexOf(' ')
+	return sp < 0 ? info : info.substring(0, sp)
+}
+
+/** 分隔线：≥3 个连字符/星号/下划线，可夹空白 */
+function mdIsHr(line: string): boolean {
+	const s = mdTrim(mdStripIndent(line))
+	if (s.length < 3) return false
+	let ch = ''
+	let count = 0
+	for (let i = 0; i < s.length; i++) {
+		const c = s.charAt(i)
+		if (c === ' ' || c === '\t') continue
+		if (ch === '') ch = c
+		if (c !== ch) return false
+		if (c !== '-' && c !== '*' && c !== '_') return false
+		count++
+	}
+	return count >= 3
+}
+
+/** 引用行：strip 后以 > 开头 */
+function mdIsQuote(line: string): boolean {
+	return mdStripIndent(line).charAt(0) === '>'
+}
+
+/** 行首连续引用层数（> > > …，允许层间一个空格） */
+function mdQuoteDepth(line: string): number {
+	const s = mdStripIndent(line)
+	let depth = 0
+	let i = 0
+	while (i < s.length && s.charAt(i) === '>') {
+		depth++
+		i++
+		if (i < s.length && s.charAt(i) === ' ') i++
+	}
+	return depth
+}
+
+/** 去掉一层引用标记（> 与其后一个空格） */
+function mdStripQuote(line: string): string {
+	const s = mdStripIndent(line)
+	if (s.charAt(0) !== '>') return line
+	let rest = s.substring(1)
+	if (rest.charAt(0) === ' ') rest = rest.substring(1)
+	return rest
+}
+
+type MdListMark = {
+	/** '' = 不是列表项 */
+	kind: string
+	/** 标记总宽（缩进 + 标记 + 后置空白），子内容按它去缩进 */
+	width: number
+	/** 有序列表起始序号 */
+	start: number
+}
+
+/** 列表标记：-/+/•/* 或 数字./数字) + 空白 */
+function mdListMark(line: string): MdListMark {
+	const indent = mdIndentWidth(line)
+	if (indent >= 4) return { kind: '', width: 0, start: 1 } as MdListMark
+	const s = line.substring(indent)
+	if (s.length === 0) return { kind: '', width: 0, start: 1 } as MdListMark
+	const c0 = s.charAt(0)
+	if ((c0 === '-' || c0 === '+' || c0 === '*' || c0 === '•') && (s.length === 1 || s.charAt(1) === ' ' || s.charAt(1) === '\t')) {
+		// 「- - -」是分隔线不是列表
+		if (mdIsHr(line)) return { kind: '', width: 0, start: 1 } as MdListMark
+		let w = indent + 1
+		if (s.length > 1) {
+			w += 1
+			let j = 2
+			while (j < s.length && (s.charAt(j) === ' ' || s.charAt(j) === '\t')) { w += 1; j++ }
+		}
+		return { kind: 'ul', width: w, start: 1 } as MdListMark
+	}
+	let n = 0
+	while (n < s.length && n < 9 && s.charAt(n) >= '0' && s.charAt(n) <= '9') n++
+	if (n === 0 || n >= s.length) return { kind: '', width: 0, start: 1 } as MdListMark
+	const delim = s.charAt(n)
+	if (delim !== '.' && delim !== ')') return { kind: '', width: 0, start: 1 } as MdListMark
+	if (n + 1 < s.length && s.charAt(n + 1) !== ' ' && s.charAt(n + 1) !== '\t') return { kind: '', width: 0, start: 1 } as MdListMark
+	let w = indent + n + 1
+	if (n + 1 < s.length) {
+		w += 1
+		let j = n + 2
+		while (j < s.length && (s.charAt(j) === ' ' || s.charAt(j) === '\t')) { w += 1; j++ }
+	}
+	const num = parseInt(s.substring(0, n))
+	return { kind: 'ol', width: w, start: isNaN(num) ? 1 : num } as MdListMark
+}
+
+/** 表格分隔行：| --- | :---: | …（至少一个 -，允许 : 对齐标记） */
+function mdIsTableDivider(line: string): boolean {
+	const s = mdTrim(mdStripIndent(line))
+	if (s.indexOf('-') < 0) return false
+	let hasPipe = false
+	let cellChars = 0
+	let totalDashes = 0
+	for (let i = 0; i < s.length; i++) {
+		const c = s.charAt(i)
+		if (c === '|') {
+			// 每个真实单元格必须含 -（首管道前的空段、尾管道后的空段不算单元格）
+			if (hasPipe && cellChars === 0 && i < s.length - 1) return false
+			hasPipe = true
+			cellChars = 0
+			continue
+		}
+		if (c === '-' || c === ':' || c === ' ' || c === '\t') { if (c === '-') { cellChars++; totalDashes++ } continue }
+		return false
+	}
+	return hasPipe && totalDashes > 0 && (cellChars > 0 || s.charAt(s.length - 1) === '|')
+}
+
+/** 表格行切单元格（去首尾 |，按 | 切；不支持转义 \|——聊天正文罕见） */
+function mdSplitRow(line: string): string[] {
+	let s = mdTrim(mdStripIndent(line))
+	if (s.charAt(0) === '|') s = s.substring(1)
+	if (s.length > 0 && s.charAt(s.length - 1) === '|') s = s.substring(0, s.length - 1)
+	const cells: string[] = []
+	let cur = ''
+	for (let i = 0; i < s.length; i++) {
+		const c = s.charAt(i)
+		if (c === '|') { cells.push(mdTrim(cur)); cur = '' }
+		else cur += c
+	}
+	cells.push(mdTrim(cur))
+	return cells
+}
+
+/* ---------------- 行内解析 ---------------- */
+
+function mdIsWordChar(ch: string): boolean {
+	if (ch.length === 0) return false
+	return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9')
+}
+
+function mdIsSpaceChar(ch: string): boolean {
+	return ch === ' ' || ch === '\t' || ch === '\n' || ch === '\r'
+}
+
+/** 链接协议白名单（相对路径也放行，rich-text 点击走复制兜底） */
+function mdSafeHref(href: string): boolean {
+	const lower = href.toLowerCase()
+	if (lower.indexOf('javascript:') === 0 || lower.indexOf('data:') === 0 || lower.indexOf('vbscript:') === 0 || lower.indexOf('file:') === 0) return false
+	return true
+}
+
+/** 图片 src 白名单：与链接分口径（PC _sanitizeUrlAllowed 同款）——
+ *  `data:image/*` 必须放行：附件缩略图/内核注入的插画图走内联 dataUrl，
+ *  一刀切拒 data: 会把图掉成 alt 纯文本（移动端「插画展示有问题」真因）。
+ *  data:text/html 等其它 data 形态仍拒绝。 */
+function mdSafeImageSrc(src: string): boolean {
+	const lower = src.toLowerCase()
+	if (lower.indexOf('javascript:') === 0 || lower.indexOf('vbscript:') === 0 || lower.indexOf('file:') === 0) return false
+	if (lower.indexOf('data:') === 0) return lower.indexOf('data:image/') === 0
+	return true
+}
+
+/** scheme 前缀的协议白名单校验（自动链接用）：
+ *  「含 :// 即链接」会放行 javascript://、data:// 这类伪装 scheme（评审实证补漏）。
+ *  相对路径（无 scheme）放行，rich-text 点击走复制兜底。 */
+function mdSafeScheme(inner: string): boolean {
+	const colon = inner.indexOf(':')
+	if (colon <= 0) return mdSafeHref(inner)
+	const scheme = inner.substring(0, colon).toLowerCase()
+	if (scheme !== 'http' && scheme !== 'https' && scheme !== 'mailto' && scheme !== 'ftp') return false
+	return mdSafeHref(inner)
+}
+
+/** 从 openIdx（'(' 位置）找配对 ')'，返回内容区间；-1 = 未闭合 */
+function mdFindLinkDest(s: string, openIdx: number): number {
+	let depth = 0
+	for (let i = openIdx; i < s.length; i++) {
+		const c = s.charAt(i)
+		if (c === '(') depth++
+		else if (c === ')') {
+			depth--
+			if (depth === 0) return i
+		}
+	}
+	return -1
+}
+
+/** 去掉 dest 两侧 <>；带 title 的取空白前首段 */
+function mdLinkDest(raw: string): string {
+	let d = mdTrim(raw)
+	if (d.charAt(0) === '<') {
+		const close = d.indexOf('>')
+		if (close > 0) return d.substring(1, close)
+	}
+	for (let i = 0; i < d.length; i++) {
+		if (mdIsSpaceChar(d.charAt(i))) return d.substring(0, i)
+	}
+	return d
+}
+
+/** URL 合法字符（RFC3986 ASCII，PC gourdAutoLinkExtension 同款）：
+ *  汉字/全角标点不是 URL 的一部分——「非空白即 URL」会把链接后的中文整段吞进 href */
+function mdIsUrlChar(ch: string): boolean {
+	if (ch.length === 0) return false
+	const c = ch.charCodeAt(0)
+	if (c >= 0x21 && c <= 0x7e) {
+		return ch !== '<' && ch !== '>' && ch !== '"' && ch !== '`'
+	}
+	return false
+}
+
+/** 裸 URL 自动链接的终点（非 ASCII/空白即停 + 成对括号收口 + 尾部句读裁剪） */
+function mdAutoLinkEnd(s: string, from: number): number {
+	let i = from
+	let paren = 0
+	while (i < s.length) {
+		const c = s.charAt(i)
+		if (!mdIsUrlChar(c)) break
+		if (c === '(') paren++
+		if (c === ')') {
+			if (paren === 0) break
+			paren--
+		}
+		i++
+	}
+	// 句尾常见标点不算 URL 的一部分
+	while (i > from) {
+		const last = s.charAt(i - 1)
+		if (last === '.' || last === ',' || last === ';' || last === ':' || last === '!' || last === '?' || last === '。' || last === '，' || last === '；' || last === '：' || last === '！' || last === '？' || last === '）' || last === '】') i--
+		else break
+	}
+	return i
+}
+
+/** 找强调闭标记：marker 前邻字符不能是空白（CommonMark right-flanking 近似）。
+ *  首个候选不合格就放弃（不回退到更远的候选——宁可不渲染也不吞错内容）。 */
+function mdFindEmphasisClose(text: string, marker: string, from: number): number {
+	const close = text.indexOf(marker, from)
+	if (close < 0) return -1
+	if (mdIsSpaceChar(text.charAt(close - 1))) return -1
+	return close
+}
+
+/**
+ * 行内 markdown → HTML。text 是已按行 join('\n') 的原文（未转义）；
+ * hardBreaks=true 时段内单换行转 <br/>（表格单元格禁用）。
+ */
+function mdInline(text: string, hardBreaks: boolean): string {
+	let out = ''
+	let i = 0
+	const len = text.length
+	while (i < len) {
+		const ch = text.charAt(i)
+		// 硬换行：行尾两空格 / 反斜杠
+		if (ch === '\n') {
+			out += hardBreaks ? '<br/>' : ' '
+			i++
+			continue
+		}
+		if (ch === '\\' && i + 1 < len) {
+			const next = text.charAt(i + 1)
+			if (next === '\n') { out += '<br/>'; i += 2; continue }
+			if ('\\`*_{}[]()#+-.!~>|'.indexOf(next) >= 0) {
+				out += mdEscape(next)
+				i += 2
+				continue
+			}
+		}
+		// 行内 code：同长度反引号串配对
+		if (ch === '`') {
+			let runLen = 0
+			while (i + runLen < len && text.charAt(i + runLen) === '`') runLen++
+			const fence = text.substring(i, i + runLen)
+			const close = text.indexOf(fence, i + runLen)
+			if (close > i) {
+				let code = text.substring(i + runLen, close)
+				// CommonMark：两侧各去一个空格（全空白除外）
+				if (code.length >= 2 && code.charAt(0) === ' ' && code.charAt(code.length - 1) === ' ' && mdTrim(code).length > 0) {
+					code = code.substring(1, code.length - 1)
+				}
+				out += '<code>' + mdEscape(code) + '</code>'
+				i = close + runLen
+				continue
+			}
+			out += mdEscape(fence)
+			i += runLen
+			continue
+		}
+		// 图片 ![alt](src)
+		if (ch === '!' && i + 1 < len && text.charAt(i + 1) === '[') {
+			const closeBracket = text.indexOf(']', i + 2)
+			if (closeBracket > i && closeBracket + 1 < len && text.charAt(closeBracket + 1) === '(') {
+				const closeParen = mdFindLinkDest(text, closeBracket + 1)
+				if (closeParen > 0) {
+					const alt = text.substring(i + 2, closeBracket)
+					const src = mdLinkDest(text.substring(closeBracket + 2, closeParen))
+					// 图片校验走 mdSafeImageSrc（data:image/* 放行，PC _sanitizeUrlAllowed 同口径）
+					if (mdSafeImageSrc(src)) {
+						out += '<img src="' + mdEscape(src) + '" alt="' + mdEscape(alt) + '"/>'
+					} else {
+						out += mdEscape(alt)
+					}
+					i = closeParen + 1
+					continue
+				}
+			}
+		}
+		// 链接 [text](href)
+		if (ch === '[') {
+			const closeBracket = text.indexOf(']', i + 1)
+			if (closeBracket > i && closeBracket + 1 < len && text.charAt(closeBracket + 1) === '(') {
+				const closeParen = mdFindLinkDest(text, closeBracket + 1)
+				if (closeParen > 0) {
+					const label = text.substring(i + 1, closeBracket)
+					const href = mdLinkDest(text.substring(closeBracket + 2, closeParen))
+					if (mdSafeHref(href)) {
+						out += '<a href="' + mdEscape(href) + '">' + mdInline(label, false) + '</a>'
+					} else {
+						out += mdEscape(label)
+					}
+					i = closeParen + 1
+					continue
+				}
+			}
+		}
+		// 自动链接 <https://…> / <mailto:…>
+		if (ch === '<') {
+			const close = text.indexOf('>', i + 1)
+			if (close > i) {
+				const inner = text.substring(i + 1, close)
+				if (inner.indexOf('://') > 0 && inner.indexOf(' ') < 0 && mdSafeScheme(inner)) {
+					out += '<a href="' + mdEscape(inner) + '">' + mdEscape(inner) + '</a>'
+					i = close + 1
+					continue
+				}
+			}
+			out += '&lt;'
+			i++
+			continue
+		}
+		// 裸 http(s) 链接（词首才认）
+		if ((ch === 'h') && (text.indexOf('http://', i) === i || text.indexOf('https://', i) === i)) {
+			const prev = i > 0 ? text.charAt(i - 1) : ''
+			if (!mdIsWordChar(prev) && prev !== '/' && prev !== '"' && prev !== '=') {
+				const end = mdAutoLinkEnd(text, i)
+				if (end > i + 8) {
+					const url = text.substring(i, end)
+					out += '<a href="' + mdEscape(url) + '">' + mdEscape(url) + '</a>'
+					i = end
+					continue
+				}
+			}
+		}
+		// 删除线 ~~…~~（闭标记前不能是空白：~~a ~~b~~ 不许把「a 」圈进去）
+		if (ch === '~' && i + 1 < len && text.charAt(i + 1) === '~') {
+			const close = mdFindEmphasisClose(text, '~~', i + 2)
+			if (close > i + 2) {
+				out += '<del>' + mdInline(text.substring(i + 2, close), hardBreaks) + '</del>'
+				i = close + 2
+				continue
+			}
+		}
+		// 加粗 **…** / __…__（闭标记同口径：前邻非空白；__ 词内不触发）
+		if ((ch === '*' || ch === '_') && i + 1 < len && text.charAt(i + 1) === ch) {
+			const marker = ch + ch
+			const close = mdFindEmphasisClose(text, marker, i + 2)
+			const prevCh = i > 0 ? text.charAt(i - 1) : ''
+			const intraWord = ch === '_' && mdIsWordChar(prevCh)
+			if (close > i + 2 && !mdIsSpaceChar(text.charAt(i + 2)) && !intraWord) {
+				out += '<strong>' + mdInline(text.substring(i + 2, close), hardBreaks) + '</strong>'
+				i = close + 2
+				continue
+			}
+		}
+		// 斜体 *…* / _…_（词内下划线不触发：snake_case 保真）
+		if (ch === '*' || ch === '_') {
+			const prev = i > 0 ? text.charAt(i - 1) : ''
+			const next = i + 1 < len ? text.charAt(i + 1) : ''
+			const intraWord = ch === '_' && mdIsWordChar(prev)
+			if (!intraWord && next.length > 0 && !mdIsSpaceChar(next) && next !== ch) {
+				let close = -1
+				let j = i + 1
+				while (j < len) {
+					if (text.charAt(j) === '\\' && j + 1 < len) { j += 2; continue }
+					// 双标记整体跳过（评审修复：**x **y** 曾把第二个 opener 的一半当 closer 错配成 em）
+					if (text.charAt(j) === ch && j + 1 < len && text.charAt(j + 1) === ch) { j += 2; continue }
+					if (text.charAt(j) === ch && !mdIsSpaceChar(text.charAt(j - 1))
+						&& !(ch === '_' && mdIsWordChar(j + 1 < len ? text.charAt(j + 1) : ''))) {
+						close = j
+						break
+					}
+					j++
+				}
+				if (close > i + 1) {
+					out += '<em>' + mdInline(text.substring(i + 1, close), hardBreaks) + '</em>'
+					i = close + 1
+					continue
+				}
+			}
+		}
+		out += mdEscape(ch)
+		i++
+	}
+	return out
+}
+
+/* ---------------- 块级解析 ---------------- */
+
+function mdCodeBlockHtml(lang: string, codeLines: string[]): string {
+	let code = ''
+	for (let i = 0; i < codeLines.length; i++) {
+		if (i > 0) code += '\n'
+		code += codeLines[i]
+	}
+	const cls = lang.length > 0 ? ' class="language-' + mdEscape(lang) + '"' : ''
+	return '<pre><code' + cls + '>' + mdEscape(code) + '</code></pre>'
+}
+
+/** 表格块：header 行 + divider 行 + body 行 → <table>（rich-text 原生表格） */
+function mdTableHtml(headerLine: string, dividerLine: string, bodyLines: string[]): string {
+	const headers = mdSplitRow(headerLine)
+	const dividers = mdSplitRow(dividerLine)
+	const aligns: string[] = []
+	for (let i = 0; i < dividers.length; i++) {
+		const d = dividers[i]
+		const left = d.charAt(0) === ':'
+		const right = d.length > 1 && d.charAt(d.length - 1) === ':'
+		aligns.push(left && right ? 'center' : (right ? 'right' : (left ? 'left' : '')))
+	}
+	let html = '<table><thead><tr>'
+	for (let i = 0; i < headers.length; i++) {
+		const align = i < aligns.length ? aligns[i] : ''
+		const style = align.length > 0 ? ' style="text-align:' + align + ';"' : ''
+		html += '<th' + style + '>' + mdInline(headers[i], false) + '</th>'
+	}
+	html += '</tr></thead><tbody>'
+	for (let r = 0; r < bodyLines.length; r++) {
+		const cells = mdSplitRow(bodyLines[r])
+		html += '<tr>'
+		for (let i = 0; i < headers.length; i++) {
+			const align = i < aligns.length ? aligns[i] : ''
+			const style = align.length > 0 ? ' style="text-align:' + align + ';"' : ''
+			const cell = i < cells.length ? cells[i] : ''
+			html += '<td' + style + '>' + mdInline(cell, false) + '</td>'
+		}
+		html += '</tr>'
+	}
+	html += '</tbody></table>'
+	return html
+}
+
+/** 列表项内的子块渲染（递归；子内容已按标记宽去缩进） */
+function mdRenderItemContent(lines: string[], complete: boolean): string {
+	const blocks = mdParseRange(lines, 0, lines.length, complete)
+	let html = ''
+	for (let i = 0; i < blocks.length; i++) html += blocks[i].html
+	return html
+}
+
+/**
+ * 列表块收集：从 from 起连续同族列表项（含缩进续行/嵌套子列表/空行分隔的松列表）。
+ * 返回消费到的行号（不含）。
+ */
+function mdParseList(lines: string[], from: number, to: number, complete: boolean, endOut: number[]): MdBlock {
+	const first = mdListMark(lines[from])
+	const ordered = first.kind === 'ol'
+	const items: string[][] = []
+	let cur: string[] = []
+	let i = from
+	let sawBlank = false
+	let loose = false
+	while (i < to) {
+		const line = lines[i]
+		if (mdIsBlank(line)) {
+			// 空行：看下一非空行是否仍属本列表（缩进续行或同族标记）
+			let j = i + 1
+			while (j < to && mdIsBlank(lines[j])) j++
+			if (j >= to) { i = j; break }
+			const nextMark = mdListMark(lines[j])
+			const nextIndent = mdIndentWidth(lines[j])
+			if ((nextMark.kind === first.kind && nextIndent < 4) || nextIndent >= first.width) {
+				sawBlank = true
+				cur.push('')
+				i++
+				continue
+			}
+			break
+		}
+		const mark = mdListMark(line)
+		const indent = mdIndentWidth(line)
+		// 嵌套子列表：缩进 ≥ 父标记宽的行归上一项内容（CommonMark 内容列口径），
+		// 只有缩进 < first.width 的同族标记才是兄弟项
+		if (mark.kind !== '' && indent < 4 && indent < first.width) {
+			if (mark.kind !== first.kind) break
+			if (cur.length > 0) items.push(cur)
+			cur = [line.substring(Math.min(mark.width, line.length))]
+			if (sawBlank) loose = true
+			i++
+			continue
+		}
+		if (indent >= first.width && cur.length > 0) {
+			cur.push(mdRemoveIndent(line, first.width))
+			if (sawBlank) loose = true
+			i++
+			continue
+		}
+		// 懒惰续行：段落文本顶格接续（非块级起始）
+		if (cur.length > 0 && !sawBlank && mark.kind === '' && !mdIsHr(line)
+			&& mdHeadingLevel(line) === 0 && mdFenceOpen(line) === '' && !mdIsQuote(line)) {
+			cur.push(mdTrim(line))
+			i++
+			continue
+		}
+		break
+	}
+	if (cur.length > 0) items.push(cur)
+
+	let html = ordered ? '<ol' + (first.start !== 1 ? ' start="' + first.start.toString() + '"' : '') + '>' : '<ul>'
+	for (let k = 0; k < items.length; k++) {
+		const itemLines = items[k]
+		if (loose) {
+			html += '<li>' + mdRenderItemContent(itemLines, complete) + '</li>'
+		} else {
+			// 紧列表：首段行内直出，其余（嵌套列表等）走块渲染
+			let headEnd = 0
+			while (headEnd < itemLines.length) {
+				const l = itemLines[headEnd]
+				if (mdIsBlank(l) || mdListMark(l).kind !== '' || mdFenceOpen(l) !== '' || mdIsQuote(l) || mdHeadingLevel(l) > 0) break
+				headEnd++
+			}
+			if (headEnd === 0) {
+				html += '<li>' + mdRenderItemContent(itemLines, complete) + '</li>'
+			} else {
+				const head = itemLines.slice(0, headEnd)
+				let headText = ''
+				for (let h = 0; h < head.length; h++) {
+					if (h > 0) headText += '\n'
+					headText += mdTrim(head[h])
+				}
+				let rest = ''
+				if (headEnd < itemLines.length) {
+					rest = mdRenderItemContent(itemLines.slice(headEnd), complete)
+				}
+				html += '<li>' + mdInline(headText, false) + rest + '</li>'
+			}
+		}
+	}
+	html += ordered ? '</ol>' : '</ul>'
+	// 流式中列表整体是尾块（新行随时并入）；收口后稳定
+	const stable = complete || i < to
+	// 消费终点随块带出（评审修复：旧版 mdListEnd 重扫一遍边界逻辑，双实现漂移风险）
+	endOut.push(i)
+	return { html: html, stable: stable } as MdBlock
+}
+
+/**
+ * 核心块解析：lines[from..to)。complete=false 时最后一块 stable=false。
+ * 块边界只认「已出现的下一块起始行」，纯追加流式下已产出块内容与顺序恒定。
+ */
+function mdParseRange(lines: string[], from: number, to: number, complete: boolean): MdBlock[] {
+	const blocks: MdBlock[] = []
+	let i = from
+	while (i < to) {
+		const line = lines[i]
+		if (mdIsBlank(line)) { i++; continue }
+
+		// HTML 注释行（<!-- … -->，可跨行）：不渲染（CommonMark raw HTML 口径）。
+		// 只剥「块级起始的完整注释」：围栏代码分支在下方独立消费整段，
+		// 代码示例里的 <!-- 字面量不经过这里，保真不受影响；
+		// 未闭合（流式中）落回段落转义可见，闭合帧到达即整段消失
+		// （mdCommentLineEnd 返回 -1 = 不剥；=i 表示只剥了注释、行尾还有内容待消费）。
+		const commentEnd = mdCommentLineEnd(lines, i, to)
+		if (commentEnd >= 0) { i = commentEnd; continue }
+
+		// 围栏代码（含流式未闭合）
+		const fence = mdFenceOpen(line)
+		if (fence !== '') {
+			const lang = mdFenceLang(line, fence)
+			const codeLines: string[] = []
+			let j = i + 1
+			let closed = false
+			while (j < to) {
+				if (mdFenceClose(lines[j], fence)) { closed = true; break }
+				codeLines.push(lines[j])
+				j++
+			}
+			const stable = closed && (j + 1 < to || complete)
+			blocks.push({ html: mdCodeBlockHtml(lang, codeLines), stable: stable } as MdBlock)
+			i = closed ? j + 1 : to
+			continue
+		}
+
+		// 分隔线（先于列表：- - - / ***）
+		if (mdIsHr(line)) {
+			blocks.push({ html: '<hr/>', stable: complete || i + 1 < to } as MdBlock)
+			i++
+			continue
+		}
+
+		// ATX 标题
+		const level = mdHeadingLevel(line)
+		if (level > 0) {
+			const tag = 'h' + level.toString()
+			blocks.push({ html: '<' + tag + '>' + mdInline(mdHeadingContent(line, level), false) + '</' + tag + '>', stable: complete || i + 1 < to } as MdBlock)
+			i++
+			continue
+		}
+
+		// 引用（连续 > 行，含懒惰续行；剥一层后递归）。
+		// 嵌套深度封顶 16 层：mdParseRange→mdStripQuote 递归无上限，
+		// 恶意/异常的 200 层 ">" 会打爆栈（评审实证），超限部分按字面文本保真。
+		if (mdIsQuote(line) && mdQuoteDepth(line) <= 16) {
+			const inner: string[] = []
+			let j = i
+			while (j < to) {
+				const l = lines[j]
+				if (mdIsQuote(l)) { inner.push(mdStripQuote(l)); j++; continue }
+				if (!mdIsBlank(l) && mdListMark(l).kind === '' && mdHeadingLevel(l) === 0
+					&& mdFenceOpen(l) === '' && !mdIsHr(l) && inner.length > 0 && !mdIsBlank(inner[inner.length - 1])) {
+					inner.push(mdTrim(l))
+					j++
+					continue
+				}
+				break
+			}
+			const innerBlocks = mdParseRange(inner, 0, inner.length, complete || j < to)
+			let html = '<blockquote>'
+			for (let k = 0; k < innerBlocks.length; k++) html += innerBlocks[k].html
+			html += '</blockquote>'
+			blocks.push({ html: html, stable: complete || j < to } as MdBlock)
+			i = j
+			continue
+		}
+
+		// 列表
+		const mark = mdListMark(line)
+		if (mark.kind !== '') {
+			const endOut: number[] = []
+			const block = mdParseList(lines, i, to, complete, endOut)
+			blocks.push(block)
+			i = endOut[0]
+			continue
+		}
+
+		// 表格：当前行含 | 且下一行是分隔行
+		if (line.indexOf('|') >= 0 && i + 1 < to && mdIsTableDivider(lines[i + 1])
+			&& mdSplitRow(line).length === mdSplitRow(lines[i + 1]).length) {
+			const body: string[] = []
+			let j = i + 2
+			while (j < to && !mdIsBlank(lines[j]) && lines[j].indexOf('|') >= 0) {
+				body.push(lines[j])
+				j++
+			}
+			blocks.push({ html: mdTableHtml(line, lines[i + 1], body), stable: complete || j < to } as MdBlock)
+			i = j
+			continue
+		}
+
+		// 段落（含 setext 标题；懒惰吸收后续普通文本行）
+		const para: string[] = [mdTrim(mdStripIndent(line))]
+		let j = i + 1
+		let setext = 0
+		while (j < to) {
+			const l = lines[j]
+			if (mdIsBlank(l)) break
+			const stripped = mdTrim(mdStripIndent(l))
+			if (para.length > 0 && (stripped === '===' || mdIsSetextDash(stripped))) {
+				setext = stripped.charAt(0) === '=' ? 1 : 2
+				j++
+				break
+			}
+			if (mdHeadingLevel(l) > 0 || mdFenceOpen(l) !== '' || mdIsQuote(l) || mdIsHr(l) || mdListMark(l).kind !== '') break
+			if (l.indexOf('|') >= 0 && j + 1 < to && mdIsTableDivider(lines[j + 1])) break
+			// 完整注释行不被段落懒惰吸收（否则 <!-- --> 混进正文转义裸露）
+			if (mdCommentLineEnd(lines, j, to) >= 0) break
+			para.push(mdTrim(l))
+			j++
+		}
+		let text = ''
+		for (let k = 0; k < para.length; k++) {
+			if (k > 0) text += '\n'
+			text += para[k]
+		}
+		if (setext > 0) {
+			const tag = 'h' + setext.toString()
+			blocks.push({ html: '<' + tag + '>' + mdInline(text, false) + '</' + tag + '>', stable: complete || j < to } as MdBlock)
+		} else {
+			blocks.push({ html: '<p>' + mdInline(text, true) + '</p>', stable: complete || j < to } as MdBlock)
+		}
+		i = j
+	}
+	// 流式收口前最后一块必然还在长：统一钉 stable=false（块自身判断已保证稳定块不误标）
+	if (!complete && blocks.length > 0) {
+		blocks[blocks.length - 1].stable = false
+	}
+	return blocks
+}
+
+/** setext 下划线：全 -（≥1，且非分隔线歧义时按标题处理——CommonMark 取 --- 为 hr，这里 ≥2 才认） */
+function mdIsSetextDash(s: string): boolean {
+	if (s.length < 2) return false
+	for (let i = 0; i < s.length; i++) {
+		if (s.charAt(i) !== '-') return false
+	}
+	return true
+}
+
+/**
+ * 对外入口：markdown 全文 → 语义 HTML 块数组。
+ * complete=false（流式中）时最后一块 stable=false；纯追加增长下稳定块内容/序号不变。
+ * 空文本返回空数组（调用方回退纯文本分支）。
+ */
+/** HTML 注释剥离（CommonMark raw HTML 口径：注释不渲染）。
+ *  mdEscape 会把 <!-- --> 转义成可见字面文本——AI 回答里夹带的工程注释
+ *  （如 <!-- 稳定块渲染缓存… -->）曾整段裸露在正文/过程行（用户报障）。
+ *  【只剥完整注释行】行内/围栏内的 <!-- 字面量（代码示例）必须保真，
+ *  故不做全文扫描，只在块级行消费处按整行匹配（mdCommentLineEnd）。
+ *  流式保护：未闭合的 <!-- 起始行原样保留（转义后可见），闭合帧到达即整段消失，
+ *  与围栏代码的流式语义一致。 */
+function mdCommentLineEnd(lines: string[], from: number, to: number): number {
+	const s = mdTrim(mdStripIndent(lines[from]))
+	if (!s.startsWith('<!--')) return -1
+	let j = from
+	while (j < to) {
+		const close = lines[j].indexOf('-->')
+		if (close >= 0) {
+			// 【行尾泄漏修复】闭合行 --> 之后若还有真实内容（<!-- c -->尾巴），
+			// 整行吞掉会把「尾巴」连同注释一起丢——正文缺字比重复渲染更严重。
+			// 把行尾内容写回当前行（下一次循环按普通行消费；纯追加流式下
+			// 该行本就是未稳定尾块，原地改写不破坏稳定块钉 key 语义）。
+			const rest = mdTrim(lines[j].substring(close + 3))
+			if (rest.length > 0) {
+				lines[j] = rest
+				// 返回 j（可能 === from）：调用方 i = 返回值后【重新走块分派】，
+				// 该行已改写为纯尾巴文本（不再以 <!-- 开头），按普通行消费，不死循环。
+				// 返回 -1 会让改写后的行永远无人消费；返回 j+1 会吞掉尾巴。
+				return j
+			}
+			return j + 1
+		}
+		j++
+	}
+	return -1
+}
+
+export function parseMarkdownBlocks(text: string, complete: boolean): MdBlock[] {
+	if (text.length === 0) return []
+	const normalized = text.split('\r\n').join('\n').split('\r').join('\n')
+	const lines = normalized.split('\n')
+	// 去掉尾部单个空行（流式帧常以 \n 结尾，不影响块内容）
+	let end = lines.length
+	while (end > 0 && mdIsBlank(lines[end - 1])) end--
+	if (end === 0) return []
+	return mdParseRange(lines, 0, end, complete)
+}

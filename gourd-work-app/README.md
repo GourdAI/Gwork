@@ -8,6 +8,7 @@ GWork 移动端（uni-app x / 蒸汽模式）AI 聊天客户端，编译目标�
 - Logo：与桌面端 `gourd-work/desktop/ui/img/logo.svg` 完全同源（黑底白 G，不再做蓝色渐变）
   - `static/logo.png` —— 桌面端原始黑底白 G（首页主视觉、关于页，亮色主题）
   - `static/logo-inverse.png` —— 暗色主题变体（近白底黑 G，与暗色主色近白实底同构）
+  - `static/mascot-tuanzi.gif` —— 品牌吉祥物「团子」跳跃挥手动图（透明底 280×280，61 帧）；**仅**用于新建任务页 hero（`pages/home/components/home-hero.uvue`），与会话头像/关于页的静态 logo 互不替代
   - `static/avatar-default.png` —— 默认用户头像（实心圆角黑底 + 白色 G；用户头像语义，勿与主视觉混用）
   - `static/login-mark-light.png` / `login-mark-dark.png` —— 登录页光晕合成贴图（中性光晕 + logo；原生端不支持 radial-gradient，合成为一张图）
   - `static/logos/` —— Android 启动图标 `logo_72x72/96x96/144x144/192x192.png` 与 iOS App Store `logo_1024x1024.png`

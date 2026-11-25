@@ -48,20 +48,19 @@ export function startListening(opts: StartListeningOptions): void {
 	const token = ++sessionToken
 	starting = true
 	let dispatched = false
-	const failOnce = (detail: string): void => {
+	const failOnce = (detail: string, doNotAskAgain: boolean): void => {
 		if (dispatched || token != sessionToken) return
 		dispatched = true
 		starting = false
-		opts.onError({ code: 'permission', detail: detail } as SpeechError)
+		opts.onError({ code: 'permission', detail: detail, doNotAskAgain: doNotAskAgain } as SpeechError)
 	}
-	UTSAndroid.requestSystemPermission(activity, ['android.permission.RECORD_AUDIO'], (allRight: boolean, _: string[]) => {
-		if (dispatched || token != sessionToken) return
-		if (!allRight) {
-			failOnce('RECORD_AUDIO denied')
+	// 引擎启动统一出口：Kotlin 混编参数是 Long，UTS number 需显式 toLong()（编译器 known-issue #17）。
+	// token 校验：授权弹窗期间用户松手取消后，迟到的成功回调不得再启动引擎
+	const beginEngine = (): void => {
+		if (token != sessionToken) {
+			starting = false
 			return
 		}
-		dispatched = true
-		// Kotlin 混编参数是 Long，UTS number 需显式 toLong()（编译器 known-issue #17）
 		GworkSpeechSession.start(context as Context, opts.language, opts.maxDurationMs.toLong(), (text: string) => {
 			opts.onPartial(text)
 		}, (text: string) => {
@@ -72,9 +71,36 @@ export function startListening(opts: StartListeningOptions): void {
 			const err: SpeechError = { code: code as SpeechErrorCode, detail: detail }
 			opts.onError(err)
 		})
-	}, (_: boolean, _2: string[]) => {
-		failOnce('RECORD_AUDIO denied')
+	}
+	// 已授权直接开录：requestSystemPermission 每次按住都走一遍框架权限链，
+	// 已授权时个别 ROM 仍会闪系统 UI 并派发 touchcancel（按住手势被打断）
+	if (UTSAndroid.checkSystemPermissionGranted(activity, ['android.permission.RECORD_AUDIO'])) {
+		dispatched = true
+		beginEngine()
+		return
+	}
+	UTSAndroid.requestSystemPermission(activity, ['android.permission.RECORD_AUDIO'], (allRight: boolean, _: string[]) => {
+		if (dispatched || token != sessionToken) return
+		if (!allRight) {
+			failOnce('RECORD_AUDIO denied', false)
+			return
+		}
+		dispatched = true
+		beginEngine()
+	}, (doNotAskAgain: boolean, _2: string[]) => {
+		// doNotAskAgain=true：用户勾了「不再询问」，系统不会再弹框，业务层据此引导去系统设置
+		failOnce('RECORD_AUDIO denied', doNotAskAgain)
 	})
+}
+
+/**
+ * 跳转本应用的系统权限设置页（用户勾「不再询问」后唯一恢复路径）。
+ * 业务层在 permission 且 doNotAskAgain 时弹引导框，确认后调用。
+ */
+export function openPermissionSettings(): void {
+	const activity = UTSAndroid.getUniActivity()
+	if (activity == null) return
+	UTSAndroid.gotoSystemPermissionActivity(activity, ['android.permission.RECORD_AUDIO'])
 }
 
 export function stopListening(): void {

@@ -4,8 +4,9 @@
 			<text class="iconfont">&#xe634;</text>
 		</view>
 		<text class="home-header__brand" :class="props.hideMenu ? 'home-header__brand--solo' : ''">{{ t('home.brand') }}</text>
+		<!-- 头部只展示 设备 | 工作空间；权限入口在运行弹层内（与工作空间同组），不在头部露出 -->
 		<app-env-bar class="home-header__env" :device="device" :device-online="deviceOnline" :workspace="workspace"
-			:permission="permission" :show-permission="false" @open-run="emit('open-run')"></app-env-bar>
+			@open-run="emit('open-run')"></app-env-bar>
 	</view>
 </template>
 
@@ -23,7 +24,6 @@
 		device: string
 		deviceOnline: boolean
 		workspace: string
-		permission: string
 		hideMenu?: boolean
 	}>(), {
 		hideMenu: false

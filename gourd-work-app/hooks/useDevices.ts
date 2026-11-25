@@ -12,7 +12,7 @@ import type { ComputedRef, Ref } from 'vue'
 import { i18n } from '@/locale/i18n.ts'
 import { formatRelativeTime } from '@/utils/tools.ts'
 import { gworkSignedIn } from '@/utils/gwork-auth.ts'
-import { fetchDevices, disconnect, onDeviceOffline, useLinkState } from '@/utils/gwork-link.ts'
+import { fetchDevices, disconnect, onDeviceOffline, onLinkResumed, setLinkTarget, useLinkState } from '@/utils/gwork-link.ts'
 import type { LinkState } from '@/utils/gwork-link.ts'
 import type { DeviceOption } from '@/data/app-data'
 
@@ -26,6 +26,9 @@ const loadError: Ref<string> = ref<string>('')
 
 let watching: boolean = false
 let offlineBound: boolean = false
+let resumedBound: boolean = false
+/** 恢复后权威清单校正的去抖定时器（0 = 未安排） */
+let reconcileTimer: number = 0
 
 function readStoredId(): string {
 	const raw = uni.getStorageSync(STORAGE_KEY) as string
@@ -71,8 +74,11 @@ export async function refreshDevices(): Promise<void> {
 			const firstOnline: DeviceOption | undefined = devices.value.find((item: DeviceOption): boolean => item.online)
 			activeDeviceId.value = firstOnline != null ? firstOnline.deviceId : ''
 			persistActive()
-			// 冷启动恢复的持久化 id 不触发 watch（值未变），显式断链兜底：
-			// 进程内不可能已有旧链路，但保证「选中变化必断链」的不变式无旁路
+			setLinkTarget(activeDeviceId.value)
+			// 只有「选中的设备真的换了」才断链。旧实现这里无条件 disconnect()：
+			// 后台设备清单存在短暂滞后（设备刚上线、或 online 字段偶发 false）时，
+			// deviceOf() 取不到就把 activeDeviceId 清空并断链，正在发送的消息
+			// 立刻拿到「设备连接已断开」——设备明明在线，用户看到的就是这个提示。
 			if (activeDeviceId.value !== prevId) disconnect()
 		}
 	} catch (err: any) {
@@ -91,6 +97,9 @@ export function selectDevice(deviceId: string): void {
 	disconnect()
 	activeDeviceId.value = deviceId
 	persistActive()
+	// 先 disconnect 再同步意图目标：切换后 request() 的透明自愈必须回新设备，
+	// 绝不会回到刚被切走的旧设备（旧实现在这里让 lastDeviceId 归零，自愈直接放弃）。
+	setLinkTarget(deviceId)
 }
 
 /** 后台通知设备离线：本地在线态即时置灰（发送入口据此拦截） */
@@ -102,8 +111,35 @@ function markActiveOffline(): void {
 	})
 }
 
-/** 登出清理：断链路 + 清清单（保留持久化 id，下个账号若同设备可复用） */
+/**
+ * 链路已自动恢复：把当前设备在线态拨回 true。
+ * 不加这步，「一次抖动」留下的 online=false 会永久固化在内存清单里，
+ * UI 一直显示已断开，直到下一次 refreshDevices 才可能修正——用户看到的就是
+ * 「一直显示设备连接已断开」。
+ * 但这里是**乐观**回弹：重连成功只证明链路通到后台，不证明设备真的在线
+ * （后台可能紧接着回 device_offline 并 4001）。所以同时安排一次权威清单刷新校正，
+ * 避免把「设备确实离线」长期误显示为在线（评审 P1-5）。
+ */
+function markActiveOnline(): void {
+	const id: string = activeDeviceId.value
+	if (id.length === 0) return
+	devices.value = devices.value.map((item: DeviceOption): DeviceOption => {
+		if (item.deviceId !== id) return item
+		if (item.online) return item
+		return { deviceId: item.deviceId, name: item.name, online: true, note: '', lastSeen: item.lastSeen }
+	})
+	// 去抖校正：抖动重连可能连续触发多次 resumed，只刷一次即可（loading 自带去重）
+	if (reconcileTimer !== 0) clearTimeout(reconcileTimer)
+	reconcileTimer = setTimeout((): void => {
+		reconcileTimer = 0
+		refreshDevices()
+	}, 800)
+}
+
+/** 登出清理：断链路 + 清清单 + 清自愈目标（保留持久化 id，下个账号若同设备可复用） */
 function resetDevices(): void {
+	// 先清意图目标再断链：登出后绝不能再自动重连回这台设备
+	setLinkTarget('')
 	disconnect()
 	devices.value = []
 	loadError.value = ''
@@ -112,6 +148,11 @@ function resetDevices(): void {
 function ensureWatchers(): void {
 	if (!watching) {
 		watching = true
+		// 冷启动/热重启都先把当前选中设备同步给链路层：request() 的透明自愈以它为准
+		setLinkTarget(activeDeviceId.value)
+		watch(activeDeviceId, (id: string): void => {
+			setLinkTarget(id)
+		})
 		watch(gworkSignedIn(), (signedIn: boolean): void => {
 			if (signedIn) {
 				refreshDevices()
@@ -129,6 +170,12 @@ function ensureWatchers(): void {
 		offlineBound = true
 		onDeviceOffline((): void => {
 			markActiveOffline()
+		})
+	}
+	if (!resumedBound) {
+		resumedBound = true
+		onLinkResumed((): void => {
+			markActiveOnline()
 		})
 	}
 }

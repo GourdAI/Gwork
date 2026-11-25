@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- 隐私描述必须放插件 app-ios/Info.plist：云打包只把这里的配置合并进原生工程
+	     （官方 uts-for-ios §3.1）。项目根 Info.plist 不是官方读取路径，曾被静默忽略——
+	     缺 NSMicrophoneUsageDescription 时 iOS 在 requestRecordPermission 处直接杀进程。 -->
+	<key>NSMicrophoneUsageDescription</key>
+	<string>用于按住说话时的语音输入，将你的声音实时转写为文字</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>使用系统语音识别把语音输入转写为文字消息</string>
+</dict>
+</plist>

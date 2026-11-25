@@ -23,7 +23,9 @@ services:
     container_name: new-api-dev
     restart: unless-stopped
     ports:
-      - "3000:3000"
+      # 只绑回环：dev 栈同样是可登录的后台实例，暴露到局域网等于给出一个
+      # 弱口令入口。需要跨机调试时用 GWORK_BIND_ADDR 显式指定网卡。
+      - "${GWORK_BIND_ADDR:-127.0.0.1}:3000:3000"
     volumes:
       - dev_data:/data
     environment:

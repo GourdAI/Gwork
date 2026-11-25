@@ -1176,7 +1176,29 @@ impl AuthState {
     ) -> Result<AuthStatus, String> {
         self.ensure_host().await;
         let url = format!("{}/api/user/register", self.host());
+        // 与登录同一套加密判定：后台开启 PASSWORD_LOGIN_ENCRYPTION 后，注册若
+        // 仍发明文 `password` 就是一条绕开加密的旁路（管理员以为「密码不再明文
+        // 传输」，实际上注册请求里还是明文）。
         let mut payload = serde_json::json!({ "username": username, "password": password });
+        match self.login_encryption().await {
+            LoginEncryption::Required(key) => {
+                let encrypted = encrypt_password_v2(password, &key.public_key, &key.kid)?;
+                payload = serde_json::json!({
+                    "username": username,
+                    "password_encrypted": encrypted,
+                    "encryption_key_id": key.kid,
+                });
+            }
+            // 明确关闭加密 / 旧版后台（无该端点）：明文是它认可的用法。
+            LoginEncryption::Disabled | LoginEncryption::LegacyBackend => {}
+            // 无法判定：绝不能静默退回明文（与 login 同一理由）。
+            LoginEncryption::Unavailable(reason) => {
+                return Err(format!(
+                    "无法确认后台是否要求密码加密传输：{}（为避免用明文密码注册，已中止）",
+                    reason
+                ))
+            }
+        }
         if !email.trim().is_empty() {
             payload["email"] = serde_json::Value::String(email.trim().to_string());
         }

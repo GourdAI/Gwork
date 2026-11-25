@@ -99,4 +99,10 @@ keyring = "3.6"
 
 [lib]
 name = "gourd_work_desktop_lib"
-crate-type = ["staticlib", "cdylib", "rlib"]
+# 【2026-11-24 构建修复】移除 cdylib：本 crate 是 Tauri 桌面应用，main.rs 经 rlib
+# 静态链接，cdylib 产物（gourd_work_desktop_lib.dll）无人加载（mobile 模板残留）。
+# Windows GNU 工具链下 cdylib 链接会导出全部符号（10 万+），超过 PE 导出表
+# ordinal 上限 65535 → `ld: error: export ordinal too large: 107316`，
+# 整个 `tauri build` 在链接期失败、安装包永远停在旧版。staticlib 同样无消费方，
+# 一并移除以省链接时间；rlib 保留（bin 与 cargo test 依赖它）。
+crate-type = ["rlib"]

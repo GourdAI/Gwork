@@ -6,6 +6,17 @@
 		<rice-tag v-if="hasTag" v-show="!holding" class="app-composer__tag" type="primary" plain :text="tag"
 			text-color="var(--color-primary)" text-size="11px" :custom-style="tagStyle"></rice-tag>
 
+		<!-- 待发送附件 chips：选中即入列，点 × 移除；随下一条消息内联 base64 发送（v1.1） -->
+		<view v-if="attachments.length > 0" v-show="!holding" class="app-composer__attaches">
+			<view v-for="(att, ai) in attachments" :key="ai" class="app-composer__attach">
+				<rice-icon :name="att.type === 'image' ? 'photo' : 'file-success'" size="13px" color="var(--color-text-secondary)" />
+				<text class="app-composer__attach-name">{{ att.name }}</text>
+				<view class="app-composer__attach-x" @click.stop="emit('remove-attach', ai)">
+					<rice-icon name="cross" size="11px" color="var(--color-text-tertiary)" />
+				</view>
+			</view>
+		</view>
+
 		<!-- 录音态面板：波形 + 提示悬于输入条上方（设计稿形态二/三）。
 			常驻节点用 v-show 显隐——按住手势期间做结构增删会打断原生触摸流，曾致上滑取消失灵、浮层滞留 -->
 		<view v-show="holding" class="app-composer__rec">
@@ -20,15 +31,23 @@
 			<!-- 中央节点：文字/语音两形态共用同一节点。文字态点击展开、长按下录；语音态按住说话。
 				子节点必须保持单 text 常驻（形态切换只改绑定，不做 v-if 分支切换）——
 				长按下录瞬间若子树重建，原生触摸流会被掐断，滑动状态与松手收尾全部失灵。
-				.stop 阻断冒泡，防止 swiper 等原生容器在滑动手势中途抢走事件流 -->
-			<view v-if="!expanded" class="app-composer__center" :class="speechSupported ? '' : 'app-composer__center--nomic'" @longpress="onCenterLongPress"
+				.stop 阻断冒泡，防止宿主 home__narrow 的右滑开抽屉手势层在录音手势中途抢走事件流 -->
+			<view v-if="!expanded" class="app-composer__center" :class="centerClass" @longpress="onCenterLongPress"
 				@touchstart="onTouchStart" @touchmove.stop="onTouchMove" @touchend.stop="onTouchEnd" @touchcancel.stop="onTouchCancel">
-				<text v-show="!holding"
+				<!-- 有草稿时最多展示 3 行（max-lines 截断），不再单行省略——收起态也要能看清自己写了什么；
+					占位/按住说话仍单行。max-lines 是蒸汽模式 text 的组件属性（UCSS lines 已废弃，vapor 下 :lines/lines: 编译告警且不生效）；H5 端由 fake-text 的 line-clamp 兜底 -->
+				<text v-show="!holding" :max-lines="hasText && !voiceMode ? 3 : 1"
 					:class="voiceMode ? 'app-composer__hold-text' : (hasText ? 'app-composer__fake-text' : 'app-composer__fake-placeholder')">{{ voiceMode ? holdText : (hasText ? modelValue : placeholder) }}</text>
 			</view>
-			<input v-if="expanded" :id="inputId" class="app-composer__input" v-model="text" :placeholder="placeholder"
-				:placeholder-style="placeholderStyle" confirm-type="send" :adjust-position="true" @focus="onFocus"
-				@confirm="onSend" />
+			<!-- 多行输入：textarea 自动换行 + auto-height 随内容长高（上限 132px≈6 行，超出内部滚动）。
+				旧实现是单行 input（原生控件不支持换行，长文只能横向滚动，用户看不全自己写了什么）。
+				confirm-type 保持 send：软键盘回车即发送与旧版一致；换行靠自动折行，粘贴的 \n 原样保留 -->
+			<!-- adjust-position=false：系统不再整页顶起（旧实现把整个画面推上去，hero/头部全被顶出屏）。
+				键盘高度经 keyboardheightchange 上报，宿主在输入区下方垫等高占位，只抬输入区本身 -->
+			<textarea v-if="expanded" :id="inputId" class="app-composer__input" v-model="text" :placeholder="placeholder"
+				:placeholder-style="placeholderStyle" confirm-type="send" :adjust-position="false" :auto-height="true"
+				:show-confirm-bar="false" :disable-default-padding="true" @focus="onFocus" @blur="onBlur"
+				@keyboardheightchange="onKeyboardHeight" @confirm="onSend" />
 
 			<!-- 圆形图标按钮手写 view 而不用 rice-button：此处不需要其文字/主题变体能力，
 				且原生 view 的点击行为更可控；.stop 阻断冒泡，避免误触 __box 的展开 -->
@@ -56,9 +75,15 @@
 					<text class="app-composer__model-text">{{ model }}</text>
 					<rice-icon name="arrow-down" size="12px" color="var(--color-text-tertiary)" />
 				</view>
+				<!-- 新对话的工作空间选择（仅首页欢迎态 show-ws）：未选择=对话，选中挂对应空间 -->
+				<view v-if="showWs" class="app-composer__model" @click.stop="emit('open-ws')">
+					<text class="iconfont app-composer__ws-glyph">&#xe67c;</text>
+					<text class="app-composer__model-text">{{ wsLabel }}</text>
+					<rice-icon name="arrow-down" size="12px" color="var(--color-text-tertiary)" />
+				</view>
 				<view class="app-composer__spacer"></view>
-				<!-- 设计稿：展开态有文字时隐藏加号，只留发送 -->
-				<view v-if="!hasText" class="app-composer__circ app-composer__circ--gap" @click.stop="emit('open-plus')">
+				<!-- 设计稿：展开态有文字/附件时隐藏加号，只留发送 -->
+				<view v-if="!canSend" class="app-composer__circ app-composer__circ--gap" @click.stop="emit('open-plus')">
 					<rice-icon name="plus" size="20px" color="var(--color-text-secondary)" />
 				</view>
 				<!-- 回复中：发送按钮原位换成停止按钮，禁再次发送（对齐 uni-ai-x input-tool-bar）；
@@ -67,18 +92,21 @@
 					@click.stop="emit('stop')">
 					<view class="app-composer__stop-square"></view>
 				</view>
-				<view v-else class="app-composer__circ app-composer__circ--gap" :class="hasText ? 'app-composer__circ--send' : ''"
+				<view v-else class="app-composer__circ app-composer__circ--gap" :class="canSend ? 'app-composer__circ--send' : ''"
 					@click.stop="onSend">
 					<!-- 只挂 .iconfont：Web 端 iconfont.css 的 .icon-fasong:before 会与 text 内的码点重复出一个字形 -->
-					<text class="iconfont" :class="hasText ? 'app-composer__icon--send' : ''">&#xe670;</text>
+					<text class="iconfont" :class="canSend ? 'app-composer__icon--send' : ''">&#xe670;</text>
                 </view>
 			</view>
 		</view>
+		<!-- 键盘占位：adjust-position=false 后系统不推页面，这里垫出键盘高度，
+			输入区被顶到键盘正上方，hero/消息流只在剩余空间内收缩，不再整屏上顶 -->
+		<view v-if="keyboardHeight > 0" class="app-composer__kbd" :style="kbdStyle"></view>
 		</view>
 
 		<!-- 录音手势捕获层：按住期间浮满视口，手指滑出输入栏后 move/end 仍派发到本层，
 			上滑变红/松开收尾才可靠；置尾保证盖在输入栏之上，处理器带 holding 幂等守卫；
-			.stop 防止冒泡给 swiper 等原生容器被中途抢流 -->
+			.stop 防止冒泡给宿主右滑手势层被中途抢流 -->
 		<view v-show="holding" class="app-composer__gesture-mask" @touchmove.stop="onTouchMove" @touchend.stop="onTouchEnd"
 			@touchcancel.stop="onTouchCancel"></view>
 	</view>
@@ -88,11 +116,12 @@
 	import { computed, nextTick, onUnmounted, ref, watch } from 'vue'
 	import type { ComputedRef, Ref, WritableComputedRef } from 'vue'
 	import { i18n } from '@/locale/i18n.ts'
-	import { isSpeechSupported, setSpeechLanguage, startSpeechSession, stopSpeechSession, cancelSpeechSession } from '@/utils/speech-recognizer.uts'
+	import { isSpeechSupported, setSpeechLanguage, startSpeechSession, stopSpeechSession, cancelSpeechSession, openSpeechPermissionSettings } from '@/utils/speech-recognizer.uts'
 	import type { SpeechStartResult } from '@/utils/speech-recognizer.uts'
 	import { useLocale } from '@/hooks/useLocale.ts'
 	import type { Locale } from '@/hooks/useLocale.ts'
 	import AppVoiceWave from '@/components/app-voice-wave/app-voice-wave.uvue'
+	import type { PendingAttachment } from '@/data/app-data'
 
 	defineOptions({
 		name: 'app-composer',
@@ -110,6 +139,12 @@
 		inputId?: string
 		/** 宽屏内容列样式（width+margin-left）；窄屏传空串保持撑满 */
 		columnStyle?: string
+		/** 新对话欢迎态：工具行展示工作空间选择 chip（对话页不展示，会话归属已锁定） */
+		showWs?: boolean
+		/** 工作空间 chip 展示名（未选择=「对话」） */
+		wsLabel?: string
+		/** 待发送附件（v1.1 内联 base64）；chips 展示 + 仅附件也可发送 */
+		attachments?: PendingAttachment[]
 	}>(), {
 		modelValue: '',
 		expanded: false,
@@ -117,7 +152,10 @@
 		tag: '',
 		processing: false,
 		inputId: 'app-composer-input',
-		columnStyle: ''
+		columnStyle: '',
+		showWs: false,
+		wsLabel: '',
+		attachments: (): PendingAttachment[] => []
 	})
 
 	const emit = defineEmits<{
@@ -128,6 +166,8 @@
 		(e: 'stop'): void
 		(e: 'open-model'): void
 		(e: 'open-plus'): void
+		(e: 'open-ws'): void
+		(e: 'remove-attach', index: number): void
 	}>()
 
 	/** 上滑取消的位移阈值（px） */
@@ -145,6 +185,8 @@
 	})
 
 	const hasText: ComputedRef<boolean> = computed<boolean>((): boolean => props.modelValue.trim().length > 0)
+	/** 可发送 = 有文字或有附件（仅附件也合法：内核附件注入不依赖正文） */
+	const canSend: ComputedRef<boolean> = computed<boolean>((): boolean => hasText.value || props.attachments.length > 0)
 	const hasTag: ComputedRef<boolean> = computed<boolean>((): boolean => props.tag.length > 0)
 
 	// 识别语言跟随应用语言：应用 locale → 系统引擎认的 BCP-47 标签，注入 .uts 接入层
@@ -191,15 +233,25 @@
 	let speechGeneration = 0
 	let holdStartedAt = 0
 
-	const boxClass: ComputedRef<string> = computed<string>((): string => {
-		if (voiceMode.value) {
-			// 录音态只换配色（边框/背景），不改几何，避免重建节点打断手势
-			if (holding.value) {
-				return canceling.value ? 'app-composer__box--record app-composer__box--record-error' : 'app-composer__box--record'
-			}
-			return ''
+	// 有草稿的收起态：中央节点随内容长高（1~3 行），不再钉死 36px 单行截断。
+	// 语音形态（含按住录音）恒单行：按住期间改几何会打断原生触摸流（既有纪律）
+	const centerClass: ComputedRef<string> = computed<string>((): string => {
+		let cls: string = speechSupported.value ? '' : 'app-composer__center--nomic'
+		if (hasText.value && !voiceMode.value && !holding.value) {
+			cls = cls.length > 0 ? cls + ' app-composer__center--draft' : 'app-composer__center--draft'
 		}
-		return props.expanded ? 'app-composer__box--open' : ''
+		return cls
+	})
+
+	const boxClass: ComputedRef<string> = computed<string>((): string => {
+		// 有草稿时收起态随内容长高（配合 center--draft 的 1~3 行）；
+		// 录音态叠在其后只换配色，几何仍由 draft 决定，避免重建节点打断手势
+		const base: string = props.expanded ? 'app-composer__box--open' : (hasText.value ? 'app-composer__box--draft' : '')
+		if (voiceMode.value && holding.value) {
+			const record: string = canceling.value ? 'app-composer__box--record app-composer__box--record-error' : 'app-composer__box--record'
+			return base.length > 0 ? base + ' ' + record : record
+		}
+		return base
 	})
 
 	const placeholder: ComputedRef<string> = computed<string>((): string => {
@@ -240,7 +292,14 @@
 	// 同时刷新语音能力缓存（语言可能已在设置页切换，探测按语言缓存见 speech-recognizer）
 	watch((): boolean => props.expanded, (expanded: boolean): void => {
 		speechSupported.value = isSpeechSupported()
-		if (!expanded) return
+		if (!expanded) {
+			// 收起即清键盘占位：textarea 随 v-if 卸载不一定派发 blur，占位滞留会把输入区顶在半空
+			inputFocused = false
+			rawKbd = 0
+			focusWindowHeight = -1
+			keyboardHeight.value = 0
+			return
+		}
 		nextTick((): void => {
 			const input = uni.getElementById(props.inputId)
 			if (input != null) input.focus()
@@ -251,7 +310,89 @@
 		return i18n.global.t(key)
 	}
 
+	/**
+	 * 语音失败统一提示：权限被永久拒绝（勾「不再询问」/iOS 拒绝过）时系统不会再弹授权框，
+	 * toast「检查权限」用户无从下手——弹引导框给「去设置」直达本应用权限页；其余失败仍走 toast。
+	 * 引导框同一时间只弹一个（按住失败与松手收尾两条链路可能先后到达）。
+	 */
+	let permDialogShowing = false
+	function showSpeechError(res: SpeechStartResult): void {
+		if (res.permissionBlocked) {
+			if (permDialogShowing) return
+			permDialogShowing = true
+			uni.showModal({
+				title: t('home.voice.permTitle'),
+				content: t('home.voice.permContent'),
+				confirmText: t('home.voice.permSettings'),
+				cancelText: t('home.voice.permCancel'),
+				success: (r: ShowModalSuccess): void => {
+					if (r.confirm) openSpeechPermissionSettings()
+				},
+				complete: (): void => {
+					permDialogShowing = false
+				}
+			})
+			return
+		}
+		if (res.errorKey != null) uni.showToast({ title: t(res.errorKey!), icon: 'none' })
+	}
+
+	/* ---- 键盘局部抬升：adjust-position=false 后由本组件接管。
+	        keyboardheightchange 上报键盘高度 → 输入区下方垫等高占位；
+	        blur/收起/卸载一律清零，占位绝不滞留把输入区顶在半空 ---- */
+	const keyboardHeight: Ref<number> = ref<number>(0)
+	// 聚焦标志：blur/收起后个别机型还会补发一帧非零 keyboardheightchange（派发顺序不保证），
+	// 无条件采纳会把已清零的占位重新顶起来且无人再清——非聚焦态只接受 0 帧
+	let inputFocused: boolean = false
+	// 【双抬真因 · 2026-11-24 三轮报障「点输入框后停止按钮被遮挡」】部分机型
+	// （华为 EMUI 等）在 adjust-position=false 下仍压缩 WebView 视口（等效
+	// adjustResize）：页面已变矮、输入区本来就在键盘上方，再垫 keyboardHeight
+	// 占位 = 双倍抬升，输入盒被顶进消息区/顶出可视范围（截图停止按钮被裁）。
+	// 对策：聚焦瞬间记窗口高度基线，键盘帧到达时重读——视口已缩（≥半个键盘高）
+	// 则占位归零，只有视口未缩的机型才垫占位；resize 迟到的机型由 onWindowResize 复核。
+	let focusWindowHeight: number = -1
+	let rawKbd: number = 0
+	const kbdStyle: ComputedRef<string> = computed<string>((): string => {
+		return 'height:' + keyboardHeight.value.toString() + 'px;'
+	})
+
+	/** 视口已被键盘压缩 → 占位归零（防双抬）；未缩才垫 rawKbd */
+	function applyKbdHeight(): void {
+		if (!inputFocused || rawKbd <= 0) { keyboardHeight.value = 0; return }
+		if (focusWindowHeight > 0) {
+			const now: number = uni.getWindowInfo().windowHeight
+			// 容差：状态栏/导航条微抖不算 resize；缩了至少 max(40, 半个键盘高) 才认定 resize 机型
+			if (focusWindowHeight - now > Math.max(40, rawKbd / 2)) { keyboardHeight.value = 0; return }
+		}
+		keyboardHeight.value = rawKbd
+	}
+
+	function onKeyboardHeight(e: UniInputKeyboardHeightChangeEvent): void {
+		if (!inputFocused && e.detail.height > 0) return
+		rawKbd = e.detail.height
+		applyKbdHeight()
+	}
+
+	// resize 可能迟于 keyboardheightchange：窗口高度变化时复核占位。
+	// uni.onWindowResize 仅 Web/微信可用（APP 端无全局监听，见 useViewport 头注释）；
+	// APP 端 resize 机型的迟到压缩由 applyKbdHeight 的下一帧键盘事件/blur 兜底，
+	// 且 keyboardheightchange 在 resize 完成后必然还有一帧终值（高度稳定帧）。
+	// #ifdef WEB || MP-WEIXIN
+	uni.onWindowResize((_res: UniNamespace.WindowResizeResult): void => {
+		if (inputFocused) applyKbdHeight()
+	})
+	// #endif
+
+	function onBlur(): void {
+		inputFocused = false
+		rawKbd = 0
+		focusWindowHeight = -1
+		keyboardHeight.value = 0
+	}
+
 	function onFocus(): void {
+		inputFocused = true
+		focusWindowHeight = uni.getWindowInfo().windowHeight
 		emit('expand')
 	}
 
@@ -368,7 +509,7 @@
 				partialText.value = ''
 				sessionPromise = null
 				pendingResult = null
-				if (res.errorKey != null) uni.showToast({ title: t(res.errorKey!), icon: 'none' })
+				showSpeechError(res)
 				// 设备级 unsupported 已落缓存：即时隐藏语音入口并退出语音形态
 				speechSupported.value = isSpeechSupported()
 				if (!speechSupported.value) {
@@ -415,6 +556,10 @@
 	onUnmounted((): void => {
 		stopHoldWatchdog()
 		abandonSpeech()
+		inputFocused = false
+		rawKbd = 0
+		focusWindowHeight = -1
+		keyboardHeight.value = 0
 	})
 
 	function onTouchMove(e: TouchEvent): void {
@@ -474,7 +619,7 @@
 		sessionPromise = null
 		partialText.value = ''
 		if (!res.ok) {
-			if (res.errorKey != null) uni.showToast({ title: t(res.errorKey!), icon: 'none' })
+			showSpeechError(res)
 			// 设备级 unsupported 已落缓存：即时隐藏语音入口并退出语音形态
 			speechSupported.value = isSpeechSupported()
 			if (!speechSupported.value) {
@@ -506,6 +651,38 @@
 
 		&__tag {
 			margin: 0 4px 8px;
+		}
+
+		// 待发送附件 chips：横向可换行；点 × 移除
+		&__attaches {
+			flex-direction: row;
+			flex-wrap: wrap;
+			margin: 0 4px 8px;
+		}
+
+		&__attach {
+			flex-direction: row;
+			align-items: center;
+			background-color: var(--color-fill-secondary);
+			border-radius: 8px;
+			padding: 4px 8px;
+			margin: 0 6px 6px 0;
+			max-width: 220px;
+		}
+
+		&__attach-name {
+			font-size: 12px;
+			color: var(--color-text-secondary);
+			margin-left: 4px;
+			max-width: 150px;
+			overflow: hidden;
+			text-overflow: ellipsis;
+			white-space: nowrap;
+		}
+
+		&__attach-x {
+			margin-left: 6px;
+			padding: 2px;
 		}
 
 		// 录音态面板：波形在上、提示在下（UCSS 无 gap，用 margin）
@@ -554,6 +731,14 @@
 				border-radius: 20px;
 			}
 
+			// 收起态有草稿：整条随内容长高（1~3 行），不再钉死 56px 把多行草稿裁掉
+			&--draft {
+				height: auto;
+				min-height: 56px;
+				padding-top: 8px;
+				padding-bottom: 8px;
+			}
+
 			// 录音态：整条转主色实底，取消态转危险红（对齐设计稿形态二/三）；只动配色不动几何
 			&--record {
 				border-color: var(--color-primary);
@@ -580,14 +765,34 @@
 			&--nomic {
 				margin-left: 4px;
 			}
+
+			// 有草稿：高度放开到 3 行（20px 行高 × 3 + 上下留白），随内容自适应
+			&--draft {
+				height: auto;
+				min-height: 36px;
+				max-height: 68px;
+				padding: 6px 0;
+			}
 		}
 
 		&__fake-text {
+			/* 草稿预览最多 3 行（模板 :max-lines=3 管 App 端；下面 #ifndef APP 是 H5 兜底），
+			   不再单行省略——收起态也要能看清自己写了什么 */
 			font-size: 14px;
+			line-height: 20px;
 			color: var(--color-text);
 			overflow: hidden;
 			text-overflow: ellipsis;
-			white-space: nowrap;
+			/* Web/H5 兜底：text 外层有组件包装，须选择器下探一层 line-clamp 才生效（uni-app x 官方 text 文档）。
+			   APP 端 UCSS 不认这些属性，条件编译排除，避免非标准属性告警 */
+			/* #ifndef APP */
+			& uni-text {
+				overflow: hidden;
+				display: -webkit-box;
+				-webkit-box-orient: vertical;
+				-webkit-line-clamp: 3;
+			}
+			/* #endif */
 		}
 
 		&__fake-placeholder {
@@ -606,13 +811,16 @@
 		}
 
 		&__input {
-			flex: 1;
-			height: 38px;
+			/* 多行 textarea：不设 flex:1（展开态 box 是 column，会把输入区拉满整盒）；
+			   min-height 保持单行时的视觉高度，auto-height 随内容长高，max-height 封顶后内部滚动。
+			   line-height 显式声明：auto-height 的行数换算依赖它，缺省时各端行高不一。 */
+			min-height: 38px;
+			max-height: 132px;
 			margin-left: 0;
 			margin-right: 0;
-			padding-left: 4px;
-			padding-right: 4px;
+			padding: 8px 4px;
 			font-size: 14px;
+			line-height: 20px;
 			color: var(--color-text);
 		}
 
@@ -675,6 +883,18 @@
 			font-size: 12px;
 			font-weight: 700;
 			color: var(--color-text-secondary);
+		}
+
+		// 工作空间 chip 的文件夹图标（iconfont 码点），颜色字号显式声明
+		&__ws-glyph {
+			margin-right: 5px;
+			font-size: 12px;
+			color: var(--color-text-secondary);
+		}
+
+		// 键盘占位：高度行内注入（keyboardheightchange 上报值），透明不拦视觉
+		&__kbd {
+			width: 100%;
 		}
 
 		&__spacer {

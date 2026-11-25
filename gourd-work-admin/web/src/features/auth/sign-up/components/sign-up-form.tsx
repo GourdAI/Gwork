@@ -70,6 +70,13 @@ export function SignUpForm({
   const legalConsentErrorMessage = t('Please agree to the legal terms first')
 
   const { status } = useStatus()
+  // Registration must honour the same transport-encryption switch as login,
+  // otherwise turning it on protects only one of the two password-carrying
+  // endpoints and the sign-up form keeps sending plaintext.
+  const passwordLoginEncryptionEnabled =
+    (status?.password_login_encryption_enabled ??
+      status?.data?.password_login_encryption_enabled ??
+      false) === true
   const {
     isTurnstileEnabled,
     turnstileSiteKey,
@@ -168,6 +175,7 @@ export function SignUpForm({
         verification_code: verificationCode || undefined,
         aff_code: getAffiliateCode(),
         turnstile: turnstileToken,
+        passwordEncryptionEnabled: passwordLoginEncryptionEnabled,
       })
 
       if (res?.success) {

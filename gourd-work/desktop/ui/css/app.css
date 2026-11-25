@@ -403,6 +403,18 @@ body.is-electron.is-mac:not(.code-mode) .sidebar-header { padding-top: 40px; }
 .welcome-avatar { width: 120px; height: 120px; position: relative; margin-bottom: 28px; display: flex; align-items: center; justify-content: center; cursor: pointer; transition: transform 0.25s, filter 0.25s; text-decoration: none; }
 .welcome-avatar:hover { transform: scale(1.08); filter: brightness(1.1); }
 .welcome-avatar img { width: 110px; height: 110px; object-fit: contain; border-radius: 24px; }
+/* 品牌吉祥物「团子」动图（GIF 透明底，280×280 / 61 帧 / 每帧 80ms ≈ 12.5fps / NETSCAPE2.0 无限循环）：
+   ① 必须解除 .welcome-avatar img 的 border-radius —— 24px 圆角会切掉毛发边缘与跳跃帧四肢；
+   ② 尺寸只在 .welcome-compact 作用域内声明：welcomeView 的 class 是 chat.html 里**硬编码**的
+      `welcome-view welcome-compact`，全仓 JS 从不增删它（实测 className 恒为二者），所以紧凑态
+      就是唯一渲染态。别再往基础规则里塞第二套尺寸 —— 那只会是永不命中的死代码。
+   ③ 首帧实测 ink bbox 31..243 × 45..275（画布 280×280，55% 像素全透明），即左右各约 11%、
+      上下各约 16~18% 是透明留白；所以盒尺寸要比旧实底 logo 大：76 → 96px，肉眼体量才相当。
+   ④ 阴影沿用本区块已有的 img drop-shadow（跟随 alpha 轮廓），不要换 box-shadow（会画成方框）。
+   ⑤ 外面套了 <picture>（为 prefers-reduced-motion 换静态图），display 默认 inline 会破坏
+      flex 居中与尺寸收缩，故显式继承 flex 项行为。 */
+.welcome-avatar picture { display: flex; align-items: center; justify-content: center; }
+.welcome-compact .welcome-avatar img.welcome-avatar-mascot { border-radius: 0; background: none; width: 96px; height: 96px; }
 @keyframes blob-spin { to { transform: rotate(360deg); } }
 /* 副标题（welcome-sub）已按需求移除：原 36px 间距并入标题，保持 hero→输入框的呼吸感 */
 .welcome-title { font-size: 26px; font-weight: 700; margin-bottom: 28px; transition: opacity .25s ease, transform .25s ease; }
@@ -423,7 +435,9 @@ body.is-electron.is-mac:not(.code-mode) .sidebar-header { padding-top: 40px; }
 /* ── 欢迎页活跃热力图（无卡壳：去标题/去图例/去边框底色，退为输入框上方的安静背景条） ── */
 .welcome-activity-card { width: 100%; max-width: 680px; margin-bottom: 14px; flex-shrink: 0; }
 /* 视觉重心提权：品牌标识加柔和投影、输入框常驻淡光环（见 .welcome-input-box），二者为欢迎页主角 */
-.welcome-compact .welcome-avatar { width: 84px; height: 84px; margin-bottom: 14px; }
+/* 容器与图盒尺寸对齐：吉祥物 img 96px == 容器 96px，二者同值才不会出现 flex 居中后的
+   亚像素偏移；margin-bottom 14px 是紧凑态原有的纵向节奏 */
+.welcome-compact .welcome-avatar { width: 96px; height: 96px; margin-bottom: 14px; }
 .welcome-compact .welcome-avatar img { width: 76px; height: 76px; border-radius: 20px; filter: drop-shadow(0 6px 16px rgba(31, 35, 41, .14)); }
 .welcome-compact .welcome-title { font-size: 22px; margin-bottom: 18px; }
 .welcome-compact { padding-bottom: 40px; }
@@ -1167,7 +1181,12 @@ body.is-electron.is-mac:not(.code-mode) .sidebar-header { padding-top: 40px; }
 .thinking-block.streaming .thinking-status-dot { animation: status-dot-blink 1s ease-in-out infinite; box-shadow: none; }
 /* 思考块底部也补 hover 灰底：header 自带 hover 但卡体区域没有，
    整卡悬停体验与工具卡对齐；streaming 态除外（与工具卡同口径，避免流式中底色闪烁）。 */
-.thinking-block-body { padding: 0 10px 8px; font-size: 13px; color: var(--text-secondary); line-height: 1.7; max-height: 300px; overflow-y: auto; }
+/* 【2026-11 用户报「工具展开有灰底内容块，思考没有」统一口径】思考体与工具卡体
+   同族：容器全宽 padding:0（限高/滚动在容器上），灰底块由内层 .thinking-inner-out
+   承担（--bg-code 同底、14px 同内节奏，与 .tool-plain-out / .bash-output 一致）。
+   旧形态 padding:0 10px 8px 无底色 —— 展开后裸文本贴左缘，比标题头还靠左。 */
+.thinking-block-body { padding: 0; font-size: 13px; color: var(--text-secondary); line-height: 1.7; max-height: 300px; overflow-y: auto; }
+.thinking-inner-out { padding: 8px 14px; background: var(--bg-code); }
 /* 收起态的「此刻在想什么」：取末条非空行（同 ZCode 收起态摘要），
    展开后隐藏。已并入 header（见 .preview-inline），不再是独立一行。 */
 .thinking-block-body .md-content { color: var(--text-secondary); font-size: 13px; }
@@ -3001,8 +3020,11 @@ body.is-electron.is-mac:not(.code-mode) .sidebar-header { padding-top: 40px; }
     .welcome-input-box { max-width: 100%; }
     .input-wrap { padding: 8px 12px 16px; }
     .welcome-title { font-size: 22px; }
-    .welcome-avatar { width: 80px; height: 80px; }
+    .welcome-avatar { width: 96px; height: 96px; }
     .welcome-avatar img { width: 80px; height: 80px; }
+    /* 吉祥物无需在此复述尺寸：.welcome-compact .welcome-avatar img.welcome-avatar-mascot
+       (0,3,1) 恒高于本 media 块里的 .welcome-avatar img (0,1,1)，媒体查询不参与特异性比较，
+       所以窄屏照样跟着紧凑态 96px 走。 */
     .main-header { padding: 12px 16px 10px; }
     .input-box { border-radius: 12px; }
     .sidebar { display: none; }
@@ -4515,6 +4537,22 @@ pre:hover .code-copy-btn { opacity: 1; }
 .turn-batch-chevron svg { width: 100%; height: 100%; }
 /* 收起态 chevron 指向右（展开态向下），与 Qoder 一致 */
 .turn-batch-header:not(.turn-batch-open) .turn-batch-chevron { transform: rotate(-90deg); }
+/* ===== 限高窗自绘滚动条（2026-11 用户报「固定高度，滚动条没显示」）=====
+   合成滚动（clip+translate）没有原生滚动条；thumb 画在盖子自身的 ::after 上，
+   零 DOM 插入（兄弟区间/邻接校验/compact 分类全部不受影响）。几何由 JS 经
+   CSS 变量下发（--win-sb-top/-h/-thumb-h/-thumb-y，见 app-turn-display.js
+   paintWindowScrollbar）；折叠时盖子 display:none，滚动条随之消失。
+   轨道贴盖子右缘内侧 2px；命中区由 JS pointerdown 判定（右缘 16px 宽），
+   伪元素 pointer-events:none 不挡盖子本体点击。 */
+.turn-batch-header.turn-batch-windowed { position: relative; }
+.turn-batch-header.turn-batch-windowed::after {
+    content: ''; position: absolute; pointer-events: none;
+    right: 2px; top: var(--win-sb-top, 100%);
+    width: 6px; height: var(--win-sb-h, 232px);
+    border-radius: 3px;
+    background: linear-gradient(var(--scrollbar-thumb, rgba(150,152,158,.35)) 0 0)
+        0 var(--win-sb-thumb-y, 0px) / 100% var(--win-sb-thumb-h, 40px) no-repeat;
+}
 /* 成员折叠：JS 管理类的单一窄规则；:empty 的正文壳本就不占位，无需特判 */
 .msg-bubble > .turn-batch-collapsed { display: none !important; }
 /* 【方案A · 卡内批次】智能体卡体内成员折叠同口径（2026-11 用户拍板卡内与外部同构） */
@@ -4708,6 +4746,57 @@ pre:hover .code-copy-btn { opacity: 1; }
 .turn-compact-toggle::before { font-size: 13px !important; }
 
 /* Qoder 对齐层结束 */
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   ⑳ 层级缩进（2026-11 用户报「展示信息好乱，按 Qoder 每个层级缩进一目了然」）
+
+   Qoder 参考形态：批次盖子（正在执行中 · Ns / 执行工具 N 次）在第一列，
+   盖子下所有过程行统一右移一列，盖子左缘一条极淡引导线贯穿成员区 ——
+   「哪些行属于这个折叠组」一眼可辨。此前盖子与成员行全部左缘齐平（都是
+   padding 10px），层级归属只能靠猜，正是用户截图红框的「乱」。
+
+   实现约束（沿用本文件既有铁律）：
+   · 零包装节点：成员仍是气泡直接子级，缩进只写在成员自身 header 的
+     padding-left 上（26px = 盖子 chevron 列 10 + 16），兄弟区间/邻接判定/
+     compact 分类/限高窗几何全部不受影响（padding 改的是成员盒内布局，
+     成员间 margin 折叠语义不变）。
+   · 引导线画在【盖子自身的 ::before】上（盖子已 position:relative 供
+     滚动条 ::after 使用）：top 从盖子底部起、height 由 JS 量测成员区总高
+     经 --batch-guide-h 下发（见 app-turn-display.js paintBatchGuide）。
+     不用成员 border-left（process-flat-contract ② 禁止四基类竖条），
+     也不插任何轨道节点。折叠/拆窗时 JS 清变量，线随之消失。
+   · 只命中【批次成员】（data-turn-batch="1"，JS 管理）：批次外的常驻行
+     （正文/HITL/智能体一级行）零命中；盖子偏好关闭（gourd.turnCompact=0）
+     时无成员标记，整层自动失效，行为回退与旧版一致。
+   · 特异性核算：成员 header 规则 0,5,1 高于 ② 的 0,4,1（padding 5px 10px
+     !important）与 code.css 的 1,1,2（id 选择器 6px 10px 无 !important），
+     两态（agent-live / turn-compact-open）+ 卡内（agent-card-body 宿主）
+     全覆盖。HITL 待审批卡不入批（isInteractiveCard 豁免），天然不命中。
+   ═══════════════════════════════════════════════════════════════════════════ */
+.msg-row.assistant .msg-bubble > .tool-card[data-turn-batch="1"]:not(.hitl-pending) > .tool-card-header,
+.msg-row.assistant .msg-bubble > .thinking-block[data-turn-batch="1"] > .thinking-block-header,
+.msg-row.assistant .msg-bubble > .tool-batch-group[data-turn-batch="1"] .batch-tool-items > .tool-card:not(.hitl-pending) > .tool-card-header,
+.msg-row.assistant .msg-bubble .agent-card-body > .tool-card[data-turn-batch="1"]:not(.hitl-pending) > .tool-card-header,
+.msg-row.assistant .msg-bubble .agent-card-body > .thinking-block[data-turn-batch="1"] > .thinking-block-header,
+.msg-row.assistant .msg-bubble .agent-card-body > .tool-batch-group[data-turn-batch="1"] .batch-tool-items > .tool-card:not(.hitl-pending) > .tool-card-header {
+    padding-left: 26px !important;
+}
+/* 历史展开态的并行组成员：外层组带成员标记，但成员卡自身无标记（appendCardToBatch
+   只写 data-batch-key）——⑫ 已把组头视觉隐藏、成员提升为一级行，缩进必须跟上。 */
+.msg-bubble.turn-compact-open > .tool-batch-group[data-turn-batch="1"] .batch-tool-items > .tool-card:not(.hitl-pending) > .tool-card-header {
+    padding-left: 26px !important;
+}
+/* 引导线：盖子 ::before，宽 1px、贴盖子 chevron 中列（left 16px ≈ chevron 中心），
+   高度由 JS 下发；未下发（--batch-guide-h 缺省 0）时不渲染，桩/偏好关闭零残留。
+   position:relative 全展开态常驻（windowed 规则只覆盖建窗态，历史展开批次也要定位参照）。 */
+.turn-batch-header.turn-batch-open { position: relative; }
+.turn-batch-header.turn-batch-open::before {
+    content: ''; position: absolute; pointer-events: none;
+    left: 16px; top: 100%;
+    width: 1px; height: var(--batch-guide-h, 0px);
+    background: var(--border-color);
+    opacity: .6;
+}
 
 
 /* ⑭【用户 2026-11 报「工具/思考图标大小不一致，颜色有深有浅」】类型图标三层漂移：
@@ -5048,7 +5137,9 @@ pre:hover .code-copy-btn { opacity: 1; }
     display: flex;
     align-items: center;
     gap: 10px;
+    /* 左右 10px 与过程行/正文同列（2026-11 用户截图：分隔线左缘凸出到标题头左侧） */
     margin: 14px 0;
+    padding: 0 10px;
     color: var(--text-tertiary);
     font-size: 12px;
     line-height: 1;
@@ -5113,3 +5204,57 @@ pre:hover .code-copy-btn { opacity: 1; }
 .msg-row.assistant .msg-bubble .tool-card.hitl-pending .hitl-card-actions {
     padding: 8px 12px 10px !important; gap: 8px !important;
 }
+
+/* ===== ⑲ 展开内容缩进对齐标题头（2026-11 用户报「缩进比标题头还在前面，看起来不奇怪嘛」）=====
+   【⑳ 层级缩进改造后口径】批次成员行标题头 = padding-left 26px + 类型图标 16px + gap 8px
+   ⇒ 标签文字左缘在 50px。展开的灰底内容块（bash-cmd/bash-stdout/tool-plain-out/
+   tool-file-pre/thinking-inner-out）左内距同抬到 50px，与标题头标签同列；
+   右内距保持 14px 不变。只命中 assistant 气泡内的过程行展开体，用户气泡零命中。
+   diff 行（git-diff-line）与 grep/file 行同口径抬左缘，行号列宽不动。
+   旧口径 34px（成员未缩进时代的 10+16+8）已由 ⑳ 取代，勿回退。 */
+.msg-row.assistant .msg-bubble .tool-card .bash-cmd,
+.msg-row.assistant .msg-bubble .tool-card .bash-stdout,
+.msg-row.assistant .msg-bubble .tool-card .tool-plain-out,
+.msg-row.assistant .msg-bubble .tool-card .tool-file-pre,
+.msg-row.assistant .msg-bubble .tool-card .edit-result,
+.msg-row.assistant .msg-bubble .tool-card .grep-note,
+.msg-row.assistant .msg-bubble .tool-card .file-entry,
+.msg-row.assistant .msg-bubble .thinking-block .thinking-inner-out {
+    padding-left: 50px;
+}
+.msg-row.assistant .msg-bubble .tool-card-body.is-edit .git-diff-line { padding-left: 50px; }
+.msg-row.assistant .msg-bubble .tool-card .grep-file { padding-left: 50px; }
+.msg-row.assistant .msg-bubble .tool-card .grep-hit { padding-left: 64px; }
+/* 【⑳ 例外】智能体卡体内的展开内容：卡体自带 padding-left 26px（⑰ 口径，
+   契约测试 agent-body-align 钉死，不改）。
+   · 入批成员行 header 左内距 26px（⑳）+ 图标 16 + gap 8 ⇒ 标签列 = 26+50 = 76px，
+     灰底块补 50px 同列；
+   · 未入批行（批次偏好关闭等回退态）header 仍是 10px ⇒ 标签列 60px，灰底块补 34px。
+   不写例外会套用外部 50px 双重叠加（缩进过深或错位）。 */
+.msg-row.assistant .msg-bubble .agent-card .tool-card .bash-cmd,
+.msg-row.assistant .msg-bubble .agent-card .tool-card .bash-stdout,
+.msg-row.assistant .msg-bubble .agent-card .tool-card .tool-plain-out,
+.msg-row.assistant .msg-bubble .agent-card .tool-card .tool-file-pre,
+.msg-row.assistant .msg-bubble .agent-card .tool-card .edit-result,
+.msg-row.assistant .msg-bubble .agent-card .tool-card .grep-note,
+.msg-row.assistant .msg-bubble .agent-card .tool-card .file-entry,
+.msg-row.assistant .msg-bubble .agent-card .thinking-block .thinking-inner-out {
+    padding-left: 34px;
+}
+.msg-row.assistant .msg-bubble .agent-card .tool-card-body.is-edit .git-diff-line { padding-left: 34px; }
+.msg-row.assistant .msg-bubble .agent-card .tool-card .grep-file { padding-left: 34px; }
+.msg-row.assistant .msg-bubble .agent-card .tool-card .grep-hit { padding-left: 48px; }
+.msg-row.assistant .msg-bubble .agent-card .tool-card[data-turn-batch="1"]:not(.hitl-pending) .bash-cmd,
+.msg-row.assistant .msg-bubble .agent-card .tool-card[data-turn-batch="1"]:not(.hitl-pending) .bash-stdout,
+.msg-row.assistant .msg-bubble .agent-card .tool-card[data-turn-batch="1"]:not(.hitl-pending) .tool-plain-out,
+.msg-row.assistant .msg-bubble .agent-card .tool-card[data-turn-batch="1"]:not(.hitl-pending) .tool-file-pre,
+.msg-row.assistant .msg-bubble .agent-card .tool-card[data-turn-batch="1"]:not(.hitl-pending) .edit-result,
+.msg-row.assistant .msg-bubble .agent-card .tool-card[data-turn-batch="1"]:not(.hitl-pending) .grep-note,
+.msg-row.assistant .msg-bubble .agent-card .tool-card[data-turn-batch="1"]:not(.hitl-pending) .file-entry,
+.msg-row.assistant .msg-bubble .agent-card .thinking-block[data-turn-batch="1"] .thinking-inner-out {
+    padding-left: 50px;
+}
+.msg-row.assistant .msg-bubble .agent-card .tool-card-body.is-edit .git-diff-line { padding-left: 34px; }
+.msg-row.assistant .msg-bubble .agent-card .tool-card[data-turn-batch="1"]:not(.hitl-pending) .tool-card-body.is-edit .git-diff-line { padding-left: 50px; }
+.msg-row.assistant .msg-bubble .agent-card .tool-card[data-turn-batch="1"]:not(.hitl-pending) .grep-file { padding-left: 50px; }
+.msg-row.assistant .msg-bubble .agent-card .tool-card[data-turn-batch="1"]:not(.hitl-pending) .grep-hit { padding-left: 64px; }

@@ -41,11 +41,8 @@ for (const l of langs) {
     // 上游品牌残留
     if (/veryclaw|workbuddy|uni-ai x/i.test(v)) err(l + ' ' + k + ' legacy brand: ' + v);
   }
-  // lang.* 固定原名不翻译（全部 12 个语言的原名 key）
-  for (const k of langs.map(x => 'lang.' + x)) {
-    if (!(k in packs['zh-Hans'])) continue;
-    if (pack[k] !== packs['zh-Hans'][k]) err(l + ' ' + k + ' native name changed');
-  }
+  // 注：早期有 lang.* 词条存放语言原名，现已移除——pages/mine 的 LANG_OPTIONS 直接硬编码
+  // 原名（中文 / English / Deutsch…），语言名不随当前语言翻译，走 locale 反而多一层间接。
 }
 
 // i18n.ts 接线：12 个 import + messages 注册

@@ -12,7 +12,6 @@
 	import { computed, onMounted, onUnmounted, ref } from 'vue'
 	import type { ComputedRef, Ref } from 'vue'
 	import { i18n } from '@/locale/i18n.ts'
-	import { useTheme } from '@/hooks/useTheme'
 	import { useViewport } from '@/hooks/useViewport'
 	import { pickGreetingIndex, greetingText } from '@/utils/greeting.ts'
 
@@ -21,13 +20,12 @@
 		styleIsolation: 'app-and-page'
 	})
 
-	const { isDark } = useTheme()
 	const { isShort } = useViewport()
 
-	// logo 与桌面端同源：亮色黑底白 G / 暗色近白底黑 G（与暗色主色近白实底同构）
-	const logoSrc: ComputedRef<string> = computed<string>((): string => {
-		return isDark.value ? '/static/logo-inverse.png' : '/static/logo.png'
-	})
+	// 品牌吉祥物「团子」动图（GIF 透明底，亮/暗主题通用，不再按主题切换贴图）：
+	// 该图仅在新建任务页（home hero）使用；会话头像 / 关于页仍用主题化的
+	// /static/logo.png 与 /static/logo-inverse.png。
+	const logoSrc: string = '/static/mascot-tuanzi.gif'
 
 	// 欢迎语：桌面端 20 条标语随机轮换。hero 随「新建会话/冷启动」重新挂载（v-if 切换），
 	// 每次挂载抽一条；跨挂载去重在 utils/greeting.ts 模块级实现（setup 作用域会随重建丢失）。
@@ -89,14 +87,16 @@
 		}
 
 		&__logo {
-			width: 74px;
-			height: 74px;
-			margin-bottom: 18px;
+			// 吉祥物动图自带约 15% 的透明留白（跳跃帧上下更甚），故比原 74px 的实底方标放大一档，
+			// 让肉眼看到的「团子」体积与旧 logo 相当；aspectFit 保证任何一帧都不被裁切
+			width: 88px;
+			height: 88px;
+			margin-bottom: 16px;
 
 			&--short {
-				width: 44px;
-				height: 44px;
-				margin-bottom: 8px;
+				width: 54px;
+				height: 54px;
+				margin-bottom: 6px;
 			}
 		}
 

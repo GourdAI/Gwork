@@ -1,5 +1,7 @@
 <template>
-	<!-- 会话抽屉面板：分页与横滑手势由首页的 swiper 承载，这里只负责会话列表与内嵌弹层 -->
+	<!-- 会话抽屉面板：浮层/常驻侧栏的尺寸由宿主提供，这里只负责会话列表与内嵌弹层。
+		对齐 workbuddy：分组标题带箭头可折叠；工作区行点箭头展开会话子列表（带展开动画），
+		整行不再是「选择工作空间」入口——工作空间在新对话输入区选择 -->
 	<view class="app-conv-drawer">
 		<view class="app-drawer">
 			<view class="app-drawer__head">
@@ -26,40 +28,59 @@
 			<scroll-view class="app-drawer__scroll" direction="vertical" :show-scrollbar="false">
 				<view class="app-drawer__content">
 					<text v-if="remoteHint.length > 0" class="app-drawer__hint">{{ remoteHint }}</text>
-					<text class="app-drawer__group">{{ t('conv.title') }} ({{ defaultConversations.length }})</text>
-					<app-conv-row v-for="(item, index) in visibleConversations" :key="item.id" :title="item.title"
-						:time="formatRelativeTime(item.updatedAt)" :pinned="item.pinned"
-						@open="onOpenConv(item.id)" @longpress="onConvLongpress(item.id, index)"></app-conv-row>
-					<view v-if="defaultConversations.length > COLLAPSE_COUNT" class="app-drawer__more"
-						@click="moreExpanded = !moreExpanded">
-						<text class="app-drawer__more-text">{{ moreExpanded ? t('conv.collapse') : t('conv.expandMore') }}</text>
-						<view class="app-drawer__more-icon" :class="moreExpanded ? 'app-drawer__more-icon--up' : ''">
+
+					<!-- 任务组：标题带箭头可整组折叠（对齐 workbuddy「任务 ⌄」） -->
+					<view class="app-drawer__group" @click="onTasksToggle">
+						<text class="app-drawer__group-text">{{ t('conv.title') }}</text>
+						<view class="app-drawer__group-arrow" :class="tasksCollapsed ? 'app-drawer__group-arrow--closed' : ''">
 							<rice-icon name="arrow-down" size="12px" color="var(--color-text-tertiary)"></rice-icon>
 						</view>
 					</view>
-
-					<text class="app-drawer__group">{{ t('conv.workspace') }} ({{ otherWorkspaces.length }})</text>
-					<view v-for="(ws, wsIndex) in otherWorkspaces" :key="ws.root" class="app-drawer__ws">
-						<view class="app-drawer__ws-row" @longpress="onWsLongpress(ws.name, wsIndex)">
-							<text class="iconfont app-drawer__ws-glyph">&#xe67c;</text>
-							<text class="app-drawer__ws-name" @click="onPickWorkspace(ws.root)">{{ ws.name }}</text>
-							<view class="app-drawer__ws-icon"
-								:class="openWs === ws.root ? 'app-drawer__ws-icon--open' : ''"
-								@click="openWs = openWs === ws.root ? '' : ws.root">
-								<rice-icon name="arrow-down" size="13px" color="var(--color-text-tertiary)"></rice-icon>
-							</view>
-							<view class="app-drawer__ws-icon" @click="onNewInWorkspace(ws.root)">
-								<rice-icon name="plus" size="15px" color="var(--color-text-secondary)"></rice-icon>
+					<view v-if="!tasksCollapsed" class="app-drawer__sect" :class="tasksReady ? 'app-drawer__sect--on' : ''">
+						<app-conv-row v-for="(item, index) in visibleConversations" :key="item.id" :title="item.title"
+							:time="formatRelativeTime(item.updatedAt)" :pinned="item.pinned"
+							@open="onOpenConv(item.id)" @longpress="onConvLongpress(item.id, index)"></app-conv-row>
+						<view v-if="defaultConversations.length > COLLAPSE_COUNT" class="app-drawer__more"
+							@click="moreExpanded = !moreExpanded">
+							<text class="app-drawer__more-text">{{ moreExpanded ? t('conv.collapse') : t('conv.expandMore') }}</text>
+							<view class="app-drawer__more-icon" :class="moreExpanded ? 'app-drawer__more-icon--up' : ''">
+								<rice-icon name="arrow-down" size="12px" color="var(--color-text-tertiary)"></rice-icon>
 							</view>
 						</view>
-						<view v-if="openWs === ws.root" class="app-drawer__ws-sub">
-							<view v-for="(sub, subIndex) in conversationsOf(ws.root)" :key="sub.id"
-								class="app-drawer__sub-row" @click="onOpenConv(sub.id)"
-								@longpress="onSubLongpress(sub.id, wsIndex, subIndex)">
-								<text class="app-drawer__sub-name">{{ sub.title }}</text>
-								<text class="app-drawer__sub-time">{{ formatRelativeTime(sub.updatedAt) }}</text>
+					</view>
+
+					<!-- 空间组：列全部项目；行内箭头展开该空间的会话子列表，＋ 以该空间开新对话。
+						不再有「选中工作区」的高亮/对勾——选择入口在新对话输入区 -->
+					<view class="app-drawer__group" @click="onSpacesToggle">
+						<text class="app-drawer__group-text">{{ t('conv.workspace') }} ({{ projectWorkspaces.length }})</text>
+						<view class="app-drawer__group-arrow" :class="spacesCollapsed ? 'app-drawer__group-arrow--closed' : ''">
+							<rice-icon name="arrow-down" size="12px" color="var(--color-text-tertiary)"></rice-icon>
+						</view>
+					</view>
+					<view v-if="!spacesCollapsed" class="app-drawer__sect" :class="spacesReady ? 'app-drawer__sect--on' : ''">
+						<view v-for="(ws, wsIndex) in projectWorkspaces" :key="ws.root" class="app-drawer__ws">
+							<view class="app-drawer__ws-row" @click="toggleWs(ws.root)"
+								@longpress="onWsLongpress(ws.name, wsIndex)">
+								<text class="iconfont app-drawer__ws-glyph">&#xe67c;</text>
+								<text class="app-drawer__ws-name">{{ ws.name }}</text>
+								<view class="app-drawer__ws-icon"
+									:class="openWs === ws.root ? 'app-drawer__ws-icon--open' : ''">
+									<rice-icon name="arrow-down" size="13px" color="var(--color-text-tertiary)"></rice-icon>
+								</view>
+								<view class="app-drawer__ws-icon" @click.stop="onNewInWorkspace(ws.root)">
+									<rice-icon name="plus" size="15px" color="var(--color-text-secondary)"></rice-icon>
+								</view>
 							</view>
-							<text v-if="conversationsOf(ws.root).length === 0" class="app-drawer__sub-empty">{{ t('conv.empty') }}</text>
+							<view v-if="openWs === ws.root" class="app-drawer__ws-sub"
+								:class="subReady ? 'app-drawer__ws-sub--on' : ''">
+								<view v-for="(sub, subIndex) in conversationsOf(ws.root)" :key="sub.id"
+									class="app-drawer__sub-row" @click="onOpenConv(sub.id)"
+									@longpress="onSubLongpress(sub.id, wsIndex, subIndex)">
+									<text class="app-drawer__sub-name">{{ sub.title }}</text>
+									<text class="app-drawer__sub-time">{{ formatRelativeTime(sub.updatedAt) }}</text>
+								</view>
+								<text v-if="conversationsOf(ws.root).length === 0" class="app-drawer__sub-empty">{{ t('conv.empty') }}</text>
+							</view>
 						</view>
 					</view>
 				</view>
@@ -106,7 +127,7 @@
 </template>
 
 <script setup lang="ts">
-	import { computed, ref } from 'vue'
+	import { computed, onUnmounted, ref } from 'vue'
 	import type { ComputedRef, Ref } from 'vue'
 	import { i18n } from '@/locale/i18n.ts'
 	import { useTheme } from '@/hooks/useTheme'
@@ -139,14 +160,15 @@
 	// sun 走 rice-icon；暗黑 / 跟随系统在其内置字体里缺字，走全局 iconfont 码点
 	const THEME_OPTIONS: ThemeOption[] = [
 		{ value: 'light', label: 'theme.light', icon: 'sun', glyph: null },
-		{ value: 'dark', label: 'theme.dark', icon: null, glyph: '\ue6e1' },
-		{ value: 'auto', label: 'theme.auto', icon: null, glyph: '\ue7a0' }
+		{ value: 'dark', label: 'theme.dark', icon: null, glyph: '' },
+		{ value: 'auto', label: 'theme.auto', icon: null, glyph: '' }
 	]
 
 	const emit = defineEmits<{
 		(e: 'close'): void
 		(e: 'open-conv', id: string): void
 		(e: 'new-chat'): void
+		(e: 'new-in-ws', root: string): void
 	}>()
 
 	// 宽屏双栏下侧栏常驻，关闭按钮无意义，由页面传 hide-close 隐藏
@@ -161,7 +183,7 @@
 	// rice-action-sheet 外壳：宽屏限宽居中 + 矮视口限高
 	const sheetStyle: ComputedRef<UTSJSONObject> = sheetShellStyle
 	const env = useRunEnv()
-	const { device, deviceOnline, workspace } = env
+	const { device, deviceOnline } = env
 	const { name, points, avatar } = useUser()
 	const {
 		conversations, defaultConversations, conversationsOf,
@@ -187,9 +209,109 @@
 	/** 待重命名的目标；ws 时 id 存工作区名 */
 	const renameTarget: Ref<{ kind: MenuKind; id: string } | null> = ref<{ kind: MenuKind; id: string } | null>(null)
 
-	// 项目工作区动态清单（sessions projectRoot 去重）；当前工作区不重复展示
-	const otherWorkspaces: ComputedRef<WorkspaceOption[]> = computed<WorkspaceOption[]>((): WorkspaceOption[] => {
-		return spaces.projects.value.filter((item: WorkspaceOption): boolean => item.root !== spaces.current.value)
+	/* ---- 展开动画：v-if 挂载后下一拍翻 ready 类，opacity+translateY 过渡；
+	        收起直接卸载（抽屉场景收起动画可省，避免高度动画在 UCSS 的兼容坑） ---- */
+	const tasksCollapsed: Ref<boolean> = ref<boolean>(false)
+	const spacesCollapsed: Ref<boolean> = ref<boolean>(false)
+	const tasksReady: Ref<boolean> = ref<boolean>(true)
+	const spacesReady: Ref<boolean> = ref<boolean>(true)
+	// 初始 true：不变式「无挂载子列表时恒 true」，首次展开由 armSub 翻 false 播入场动画
+	const subReady: Ref<boolean> = ref<boolean>(true)
+	// 三个入场动画各配独立 timer：共享单 timer 时快速交叉展开会清掉前一个回调，
+	// 被清的 flag 永停 false → 整段 opacity:0 隐身（不只是没动画）
+	let tasksTimer: number = -1
+	let spacesTimer: number = -1
+	let subTimer: number = -1
+
+	function armTasks(): void {
+		tasksReady.value = false
+		if (tasksTimer !== -1) clearTimeout(tasksTimer)
+		tasksTimer = setTimeout((): void => {
+			tasksTimer = -1
+			tasksReady.value = true
+		}, 30)
+	}
+
+	function armSpaces(): void {
+		spacesReady.value = false
+		if (spacesTimer !== -1) clearTimeout(spacesTimer)
+		spacesTimer = setTimeout((): void => {
+			spacesTimer = -1
+			spacesReady.value = true
+		}, 30)
+	}
+
+	function armSub(): void {
+		subReady.value = false
+		if (subTimer !== -1) clearTimeout(subTimer)
+		subTimer = setTimeout((): void => {
+			subTimer = -1
+			subReady.value = true
+		}, 30)
+	}
+
+	// 分组重新展开时播一次入场动画
+	function onTasksToggle(): void {
+		tasksCollapsed.value = !tasksCollapsed.value
+		if (!tasksCollapsed.value) armTasks()
+	}
+
+	function onSpacesToggle(): void {
+		spacesCollapsed.value = !spacesCollapsed.value
+		if (!spacesCollapsed.value) armSpaces()
+	}
+
+	function toggleWs(root: string): void {
+		if (openWs.value === root) {
+			openWs.value = ''
+			// 收起即撤销在途入场 timer 并复位标志：不变式「无挂载子列表时 subReady 恒 true」。
+			// 否则极快点按（展开→收起→再展开）时旧 timer 与新 armSub 的 false 交错，
+			// 新挂载的子列表可能停在 opacity:0 永久隐身
+			if (subTimer !== -1) {
+				clearTimeout(subTimer)
+				subTimer = -1
+			}
+			subReady.value = true
+			return
+		}
+		openWs.value = root
+		armSub()
+	}
+
+	/** 返回键拦截：抽屉内嵌弹层（重命名 > 长按菜单 > 设备 > 外观）先消化，
+		宿主 onBackPress 经 ref 调用；返回 true 表示已消费，抽屉不收起 */
+	function handleBack(): boolean {
+		if (renameVisible.value) {
+			renameVisible.value = false
+			return true
+		}
+		if (menuVisible.value) {
+			menuVisible.value = false
+			return true
+		}
+		if (deviceSheetVisible.value) {
+			deviceSheetVisible.value = false
+			return true
+		}
+		if (themeSheetVisible.value) {
+			themeSheetVisible.value = false
+			return true
+		}
+		return false
+	}
+
+	defineExpose({ handleBack })
+
+	onUnmounted((): void => {
+		if (tasksTimer !== -1) clearTimeout(tasksTimer)
+		if (spacesTimer !== -1) clearTimeout(spacesTimer)
+		if (subTimer !== -1) clearTimeout(subTimer)
+	})
+
+	// 项目工作区清单（/web/chat/projects 权威 + sessions projectRoot 兜底）：
+	// 必须包含全部项目——抽屉只浏览不选择，过滤任何一行都会把任务藏了
+	const projectWorkspaces: ComputedRef<WorkspaceOption[]> = computed<WorkspaceOption[]>((): WorkspaceOption[] => {
+		return spaces.projects.value
 	})
 	/** 未登录/无设备/加载失败的引导文案；正常时为空串 */
 	const remoteHint: ComputedRef<string> = computed<string>((): string => {
@@ -248,17 +370,10 @@
 		emit('open-conv', id)
 	}
 
-	function onPickWorkspace(root: string): void {
-		env.setWorkspace(root)
-		uni.showToast({ title: t('home.workspace.switched', { name: workspace.value }), icon: 'none' })
-	}
-
-	/** 工作区 ＋：先把当前工作区切过去，随后同「新建会话」回到初始输入态，
+	/** 工作区＋：新对话默认挂到该空间，由首页复位输入态并设置工作空间，
 		发送时才在该工作区建会话（不预建，避免留下空会话） */
 	function onNewInWorkspace(root: string): void {
-		env.setWorkspace(root)
-		uni.showToast({ title: t('home.workspace.switched', { name: workspace.value }), icon: 'none' })
-		emit('new-chat')
+		emit('new-in-ws', root)
 	}
 
 	function onSelectDevice(name: string, online: boolean): void {
@@ -343,7 +458,7 @@
 </script>
 
 <style lang="scss">
-	// 面板宿主：由首页 swiper-item 提供尺寸，顶部状态栏留白由页面根节点统一处理
+	// 面板宿主：浮层抽屉/常驻侧栏由宿主提供尺寸，顶部状态栏留白由宿主统一处理
 	.app-conv-drawer {
 		flex: 1;
 		flex-direction: column;
@@ -422,12 +537,44 @@
 			padding: 0 18px;
 		}
 
+		// 分组标题行：文字 + 箭头，整行可点折叠（对齐 workbuddy）
 		&__group {
-			height: 30px;
-			line-height: 30px;
-			font-size: 13.5px;
+			flex-direction: row;
+			align-items: center;
+			height: 34px;
+		}
+
+		&__group-text {
+			font-size: 13px;
 			font-weight: 700;
 			color: var(--color-text-tertiary);
+		}
+
+		&__group-arrow {
+			margin-left: 5px;
+			transition-property: transform;
+			transition-duration: 200ms;
+			transition-timing-function: ease;
+
+			// 收起态箭头旋转 -90°（指向右），展开态向下
+			&--closed {
+				transform: rotate(-90deg);
+			}
+		}
+
+		// 分组内容入场动画：挂载后翻 --on，淡入 + 轻微上移
+		&__sect {
+			flex-direction: column;
+			opacity: 0;
+			transform: translateY(-6px);
+			transition-property: opacity, transform;
+			transition-duration: 200ms;
+			transition-timing-function: ease;
+
+			&--on {
+				opacity: 1;
+				transform: translateY(0);
+			}
 		}
 
 		&__more {
@@ -443,12 +590,20 @@
 
 		&__more-icon {
 			margin-left: 4px;
+			transition-property: transform;
+			transition-duration: 200ms;
+			transition-timing-function: ease;
+
+			&--up {
+				transform: rotate(180deg);
+			}
 		}
 
 		&__ws {
 			flex-direction: column;
 		}
 
+		// 工作区行：整行点击=展开/收起子列表（不再是选择器）
 		&__ws-row {
 			flex-direction: row;
 			align-items: center;
@@ -465,7 +620,7 @@
 		&__ws-name {
 			flex: 1;
 			min-width: 0;
-			font-size: 15.5px;
+			font-size: 15px;
 			font-weight: 600;
 			color: var(--color-text);
 			overflow: hidden;
@@ -480,12 +635,30 @@
 			align-items: center;
 			justify-content: center;
 			border-radius: 9px;
+			transition-property: transform;
+			transition-duration: 200ms;
+			transition-timing-function: ease;
+
+			// 展开态箭头旋转 180°（向上），收起向下
+			&--open {
+				transform: rotate(180deg);
+			}
 		}
 
 		&__ws-sub {
 			flex-direction: column;
 			margin-bottom: 4px;
 			padding-left: 25px;
+			opacity: 0;
+			transform: translateY(-6px);
+			transition-property: opacity, transform;
+			transition-duration: 200ms;
+			transition-timing-function: ease;
+
+			&--on {
+				opacity: 1;
+				transform: translateY(0);
+			}
 		}
 
 		&__sub-row {
@@ -497,7 +670,7 @@
 		&__sub-name {
 			flex: 1;
 			min-width: 0;
-			font-size: 14.5px;
+			font-size: 14px;
 			color: var(--color-text-secondary);
 			overflow: hidden;
 			text-overflow: ellipsis;
@@ -506,13 +679,13 @@
 
 		&__sub-time {
 			margin-left: 10px;
-			font-size: 12.5px;
+			font-size: 12px;
 			color: var(--color-text-tertiary);
 		}
 
 		&__sub-empty {
 			height: 30px;
-			font-size: 13.5px;
+			font-size: 13px;
 			color: var(--color-text-tertiary);
 		}
 

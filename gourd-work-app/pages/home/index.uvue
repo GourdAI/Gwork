@@ -1,86 +1,98 @@
 <template>
 	<view class="home" :class="themeClass">
-		<!-- 宽屏（平板/横屏）：会话抽屉常驻侧栏 + 主区双栏，无横滑分页；
+		<!-- 宽屏（平板/横屏）：会话抽屉常驻侧栏 + 主区双栏，无浮层抽屉；
 			侧栏常驻时 close 事件不再驱动布局（抽屉组件的关闭按钮由 hide-close 隐藏） -->
 		<view v-if="isWide" class="home__split">
 			<view class="home__side" :style="sideStyle">
-				<app-conv-drawer :hide-close="true" @open-conv="onOpenConv" @new-chat="onNewChat"></app-conv-drawer>
+				<app-conv-drawer :hide-close="true" @open-conv="onOpenConv" @new-chat="onNewChat"
+					@new-in-ws="onNewInWorkspace"></app-conv-drawer>
 			</view>
 			<view class="home__side-sep"></view>
 			<view class="home__pane">
 				<view v-if="!inChat" class="home__main">
 					<home-header :device="device" :device-online="deviceOnline" :workspace="workspace"
-						:permission="permission" :hide-menu="true" @open-run="openSheet('run')"></home-header>
+						:hide-menu="true" @open-run="openSheet('run')"></home-header>
 
 					<home-hero></home-hero>
 
 					<view v-if="expanded" class="home__catcher" @click="onCollapse"></view>
 
 					<app-composer v-model="draft" :expanded="expanded" :model="model" :tag="attachTag"
-						:column-style="chatColumnStyle" input-id="home-composer-input" @expand="onExpand"
-						@collapse="onCollapse" @send="onSend" @open-model="openSheet('model')"
-						@open-plus="openSheet('plus')"></app-composer>
+						:column-style="chatColumnStyle" :show-ws="true" :ws-label="workspace" :attachments="pendingAttachments"
+						input-id="home-composer-input" @expand="onExpand" @collapse="onCollapse" @send="onSend"
+						@open-model="openSheet('model')" @open-plus="openSheet('plus')"
+						@open-ws="openSheet('ws')" @remove-attach="onRemoveAttach"></app-composer>
 				</view>
 
 				<view v-else class="home__chat">
-					<app-chat :hide-menu="true" @new-chat="onNewChat"></app-chat>
+					<app-chat ref="chatRef" :hide-menu="true" @new-chat="onNewChat"></app-chat>
 				</view>
 			</view>
 		</view>
 
-		<!-- 窄屏（手机竖屏）：会话抽屉改为 swiper 原生分页：0=抽屉 1=首页内容。
-			横向手势与纵向滚动由原生层仲裁，页面不再自行判定侧滑 -->
-		<swiper v-else class="home__pager" :current="current" :duration="300" @change="onSwiperChange">
-			<swiper-item class="home__page">
-				<app-conv-drawer @close="closeDrawer" @open-conv="onOpenConv" @new-chat="onNewChat"></app-conv-drawer>
-			</swiper-item>
+		<!-- 窄屏（手机竖屏）：主区整屏 + 浮层抽屉（不再整屏分页）。
+			全屏任意位置右滑拉出抽屉（对齐 workbuddy），纵向滚动不受影响：
+			手势层只记录不拦截，横向位移占优且超阈值才开抽屉 -->
+		<view v-else class="home__narrow" @touchstart="onTouchStart" @touchmove="onTouchMove"
+			@touchend="onTouchEnd" @touchcancel="onTouchCancel">
+			<view v-if="!inChat" class="home__main">
+				<home-header :device="device" :device-online="deviceOnline" :workspace="workspace"
+					@menu="openDrawer" @open-run="openSheet('run')"></home-header>
 
-			<swiper-item class="home__page">
-				<!-- 两种形态各自收进单一容器做 v-if/v-else：
-					不能用 template 片段（子节点数随 expanded 变化）与组件混排后紧跟常驻弹层，
-					否则往返切换后弹层视图的插入锚点与层级不可靠，表现为弹框按钮全部失效 -->
-				<view v-if="!inChat" class="home__main">
-					<home-header :device="device" :device-online="deviceOnline" :workspace="workspace"
-						:permission="permission" @menu="onMenu" @open-run="openSheet('run')"></home-header>
+				<home-hero></home-hero>
 
-					<home-hero></home-hero>
+				<!-- 展开态点空白处收起；放在输入区之前，输入区靠渲染顺序盖在它上面 -->
+				<view v-if="expanded" class="home__catcher" @click="onCollapse"></view>
 
-					<!-- 展开态点空白处收起；放在输入区之前，输入区靠渲染顺序盖在它上面 -->
-					<view v-if="expanded" class="home__catcher" @click="onCollapse"></view>
+				<app-composer v-model="draft" :expanded="expanded" :model="model" :tag="attachTag"
+					:column-style="chatColumnStyle" :show-ws="true" :ws-label="workspace" :attachments="pendingAttachments"
+					input-id="home-composer-input" @expand="onExpand" @collapse="onCollapse" @send="onSend"
+					@open-model="openSheet('model')" @open-plus="openSheet('plus')"
+					@open-ws="openSheet('ws')" @remove-attach="onRemoveAttach"></app-composer>
+			</view>
 
-					<app-composer v-model="draft" :expanded="expanded" :model="model" :tag="attachTag"
-						:column-style="chatColumnStyle" input-id="home-composer-input" @expand="onExpand"
-						@collapse="onCollapse" @send="onSend" @open-model="openSheet('model')"
-						@open-plus="openSheet('plus')"></app-composer>
-				</view>
+			<view v-else class="home__chat">
+				<app-chat ref="chatRef" @new-chat="onNewChat" @back="onChatBack"></app-chat>
+			</view>
+		</view>
 
-				<view v-else class="home__chat">
-					<app-chat @new-chat="onNewChat" @back="onChatBack"></app-chat>
-				</view>
-			</swiper-item>
-		</swiper>
+		<!-- 浮层抽屉：遮罩淡入 + 面板左滑入，右侧留缝露出主页面；点遮罩/左滑/返回键关闭。
+			双态渲染由本页驱动：drawerMounted 管 v-show 挂载，drawerAnimOn 驱动过渡类；
+			关闭动画期（drawerClosing）遮罩尺寸归零不再拦截点击，主页面第一下就能点中 -->
+		<view v-if="!isWide" v-show="drawerMounted" class="home__drawer-mask"
+			:class="drawerMaskClass" @click="closeDrawer"></view>
+		<view v-if="!isWide" v-show="drawerMounted" class="home__drawer" :class="drawerAnimOn ? 'home__drawer--on' : ''"
+			:style="drawerStyle" @touchstart="onDrawerTouchStart" @touchmove="onDrawerTouchMove"
+			@touchend="onDrawerTouchEnd" @touchcancel="onDrawerTouchEnd">
+			<app-conv-drawer ref="drawerRef" @close="closeDrawer" @open-conv="onOpenConv" @new-chat="onNewChat"
+				@new-in-ws="onNewInWorkspace"></app-conv-drawer>
+		</view>
 
 		<app-run-sheet :visible="activeSheet === 'run'" :device="device" :workspace="workspace"
 			:permission="permission" @close="closeSheets" @update-device="onUpdateDevice"
 			@update-workspace="onUpdateWorkspace" @update-permission="onUpdatePermission"></app-run-sheet>
 
 		<app-model-sheet :visible="activeSheet === 'model'" :model="model" :think="think" :context="context"
-			@close="closeSheets" @confirm="onConfirmModel"></app-model-sheet>
+			@close="closeSheets" @change="onChangeModel"></app-model-sheet>
 
 		<app-plus-sheet :visible="activeSheet === 'plus'" :selected-skill="selectedSkill"
-			:connector-states="connectorStates" @close="closeSheets" @attach="onAttach"
-			@select-skill="onSelectSkill" @toggle-connector="onToggleConnector"></app-plus-sheet>
+			:connector-states="connectorStates" @close="closeSheets"
+			@select-skill="onSelectSkill" @toggle-connector="onToggleConnector" @attach="onAttach"></app-plus-sheet>
+
+		<!-- 新对话的工作空间选择：未选择=对话，选中后本次新对话挂到对应空间 -->
+		<app-ws-sheet :visible="activeSheet === 'ws'" @close="closeSheets"
+			@select="onPickWorkspace"></app-ws-sheet>
 	</view>
 </template>
 
 <script setup lang="ts">
-	import { computed, ref } from 'vue'
+	import { computed, onUnmounted, ref } from 'vue'
 	import type { ComputedRef, Ref } from 'vue'
 	import { i18n } from '@/locale/i18n.ts'
 	import { useTheme } from '@/hooks/useTheme'
 	import { useViewport, chatColumnStyle } from '@/hooks/useViewport'
-	import { useRunEnv } from '@/hooks/useRunEnv'
-	import { useConversations } from '@/hooks/useConversations'
+	import { useRunEnv, permissionLabel } from '@/hooks/useRunEnv'
+	import { useConversations, inputWithinBudget } from '@/hooks/useConversations'
 	import { useWorkspaces } from '@/hooks/useWorkspaces'
 	import { useDevices } from '@/hooks/useDevices'
 	import { gworkSignedIn } from '@/utils/gwork-auth.ts'
@@ -92,13 +104,16 @@
 	import AppRunSheet from '@/components/app-run-sheet/app-run-sheet.uvue'
 	import AppModelSheet from '@/components/app-model-sheet/app-model-sheet.uvue'
 	import AppPlusSheet from '@/components/app-plus-sheet/app-plus-sheet.uvue'
+	import AppWsSheet from '@/components/app-ws-sheet/app-ws-sheet.uvue'
 	import AppChat from '@/components/app-chat/app-chat.uvue'
 	import AppConvDrawer from '@/components/app-conv-drawer/app-conv-drawer.uvue'
+	import { pickCamera, pickAlbum, pickFile, mergeAttachments } from '@/utils/attach-picker'
+	import type { ConnectorOption, PendingAttachment, SkillOption } from '@/data/app-data'
 
-	type HomeSheetName = '' | 'run' | 'model' | 'plus'
+	type HomeSheetName = '' | 'run' | 'model' | 'plus' | 'ws'
 
 	const { themeClass } = useTheme()
-	const { isWide, sidebarWidth, safeLeft } = useViewport()
+	const { isWide, sidebarWidth, safeLeft, drawerWidth } = useViewport()
 	const env = useRunEnv()
 
 	// 侧栏宽度行内注入；横屏刘海在左侧时让出安全区（页面级 env() 只处理了底部）
@@ -114,10 +129,152 @@
 
 	const expanded: Ref<boolean> = ref<boolean>(false)
 	const draft: Ref<string> = ref<string>('')
+	/** 待发送附件（v1.1 内联 base64）：欢迎态与聊天态各自持有，随下条消息发出后清空 */
+	const pendingAttachments: Ref<PendingAttachment[]> = ref<PendingAttachment[]>([])
 	const activeSheet: Ref<HomeSheetName> = ref<HomeSheetName>('')
-	// 0=会话抽屉 1=首页内容；初始落在首页
-	const current: Ref<number> = ref<number>(1)
 	const inChat: Ref<boolean> = ref<boolean>(false)
+
+	/* ---- 浮层抽屉：双态渲染（mounted 管 v-show，animOn 驱动过渡），
+	        与 app-popup 同一套电平对齐纪律：关闭动画期内重开不丢状态 ---- */
+	const drawerMounted: Ref<boolean> = ref<boolean>(false)
+	const drawerAnimOn: Ref<boolean> = ref<boolean>(false)
+	let drawerOpenTimer: number = -1
+	let drawerCloseTimer: number = -1
+	const DRAWER_DURATION = 280
+
+	const drawerStyle: ComputedRef<string> = computed<string>((): string => {
+		return 'width:' + drawerWidth.value.toString() + 'px;'
+	})
+
+	// 遮罩类：animOn 淡入；closing 期尺寸归零（透明化动画照走，但不再拦截主页面点击）
+	const drawerMaskClass: ComputedRef<string> = computed<string>((): string => {
+		let cls: string = drawerAnimOn.value ? 'home__drawer-mask--on' : ''
+		if (drawerClosing.value) {
+			cls = cls.length > 0 ? cls + ' home__drawer-mask--off' : 'home__drawer-mask--off'
+		}
+		return cls
+	})
+
+	function openDrawer(): void {
+		if (drawerCloseTimer !== -1) {
+			clearTimeout(drawerCloseTimer)
+			drawerCloseTimer = -1
+		}
+		if (drawerMounted.value) {
+			drawerClosing.value = false
+			drawerAnimOn.value = true
+			return
+		}
+		drawerClosing.value = false
+		drawerMounted.value = true
+		drawerOpenTimer = setTimeout((): void => {
+			drawerOpenTimer = -1
+			drawerAnimOn.value = true
+		}, 30)
+	}
+
+	// 关闭动画期标记：面板滑出的 280ms 里遮罩若继续拦截点击，会吞掉用户
+	// 关抽屉后立刻点主页面的第一下（命中透明化中的遮罩而非主页面按钮）。
+	// UCSS 无 pointer-events，关闭即把遮罩 width/height 归零（保留节点走完淡出），
+	// 面板本体滑出屏外不挡主区，无需处理
+	const drawerClosing: Ref<boolean> = ref<boolean>(false)
+
+	function closeDrawer(): void {
+		if (drawerOpenTimer !== -1) {
+			clearTimeout(drawerOpenTimer)
+			drawerOpenTimer = -1
+		}
+		drawerAnimOn.value = false
+		if (!drawerMounted.value) return
+		drawerClosing.value = true
+		if (drawerCloseTimer !== -1) clearTimeout(drawerCloseTimer)
+		drawerCloseTimer = setTimeout((): void => {
+			drawerCloseTimer = -1
+			drawerMounted.value = false
+			drawerClosing.value = false
+		}, DRAWER_DURATION + 80)
+	}
+
+	// 抽屉组件实例：返回键先让抽屉内嵌弹层（设备/外观/长按菜单/重命名）消化，
+	// 否则抽屉先收起会留下 z-index 更高的孤儿弹层
+	type DrawerExposed = { handleBack: () => boolean }
+	const drawerRef = ref<DrawerExposed | null>(null)
+	// 聊天组件实例：同理，聊天态内嵌弹层（模型/加号/产物/菜单/重命名/运行环境）先于抽屉消化返回键
+	type ChatExposed = { handleBack: () => boolean }
+	const chatRef = ref<ChatExposed | null>(null)
+
+	// 页面销毁（reLaunch 登出/重绑）清悬挂定时器，与 app-popup 同纪律
+	onUnmounted((): void => {
+		if (drawerOpenTimer !== -1) clearTimeout(drawerOpenTimer)
+		if (drawerCloseTimer !== -1) clearTimeout(drawerCloseTimer)
+	})
+
+	/* ---- 全屏右滑开抽屉：只记录坐标不拦截事件，纵向滚动/点击零影响；
+	        横向位移占优（dx > |dy| * 1.2）且超阈值才触发，一次手势只开一次 ---- */
+	const SWIPE_OPEN_DX = 60
+	const SWIPE_CLOSE_DX = 60
+	let gestureX: number = 0
+	let gestureY: number = 0
+	let gestureActive: boolean = false
+	let gestureFired: boolean = false
+
+	function onTouchStart(e: TouchEvent): void {
+		// 关闭动画期不接手势：mounted 仍 true 直到动画收尾，避免半开的抽屉被右滑重开
+		// （按钮路径 openDrawer 仍支持动画期无损重开，手势路径保守忽略）
+		if (drawerMounted.value || e.touches.length !== 1) return
+		gestureX = e.touches[0].clientX
+		gestureY = e.touches[0].clientY
+		gestureActive = true
+		gestureFired = false
+	}
+
+	function onTouchMove(e: TouchEvent): void {
+		if (!gestureActive || gestureFired || e.touches.length === 0) return
+		const dx: number = e.touches[0].clientX - gestureX
+		const dy: number = e.touches[0].clientY - gestureY
+		if (dx > SWIPE_OPEN_DX && dx > Math.abs(dy) * 1.2) {
+			gestureFired = true
+			openDrawer()
+		}
+	}
+
+	function onTouchEnd(_e: TouchEvent): void {
+		gestureActive = false
+	}
+
+	function onTouchCancel(): void {
+		gestureActive = false
+	}
+
+	/* ---- 抽屉左滑关闭：面板上横向左移占优且超阈值即收 ---- */
+	let drawerGestureX: number = 0
+	let drawerGestureY: number = 0
+	let drawerGestureActive: boolean = false
+
+	function onDrawerTouchStart(e: TouchEvent): void {
+		// 关闭动画期不再响应面板手势，避免重复 closeDrawer 延后卸载计时
+		if (!drawerAnimOn.value || e.touches.length !== 1) return
+		drawerGestureX = e.touches[0].clientX
+		drawerGestureY = e.touches[0].clientY
+		drawerGestureActive = true
+	}
+
+	function onDrawerTouchMove(e: TouchEvent): void {
+		if (!drawerGestureActive || e.touches.length === 0) return
+		const dx: number = e.touches[0].clientX - drawerGestureX
+		const dy: number = e.touches[0].clientY - drawerGestureY
+		if (dx < -SWIPE_CLOSE_DX && -dx > Math.abs(dy) * 1.2) {
+			drawerGestureActive = false
+			// 同手势抑制重开：左滑关闭后手指继续右移会越开抽屉阈值，
+			// 不标记 fired 的话一次「左滑再右滑」会把抽屉重新拉开
+			gestureFired = true
+			closeDrawer()
+		}
+	}
+
+	function onDrawerTouchEnd(_e: TouchEvent): void {
+		drawerGestureActive = false
+	}
 
 	// APP 端旋转/分屏只有页面级 onResize（无全局 uni.onWindowResize）；onShow 兜底后台期间的旋转
 	onResize((_e: OnResizeOptions): void => {
@@ -127,19 +284,26 @@
 		refreshViewport()
 	})
 
-	// 系统返回手势/返回键：聊天态先转出会话抽屉（宽屏侧栏常驻，无需转出）；抽屉或弹层开着时先收起，二次返回才离开页面
+	// 系统返回手势/返回键：抽屉内嵌弹层 > 抽屉 > 页面弹层 > 聊天内嵌弹层 > 聊天态转出抽屉。
+	// 聊天弹层这一环不能少：否则返回键把抽屉盖上来，z-index 更高的聊天弹层成孤儿浮在抽屉上
 	onBackPress((): boolean => {
-		if (inChat.value && !isWide.value) {
-			exitChatToDrawer()
+		if (drawerMounted.value && !isWide.value) {
+			const inst = drawerRef.value
+			if (inst != null && inst.handleBack()) return true
+			closeDrawer()
 			return true
 		}
 		if (activeSheet.value !== '') {
 			closeSheets()
 			return true
 		}
-		if (current.value === 0) {
-			closeDrawer()
-			return true
+		if (inChat.value) {
+			const chat = chatRef.value
+			if (chat != null && chat.handleBack()) return true
+			if (!isWide.value) {
+				exitChatToDrawer()
+				return true
+			}
 		}
 		return false
 	})
@@ -158,21 +322,9 @@
 		activeSheet.value = ''
 	}
 
-	function onMenu(): void {
-		current.value = 0
-	}
-
-	function onSwiperChange(e: SwiperChangeEvent): void {
-		current.value = e.detail.current
-	}
-
-	function closeDrawer(): void {
-		current.value = 1
-	}
-
 	/** 转出会话抽屉供切换会话：保持聊天态，抽屉关闭后仍回到当前会话（详情页点新建对话才退出聊天态） */
 	function exitChatToDrawer(): void {
-		current.value = 0
+		openDrawer()
 	}
 
 	// 详情返回不退出聊天，转出会话抽屉供切换会话
@@ -182,24 +334,39 @@
 
 	/** 从抽屉进入聊天：首页形态整块让位，展开态一并复位 */
 	function enterChat(): void {
-		current.value = 1
+		closeDrawer()
 		expanded.value = false
 		inChat.value = true
 	}
 
 	function onOpenConv(id: string): void {
+		setActive(id)
 		enterChat()
 	}
 
-	/** 新建会话（抽屉大按钮、工作区 ＋、详情页新建共用）：会话不预建、输入态复位，
-		回到与冷启动一致的首页形态，发送时才真正建会话（见 onSend） */
+	/** 新建会话（抽屉大按钮、详情页新建共用）：会话不预建、输入态复位，
+		工作空间复位回「对话」（未选择就是对话），发送时才真正建会话（见 onSend） */
 	function onNewChat(): void {
-		current.value = 1
+		closeDrawer()
 		inChat.value = false
 		draft.value = ''
 		expanded.value = false
+		// 新对话不带上一轮的待发送附件（欢迎态与聊天态各自持有，这里清欢迎态这份）
+		pendingAttachments.value = []
+		env.beginNewSession(true)
 	}
 
+	/** 侧栏工作区＋：新对话默认挂到该工作空间（beginNewSession 复位后再覆盖） */
+	function onNewInWorkspace(root: string): void {
+		onNewChat()
+		env.setWorkspace(root)
+	}
+
+	/** 新对话输入区选工作空间：只影响本次新对话，发送时按当前选择建会话 */
+	function onPickWorkspace(root: string): void {
+		env.setWorkspace(root)
+		closeSheets()
+	}
 
 	function onExpand(): void {
 		expanded.value = true
@@ -211,7 +378,7 @@
 
 	function onSend(text: string): void {
 		const content: string = text.trim()
-		if (content.length === 0) {
+		if (content.length === 0 && pendingAttachments.value.length === 0) {
 			uni.showToast({ title: t('home.emptySend'), icon: 'none' })
 			return
 		}
@@ -229,34 +396,85 @@
 			uni.showToast({ title: t('chat.deviceOffline'), icon: 'none' })
 			return
 		}
+		const atts: PendingAttachment[] = pendingAttachments.value
+		// 信封体积预检在清空草稿/附件之前：超限时用户输入必须原样保留
+		if (!inputWithinBudget(content, atts)) return
 		draft.value = ''
-		attachTag.value = ''
 		expanded.value = false
-		// createConversation 返回本地 id（work-8hex，契约允许自带），sendMessage 内部走异步中转
-		const convId: string = createConversation(useWorkspaces().current.value, content)
-		sendMessage(convId, content)
+		pendingAttachments.value = []
+		// createConversation 返回本地 id（work-8hex，契约允许自带）+ 新会话配置继承 Promise；
+		// sendMessage 等继承完成后再 input，避免思考档位 / 模型落到内核默认。
+		// 标题用用户原文（slash 前缀在 sendMessage 内注入，不进标题）。
+		const created = createConversation(useWorkspaces().current.value, content)
+		const accepted: boolean = sendMessage(created.id, content, created.ready, atts,
+			(failText: string, failAtts: PendingAttachment[]): void => {
+				// 异步失败回填：正文回草稿、附件回待发送列（按当前值重校验合并），
+				// 链路抖一下不能让用户拍的照/选的文件全白选
+				if (draft.value.length === 0) draft.value = failText
+				if (failAtts.length > 0) pendingAttachments.value = mergeAttachments(pendingAttachments.value, failAtts)
+			})
+		if (!accepted) {
+			// 数据层拦截（busy 等）：草稿与附件原样奉还
+			draft.value = content
+			pendingAttachments.value = mergeAttachments(pendingAttachments.value, atts)
+			return
+		}
 		inChat.value = true
 	}
 
-	function onAttach(name: string): void {
-		attachTag.value = name
+	function onSelectSkill(id: string): void {
+		// 再点同一技能=取消选择（桌面 chips 同口径）
+		const next: string = selectedSkill.value === id ? '' : id
+		selectedSkill.value = next
+		const found = env.skills.value.find((s: SkillOption): boolean => s.id === next)
+		attachTag.value = next.length > 0 ? t('home.skillTag', { name: found != null ? found.name : next }) : ''
 		closeSheets()
-		uni.showToast({ title: t('home.plus.attached', { name: name }), icon: 'none' })
+		if (next.length > 0) {
+			uni.showToast({ title: t('home.skills.selected', { name: found != null ? found.name : next }), icon: 'none' })
+		}
 	}
 
-	function onSelectSkill(name: string): void {
-		selectedSkill.value = name
-		attachTag.value = t('home.skillTag', { name: name })
-		closeSheets()
-		uni.showToast({ title: t('home.skills.selected', { name: name }), icon: 'none' })
-	}
-
-	function onToggleConnector(name: string): void {
-		const on: boolean = env.toggleConnector(name)
-		uni.showToast({
-			title: on ? t('home.connectors.on', { name: name }) : t('home.connectors.off', { name: name }),
-			icon: 'none'
+	function onToggleConnector(id: string): void {
+		// 成功 toast 必须由提交结果驱动（onDone 仅在内核受理成功后回调）：
+		// 旧实现先弹「已开启」再异步提交，失败时用户被告知了一个没发生的状态
+		env.toggleConnector(id, (on: boolean): void => {
+			const found = env.connectors.value.find((c: ConnectorOption): boolean => c.id === id)
+			const label: string = found != null ? found.name : id
+			uni.showToast({
+				title: on ? t('home.connectors.on', { name: label }) : t('home.connectors.off', { name: label }),
+				icon: 'none'
+			})
 		})
+	}
+
+	/** 附件三入口：拍照/相册/文件 → 压缩 → base64 入待发送列（chips 展示，随下条消息发出）。
+	 *  回填一律经 mergeAttachments 按当前值重校验（picker 互斥 + 限额兜底，防并发绕过） */
+	function onAttach(kind: string): void {
+		closeSheets()
+		const existing: PendingAttachment[] = pendingAttachments.value
+		if (kind === 'camera') {
+			pickCamera(existing).then((item: PendingAttachment | null): void => {
+				if (item != null) pendingAttachments.value = mergeAttachments(pendingAttachments.value, [item])
+			})
+			return
+		}
+		if (kind === 'album') {
+			pickAlbum(existing).then((items: PendingAttachment[]): void => {
+				if (items.length > 0) pendingAttachments.value = mergeAttachments(pendingAttachments.value, items)
+			})
+			return
+		}
+		pickFile(existing).then((items: PendingAttachment[]): void => {
+			if (items.length > 0) pendingAttachments.value = mergeAttachments(pendingAttachments.value, items)
+		})
+	}
+
+	function onRemoveAttach(index: number): void {
+		const next: PendingAttachment[] = []
+		for (let i = 0; i < pendingAttachments.value.length; i++) {
+			if (i !== index) next.push(pendingAttachments.value[i])
+		}
+		pendingAttachments.value = next
 	}
 
 	function onUpdateDevice(name: string, online: boolean): void {
@@ -270,14 +488,14 @@
 	}
 
 	function onUpdatePermission(name: string): void {
-		env.setPermission(name)
-		uni.showToast({ title: t('home.permission.switched', { name: name }), icon: 'none' })
+		// 受理才提示；失败回滚与报错在 setPermission 内完成。展示名走 i18n（name 是协议码）
+		if (!env.setPermission(name)) return
+		uni.showToast({ title: t('home.permission.switched', { name: permissionLabel(name) }), icon: 'none' })
 	}
 
-	function onConfirmModel(nextModel: string, nextThink: string, nextContext: string): void {
+	/** 选中即生效：弹层不再有「确认」，参数都是内核原始码，thinking/context 保持弹层打开可连选 */
+	function onChangeModel(nextModel: string, nextThink: string, nextContext: string): void {
 		env.setModelConfig(nextModel, nextThink, nextContext)
-		closeSheets()
-		uni.showToast({ title: t('home.model.saved'), icon: 'none' })
 	}
 </script>
 
@@ -285,18 +503,20 @@
 	.home {
 		flex: 1;
 		flex-direction: column;
+		// 【flex 收缩链必须逐级 min-height:0 · 三轮报障「键盘弹起输入盒/停止按钮被裁」】
+		// UCSS flex 子项默认 min-height:auto：内容（消息流/展开输入盒+键盘占位）比
+		// 剩余空间高时，任何一级拒绝收缩都会把底部内容顶出可视范围而不是内部滚动。
+		// 键盘把视口压矮的机型上这条链每一级都要能缩，list-view(__body/__scroll 已有
+		// min-height:0) 才能真正吃掉收缩量。
+		min-height: 0;
 		padding-top: var(--status-bar-height);
 		padding-bottom: env(safe-area-inset-bottom);
 		background-color: var(--color-bg);
 
-		&__pager,
-		&__page {
-			flex: 1;
-		}
-
 		// 宽屏双栏：侧栏 + 1px 分隔线 + 主区
 		&__split {
 			flex: 1;
+			min-height: 0;
 			flex-direction: row;
 		}
 
@@ -312,6 +532,14 @@
 		&__pane {
 			flex: 1;
 			min-width: 0;
+			min-height: 0;
+			flex-direction: column;
+		}
+
+		// 窄屏主区：整屏承载首页/聊天，右滑手势挂在这一层
+		&__narrow {
+			flex: 1;
+			min-height: 0;
 			flex-direction: column;
 		}
 
@@ -319,11 +547,13 @@
 		&__main {
 			position: relative;
 			flex: 1;
+			min-height: 0;
 			flex-direction: column;
 		}
 
 		&__chat {
 			flex: 1;
+			min-height: 0;
 			flex-direction: column;
 		}
 
@@ -333,6 +563,57 @@
 			right: 0;
 			top: 0;
 			bottom: 0;
+		}
+
+		// 浮层抽屉遮罩：淡入淡出；渲染顺序在面板之前，面板盖在其上
+		&__drawer-mask {
+			position: fixed;
+			left: 0;
+			right: 0;
+			top: 0;
+			bottom: 0;
+			z-index: 90;
+			background-color: var(--color-sheet-mask);
+			opacity: 0;
+			transition-property: opacity;
+			transition-duration: 240ms;
+			transition-timing-function: ease;
+
+			&--on {
+				opacity: 1;
+			}
+
+			// 关闭动画期：尺寸归零让点击直达主页面（UCSS 无 pointer-events）。
+			// right/bottom 定位改为定值 0，宽高 0 后不再覆盖任何区域
+			&--off {
+				width: 0;
+				height: 0;
+			}
+		}
+
+		// 浮层抽屉面板：左侧滑入，宽度行内注入（86% 视口、封顶 420）；
+		// 顶部状态栏留白与页面根节点一致，底部安全区同口径
+		&__drawer {
+			position: fixed;
+			left: 0;
+			top: 0;
+			bottom: 0;
+			z-index: 91;
+			flex-direction: column;
+			padding-top: var(--status-bar-height);
+			padding-bottom: env(safe-area-inset-bottom);
+			background-color: var(--color-bg);
+			border-top-right-radius: 22px;
+			border-bottom-right-radius: 22px;
+			overflow: hidden;
+			transform: translateX(-106%);
+			transition-property: transform;
+			transition-duration: 280ms;
+			transition-timing-function: cubic-bezier(0.2, 0.8, 0.2, 1);
+
+			&--on {
+				transform: translateX(0);
+			}
 		}
 	}
 </style>

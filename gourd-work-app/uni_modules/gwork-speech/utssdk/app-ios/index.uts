@@ -2,7 +2,8 @@
  * iOS 端入口：实时识别引擎在同目录 GworkSpeechEngine.swift（UTS 原生混编）。
  * Swift 侧负责权限双申请（识别 + 麦克风）、AVAudioEngine 采集、SFSpeechRecognizer 流式识别；
  * 本文件只做单例持有与统一接口转发。会话终态守卫在 Swift 侧（finished）。
- * 隐私描述（NSMicrophoneUsageDescription / NSSpeechRecognitionUsageDescription）在项目根 Info.plist。
+ * 隐私描述（NSMicrophoneUsageDescription / NSSpeechRecognitionUsageDescription）在同目录
+ * Info.plist——官方唯一合并路径是插件 app-ios/Info.plist（uts-for-ios §3.1），项目根不生效。
  */
 // 平台入口内直接定义类型：iOS 是 JS 引擎环境，仅放在 interface.uts 的类型不参与本平台编译
 // （Android 是 Kotlin 同语言环境可直接 import interface.uts，两端规则不同，与 uni-ai-md 同构）。
@@ -12,6 +13,9 @@ export type SpeechErrorCode = 'unsupported' | 'permission' | 'network' | 'no-mat
 export type SpeechError = {
 	code: SpeechErrorCode
 	detail: string
+	/** permission 码专用：系统不会再弹授权框，只能引导去设置（与 ../interface.uts 对齐；
+	 *  Swift 侧在 detail 里带 doNotAskAgain 标记，本层解析后派发） */
+	doNotAskAgain?: boolean
 }
 
 export type StartListeningOptions = {
@@ -35,7 +39,13 @@ export function startListening(opts: StartListeningOptions): void {
 	}, onResult = (text: string) => {
 		opts.onResult(text)
 	}, onError = (code: string, detail: string) => {
-		const err: SpeechError = { code: code as SpeechErrorCode, detail: detail }
+		// Swift 混编回调签名只有 (code, detail)：永久拒绝标记走 detail 尾缀协议，
+		// 这里解析成结构化字段，接入层不再按平台硬编码
+		const err: SpeechError = {
+			code: code as SpeechErrorCode,
+			detail: detail,
+			doNotAskAgain: code == 'permission' && detail.indexOf('doNotAskAgain') >= 0
+		}
 		opts.onError(err)
 	})
 }
@@ -46,5 +56,13 @@ export function stopListening(): void {
 
 export function cancelListening(): void {
 	engine.cancel()
+}
+
+/**
+ * 跳转本应用的系统设置页（iOS 权限拒绝一次后系统不再弹框，唯一恢复路径是设置里手动开启）。
+ * 业务层在 permission 终态时弹引导框，确认后调用。
+ */
+export function openPermissionSettings(): void {
+	engine.openSettings()
 }
 

@@ -75,6 +75,7 @@ function reconcileSessionRunning(sess, opts) {
             console.warn('[WebGate] reconcile: server idle, force finishStream for', sess.sessionId);
             sess.activeRunId = null;
             sess._pendingClientMessageId = null;
+            sess._pendingEchoIds = {};
             sess._awaitingSendAck = false;
             // 与正常 done 路径对齐：强制收尾也必须放行消息队列派发，
             // 否则早前因流式态被抑制的排队消息会永远不再触发。
@@ -363,6 +364,21 @@ function sendSteer(sess, text, imagePaths, filePaths) {
     });
 }
 
+/* 登记「已发出、尚未收到回显」的 clientMessageId（sendMessage / 队列派发 / busy 补发共用）。
+   集合逐条销账可覆盖整段在途窗口：单槽位 _pendingClientMessageId 连发两条时会被覆盖，
+   前一条的回显认不出自己 → 被当他人消息重复渲染。只保留最近 32 条，
+   避免异常路径（回显永不到达）无限增长。 */
+function registerPendingEchoId(sess, id) {
+    if (!sess || !id) return;
+    if (!sess._pendingEchoIds) sess._pendingEchoIds = {};
+    sess._pendingEchoIds[id] = true;
+    var echoKeys = Object.keys(sess._pendingEchoIds);
+    if (echoKeys.length > 32) {
+        for (var ek = 0; ek <= echoKeys.length - 32; ek++) delete sess._pendingEchoIds[echoKeys[ek]];
+    }
+}
+window.registerPendingEchoId = registerPendingEchoId;
+
 function sendMessage(forceQueue) {
     var inputEl = inChatMode ? chatInput : welcomeInput;
     var rawText = inputEl ? inputEl.value : '';
@@ -542,6 +558,10 @@ function sendMessage(forceQueue) {
     }
     appendUserMessage(sess, displayText, imageDataUrls, fileAttachments);
     sess._pendingClientMessageId = 'msg-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10);
+    registerPendingEchoId(sess, sess._pendingClientMessageId);
+    /* 无 id 帧兜底的身份依据：记下本轮乐观气泡的 wire 原文。旧 bundled UI（不带
+       clientMessageId）连新内核时，user 广播帧只能按「尾部同文」认亲（见 dispatch）。 */
+    sess._lastSentWireText = text;
     sess._requestStartSeq = sess.lastEventSeq || 0;
     sess._awaitingSendAck = true;
     sess._sendAckConfirmed = false;
@@ -940,10 +960,9 @@ function onWebChunk(sess, chunk) {
         if (nextPhase) sess.phase = nextPhase;
 
         // 相位变化后，同步刷新「已经挂在页面上」的独立等待指示器（.thinking-row）文案。
-        // 它在发送时就被创建（showThinking），文案取当时的相位（waiting），此后只有内容帧
-        // 到达时才会被 removeThinking 整个移除 —— 于是一旦本轮不产出任何内容帧（如思维链被
-        // 屏蔽的模型：思考真实发生但文本全空），它就会长期停在「等待响应」并持续累加计时。
-        // 气泡内指示器（.inline-thinking）不在此处理：它每次显示都会重新 applyPhaseLabel。
+        // 【2026-11 指示器已退役】showThinking / showInlineThinking 均为 no-op（用户拍板
+        // 「底部思考中不要再展示，页面总是一跳一跳」），新会话不再产生 thinkingEl；
+        // 本分支只剩历史残留行的文案刷新兜底，保留不删。
         if (nextPhase && sess.thinkingEl && typeof applyPhaseLabel === 'function') {
             applyPhaseLabel(sess.thinkingEl, nextPhase);
         }
@@ -1923,11 +1942,24 @@ function recoverStreamingSession(sess) {
         var ackMatched = !!sess._sendAckConfirmed;
         for (var i = 0; i < events.length; i++) {
             var recovered = events[i];
-            if (recovered && recovered.type === 'user'
-                    && recovered.clientMessageId && recovered.clientMessageId === sess._pendingClientMessageId) {
-                ackMatched = true;
-                sess._sendAckConfirmed = true;
-                sess._awaitingSendAck = false;
+            /* 本端 echo 判定与实时分支同口径：集合优先（连发/补发在途时单槽位已被
+               覆盖），单槽位兜底。命中即销账，防止同帧稍后经 live 缓冲再到时重复渲染。
+               【槽位必须一并清】旧实现只删集合不清 _pendingClientMessageId：同帧经
+               live 缓冲二次到达时集合已空、槽位仍命中，若期间新发送已覆盖槽位则判不中
+               → 双气泡。【ack 只认本轮】历史 id 命中（集合残留/补发旧 id）不得把
+               _sendAckConfirmed 置真——那会误销新一轮在途发送的 ack 等待，让下方
+               「未受理→报错/队列回滚」被短路，新消息静默丢失。 */
+            if (recovered && recovered.type === 'user' && recovered.clientMessageId
+                    && ((sess._pendingEchoIds && sess._pendingEchoIds[recovered.clientMessageId])
+                        || recovered.clientMessageId === sess._pendingClientMessageId)) {
+                var isCurrentSend = recovered.clientMessageId === sess._pendingClientMessageId;
+                if (sess._pendingEchoIds) delete sess._pendingEchoIds[recovered.clientMessageId];
+                if (isCurrentSend) {
+                    sess._pendingClientMessageId = null;
+                    sess._sendAckConfirmed = true;
+                    sess._awaitingSendAck = false;
+                    ackMatched = true;
+                }
                 var userSeq = Number(recovered.eventSeq || 0);
                 if (userSeq) sess.lastEventSeq = Math.max(sess.lastEventSeq || 0, userSeq);
                 continue;
@@ -2354,6 +2386,16 @@ function dispatchGateChunk(chunk) {
             setTimeout(function() { reconcileSessionRunning(sess, { force: true }); }, 0);
             return;
         }
+        /* 【不能无条件清空待回显集合】done 收口后 300ms 内就会发起 busy 补发
+           （retryPendingSend 复用 pending.clientMessageId，且旧实现从不把它重新登记
+           进集合），队列派发也会立即登记新 id。无条件清空 + 单槽位兜底都覆盖不了
+           「补发已发出、回显尚未到达，期间又开了一轮并收到它的 done」的窗口：
+           补发回显认不出自己 → 重复渲染一条用户气泡。集合条目逐条销账 + 上限 32 条
+           淘汰，id 含时间戳与随机段不会跨轮巧合，保留未销账条目是安全的。
+           这里只销掉本轮收口的 id（须在置空槽位之前取）。 */
+        if (sess._pendingEchoIds && sess._pendingClientMessageId) {
+            delete sess._pendingEchoIds[sess._pendingClientMessageId];
+        }
         sess._pendingClientMessageId = null;
         sess._awaitingSendAck = false;
         sess._sendAckConfirmed = false;
@@ -2389,6 +2431,10 @@ function dispatchGateChunk(chunk) {
                     return;
                 }
                 s2._pendingClientMessageId = pending.clientMessageId || s2._pendingClientMessageId;
+                /* 补发复用原 id，必须重新登记进待回显集合：原条目可能已被 32 条上限
+                   淘汰或会话 LRU 重建抹掉，只靠单槽位兜底会在「补发在途期间又开新轮」
+                   时被覆盖 → 补发回显被当他端消息重复渲染。 */
+                registerPendingEchoId(s2, s2._pendingClientMessageId);
                 s2.projectRoot = pending.projectRoot || s2.projectRoot || '';
                 s2._requestStartSeq = s2.lastEventSeq || 0;
                 s2._awaitingSendAck = true;
@@ -2489,6 +2535,56 @@ function dispatchGateChunk(chunk) {
     if (chunk.type === 'user_input' || chunk.type === 'user') {
         if (!sid) return;
         var userSess = getOrCreateSession(sid);
+        /* 【跳过本端自己的回显】内核会把 user 帧广播给该设备的所有客户端
+           （否则从手机发出的提问在桌面端完全不可见：只看到回答、看不到问题）。
+           发送端已经在 sendMessage 里乐观渲染了自己的气泡，再把广播帧渲染一遍
+           就是「每条消息显示两次」——这正是旧版用「内核不广播」压掉的那个缺陷。
+           改用身份判定而非屏蔽广播：本端发送时带了 clientMessageId，回显帧带回
+           同一个 id 即证明是自己发的。没有 id（旧客户端/微信/Loop 来源）时不做
+           此判断，退回原有渲染逻辑。
+
+           【为什么是集合而不是单个槽位】_pendingClientMessageId 只保存「最近一次」
+           发送的 id。连发两条（第一条还在途、第二条已发出）时前者被后者覆盖，
+           第一条的回显就再也匹配不上 → 被当成他端消息再渲染一遍，用户看到重复气泡。
+           _pendingEchoIds 记录全部「已发出、尚未收到回显」的 id，逐条销账。
+           _pendingClientMessageId 保留原语义（补发/busy 快照/replay 兜底用）。 */
+        var echoIds = userSess._pendingEchoIds;
+        var isOwnEcho = false;
+        if (chunk.clientMessageId) {
+            if (echoIds && echoIds[chunk.clientMessageId]) {
+                delete echoIds[chunk.clientMessageId];
+                isOwnEcho = true;
+            } else if (chunk.clientMessageId === userSess._pendingClientMessageId) {
+                // 兜底：会话对象没经过 sendMessage 注册（LRU 重建等）
+                isOwnEcho = true;
+            }
+        } else if (userSess._pendingClientMessageId && chunk.type === 'user'
+                && userSess._lastSentWireText && chunk.text === userSess._lastSentWireText) {
+            /* 【无 id 帧尾文本兜底】旧 bundled UI（不生成 clientMessageId）连新内核：
+               user 帧广播回发送端时没有身份可比，纯 id 判定会把本端回显当他端消息
+               再渲染一遍 → 每条消息双气泡。仅限「本端有登记在途 + 帧文本与本轮
+               wire 原文全等」才认亲；带 id 的帧一律走上面的身份判定，不受影响。
+               他端恰好同文的场景与移动端文本兜底同风险口径（登记一轮即销）。 */
+            isOwnEcho = true;
+            userSess._lastSentWireText = null;
+            // 无 id 帧没有可比身份：认亲即视为本轮槽位命中，显式清槽（下方按 id 比对清不到）
+            userSess._pendingClientMessageId = null;
+        }
+        if (isOwnEcho) {
+            if (userSess._pendingClientMessageId === chunk.clientMessageId) {
+                userSess._pendingClientMessageId = null;
+            }
+            /* 【code review 修复 2026-11 · ack 只认本轮】与 recoverStreamingSession
+               同口径：集合残留 / busy 补发旧 id 的回显命中时，槽位可能已被【新一轮
+               发送】覆盖 —— 无条件置 _sendAckConfirmed=true 会误销新轮的 ack 等待，
+               「未受理→报错/队列回滚」被短路，新消息静默丢失。只有回显确属当前
+               槽位（id 全等，或无 id 文本兜底已显式清槽）才确认 ack；旧 id 只销账。 */
+            if (!chunk.clientMessageId || userSess._pendingClientMessageId === null) {
+                userSess._sendAckConfirmed = true;
+                userSess._awaitingSendAck = false;
+            }
+            return;
+        }
         if (typeof ensureChatInHistory === 'function') {
             // Loop 定时任务执行记录：按任务归属工作空间（chunk.root）静默登记，
             // 不切换 tab / 不抢焦点，避免打扰用户当前视图；其它来源（微信等）保持原联动语义
@@ -2498,7 +2594,16 @@ function dispatchGateChunk(chunk) {
                 ensureChatInHistory(sid, chunk.text, true);
             }
         }
-        appendUserMessage(userSess, chunk.text, null, null, chunk.createdAt);
+        /* 【附件路径必须透传】内核把 imagePaths / filePaths 随 user 帧下发，历史回放路径
+           （app-history.js 的 appendUserMessage 第 6 参）正是靠它把「图 N」徽标换成真实缩略图。
+           实时分支旧实现只传了 createdAt、把这第六个参数丢了 —— 于是从手机发来的带图消息
+           在桌面端只剩一行文字，附件看不到（同一帧刷新页面才出现），表现为「手机发的消息
+           在 PC 上不完整」。 */
+        var echoImages = chunk.imagePaths || [];
+        var echoFiles = chunk.filePaths || [];
+        appendUserMessage(userSess, chunk.text, null, null, chunk.createdAt,
+            (echoImages.length || echoFiles.length)
+                ? { imagePaths: echoImages, filePaths: echoFiles } : null);
         if (userSess.sessionId === activeSessionId) {
             if (!inChatMode) switchToChatMode();
             scrollToBottom(true);

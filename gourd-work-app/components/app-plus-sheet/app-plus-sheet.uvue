@@ -2,20 +2,23 @@
 	<app-sheet :visible="visible" :title="title" :show-back="view !== 'main'" :show-search="view !== 'main'"
 		:compact="view !== 'main'" :tall="view !== 'main'" @close="emit('close')" @back="onBack" @search="onSearch">
 		<view v-if="view === 'main'">
-			<rice-grid :column-num="3" :border="false" :clickable="false" class="app-plus__cards">
-				<rice-grid-item v-for="(item, index) in ATTACHMENTS" :key="item.label" :custom-style="gridItemStyle(index)"
-					@click="emit('attach', t(item.label))">
-					<view class="app-plus__card">
-						<!-- image→photo；file 用 iconfont 码点：rice-icon 的 font-family 路径在 APP 端实测不渲染，
-							统一走 <text class="iconfont">（技能/连接器入口同款方式，已验证可用） -->
-						<text v-if="item.icon === 'file'" class="iconfont app-plus__card-iconfont">&#xe69f;</text>
-						<rice-icon v-else-if="riceIconName(item.icon) !== ''" :name="riceIconName(item.icon)" size="24px"
-							color="var(--color-primary)"></rice-icon>
-						<text class="app-plus__card-text">{{ t(item.label) }}</text>
-					</view>
-				</rice-grid-item>
-			</rice-grid>
-
+			<!-- 附件三入口（v1.1 真实链路）：拍照/相册/文件 → 压缩 → base64 内联进 input，
+				 由内核走与桌面 multipart 相同的落盘+注入；不再写假 tag -->
+			<view class="app-plus__tiles">
+				<view class="app-plus__tile" @click="emit('attach', 'camera')">
+					<rice-icon name="camera" size="24px" color="var(--color-text-primary)"></rice-icon>
+					<text class="app-plus__tile-text">{{ t('home.plus.camera') }}</text>
+				</view>
+				<view class="app-plus__tile" @click="emit('attach', 'album')">
+					<rice-icon name="photo" size="24px" color="var(--color-text-primary)"></rice-icon>
+					<text class="app-plus__tile-text">{{ t('home.plus.album') }}</text>
+				</view>
+				<!-- UCSS 不支持 :last-child，末位块用修饰类去右边距 -->
+			<view class="app-plus__tile app-plus__tile--last" @click="emit('attach', 'file')">
+					<rice-icon name="upload" size="24px" color="var(--color-text-primary)"></rice-icon>
+					<text class="app-plus__tile-text">{{ t('home.plus.file') }}</text>
+				</view>
+			</view>
 			<view class="app-plus__opt">
 				<!-- spark 图标待字体图标补全 -->
 				<rice-cell :border="false" center :custom-style="cellStyle" @click="openView('skills')">
@@ -32,7 +35,7 @@
 					</template>
 					<template #rightIcon>
 						<view class="app-plus__ov">
-							<text class="app-plus__ov-text">{{ selectedSkill.length > 0 ? selectedSkill : t('home.plus.select') }}</text>
+							<text class="app-plus__ov-text">{{ selectedSkillLabel }}</text>
 							<rice-icon name="arrow-right" size="14px" color="var(--color-text-tertiary)"></rice-icon>
 						</view>
 					</template>
@@ -55,7 +58,7 @@
 					</template>
 					<template #rightIcon>
 						<view class="app-plus__ov">
-							<text class="app-plus__ov-text">{{ t('home.plus.select') }}</text>
+							<text class="app-plus__ov-text">{{ connectorSummary }}</text>
 							<rice-icon name="arrow-right" size="14px" color="var(--color-text-tertiary)"></rice-icon>
 						</view>
 					</template>
@@ -67,9 +70,9 @@
 			<rice-search v-if="skillsSearchActive" v-model="skillQuery" class="app-plus__search" shape="round"
 				:placeholder="t('home.skills.search')" :placeholder-style="placeholderStyle" :clearable="true"
 				:focus="searchFocused" @focus="searchFocused = true" @blur="searchFocused = false"></rice-search>
-			<view v-for="item in filteredSkills" :key="item.name" class="app-plus__skill"
-				:class="item.name === selectedSkill ? 'app-plus__skill--on' : ''">
-				<rice-cell :border="false" center :custom-style="cellStyle" @click="emit('select-skill', item.name)">
+			<view v-for="item in filteredSkills" :key="item.id" class="app-plus__skill"
+				:class="item.id === selectedSkill ? 'app-plus__skill--on' : ''">
+				<rice-cell :border="false" center :custom-style="cellStyle" @click="emit('select-skill', item.id)">
 					<template #leftIcon>
 						<rice-tag :text="item.badge" :color="item.color" text-size="16px" :custom-style="badgeStyle"></rice-tag>
 					</template>
@@ -80,7 +83,7 @@
 						</view>
 					</template>
 					<template #rightIcon>
-						<view v-if="item.name === selectedSkill" class="app-plus__skill-check">
+						<view v-if="item.id === selectedSkill" class="app-plus__skill-check">
 							<rice-icon name="checked" size="16px" color="var(--color-primary)"></rice-icon>
 						</view>
 					</template>
@@ -93,8 +96,9 @@
 			<rice-search v-if="connectorsSearchActive" v-model="connectorQuery" class="app-plus__search" shape="round"
 				:placeholder="t('home.connectors.search')" :placeholder-style="placeholderStyle" :clearable="true"
 				:focus="searchFocused" @focus="searchFocused = true" @blur="searchFocused = false"></rice-search>
-			<view v-for="item in filteredConnectors" :key="item.name" class="app-plus__conn">
-				<rice-cell :border="false" center :custom-style="cellStyle" @click="emit('toggle-connector', item.name)">
+			<text v-if="!connectorSelectable" class="app-plus__readonly">{{ t('home.connectors.readonly') }}</text>
+			<view v-for="item in filteredConnectors" :key="item.id" class="app-plus__conn">
+				<rice-cell :border="false" center :custom-style="cellStyle" @click="onToggleRow(item.id)">
 					<template #leftIcon>
 						<view class="app-plus__conn-icon" :style="'background-color:' + item.color">
 							<!-- file/mountain 无对应图标，待字体图标补全 -->
@@ -111,8 +115,9 @@
 					<template #rightIcon>
 						<!-- switch 自身 change 已触发一次 toggle，阻断冒泡避免再吃到 cell 的 click -->
 						<view class="app-plus__conn-sw" @click.stop>
-							<rice-switch :model-value="connectorOn(item.name)" width="44px" active-color="var(--color-primary)"
-								inactive-color="var(--color-border)" @change="emit('toggle-connector', item.name)"></rice-switch>
+							<rice-switch :model-value="connectorOn(item.id)" width="44px" active-color="var(--color-primary)"
+								inactive-color="var(--color-border)" :disabled="!connectorSelectable || !deviceOnline"
+								@change="onToggleRow(item.id)"></rice-switch>
 						</view>
 					</template>
 				</rice-cell>
@@ -128,7 +133,7 @@
 	import type { ComputedRef, Ref } from 'vue'
 	import { i18n } from '@/locale/i18n.ts'
 	import AppSheet from '@/components/app-sheet/app-sheet.uvue'
-	import { CONNECTORS, SKILLS } from '@/data/app-data'
+	import { useRunEnv } from '@/hooks/useRunEnv'
 	import type { ConnectorOption, SkillOption } from '@/data/app-data'
 
 	defineOptions({
@@ -136,21 +141,8 @@
 		styleIsolation: 'app-and-page'
 	})
 
-	type AttachmentItem = {
-		label: string
-		icon: string
-	}
-
-	const ATTACHMENTS: AttachmentItem[] = [
-		{ label: 'home.plus.camera', icon: 'camera' },
-		{ label: 'home.plus.photo', icon: 'image' },
-		{ label: 'home.plus.file', icon: 'file' }
-	]
-
 	// 设计稿图标名到 rice-icon 字体名的映射，无对应图标留空，待字体图标补全后再填
 	const RICE_ICON_MAP: Record<string, string> = {
-		camera: 'camera',
-		image: 'photo',
 		file: '',
 		mountain: ''
 	}
@@ -163,10 +155,34 @@
 
 	const emit = defineEmits<{
 		(e: 'close'): void
-		(e: 'attach', name: string): void
-		(e: 'select-skill', name: string): void
-		(e: 'toggle-connector', name: string): void
+		(e: 'select-skill', id: string): void
+		(e: 'toggle-connector', id: string): void
+		(e: 'attach', kind: string): void
 	}>()
+
+	// 真实清单来自设备内核（skills/installed、mcp/servers）；组件自取共享态，
+	// 宿主只负责选择事件与附件选择器
+	const env = useRunEnv()
+	const connectorSelectable: ComputedRef<boolean> = computed<boolean>((): boolean => env.connectorSelectable.value)
+	// 离线时开关禁用置灰：提交必失败，不给「点了又弹回」的假交互
+	const deviceOnline: ComputedRef<boolean> = computed<boolean>((): boolean => env.deviceOnline.value)
+
+	function onToggleRow(id: string): void {
+		if (!connectorSelectable.value || !deviceOnline.value) return
+		emit('toggle-connector', id)
+	}
+	const selectedSkillLabel: ComputedRef<string> = computed<string>((): string => {
+		if (props.selectedSkill.length === 0) return t('home.plus.select')
+		const found: SkillOption | undefined = env.skills.value.find((s: SkillOption): boolean => s.id === props.selectedSkill)
+		return found != null ? found.name : props.selectedSkill
+	})
+	const connectorSummary: ComputedRef<string> = computed<string>((): string => {
+		let n = 0
+		env.connectors.value.forEach((c: ConnectorOption): void => {
+			if (props.connectorStates[c.id] === true) n += 1
+		})
+		return n > 0 ? t('home.plus.picked', { n: n.toString() }) : t('home.plus.select')
+	})
 
 	type SheetView = 'main' | 'skills' | 'connectors'
 
@@ -189,17 +205,6 @@
 	})
 	// 卡片底色与边框在外层卡片上，cell 本身透明，只承担布局与点击
 	const cellStyle = { backgroundColor: 'transparent', padding: '0' }
-	// grid-item 自带内边距与底色，需抹掉；间距用右内边距实现，避免 margin 叠加百分比宽度后溢出
-	function gridItemStyle(index: number): UTSJSONObject {
-		const style: UTSJSONObject = {
-			padding: '0',
-			'background-color': 'transparent'
-		}
-		if (index < ATTACHMENTS.length - 1) {
-			style['padding-right'] = '9px'
-		}
-		return style
-	}
 	const badgeStyle: UTSJSONObject = {
 		width: '40px',
 		height: '40px',
@@ -208,15 +213,15 @@
 	}
 	const filteredSkills: ComputedRef<SkillOption[]> = computed<SkillOption[]>((): SkillOption[] => {
 		const keyword: string = skillQuery.value.trim().toLowerCase()
-		if (keyword.length === 0) return SKILLS
-		return SKILLS.filter((item: SkillOption): boolean => {
+		if (keyword.length === 0) return env.skills.value
+		return env.skills.value.filter((item: SkillOption): boolean => {
 			return (item.name + item.desc).toLowerCase().indexOf(keyword) >= 0
 		})
 	})
 	const filteredConnectors: ComputedRef<ConnectorOption[]> = computed<ConnectorOption[]>((): ConnectorOption[] => {
 		const keyword: string = connectorQuery.value.trim().toLowerCase()
-		if (keyword.length === 0) return CONNECTORS
-		return CONNECTORS.filter((item: ConnectorOption): boolean => {
+		if (keyword.length === 0) return env.connectors.value
+		return env.connectors.value.filter((item: ConnectorOption): boolean => {
 			return (item.name + item.desc).toLowerCase().indexOf(keyword) >= 0
 		})
 	})
@@ -225,6 +230,9 @@
 		if (!visible) return
 		view.value = 'main'
 		resetSearch()
+		// 打开即拉真实清单（设备离线/未登录时内部直接返回，列表空态兜底）
+		env.refreshSkills()
+		env.refreshConnectors()
 	})
 
 	function t(key: string): string {
@@ -276,37 +284,43 @@
 
 <style lang="scss">
 	.app-plus {
-		&__cards {
-			margin-bottom: 8px;
-		}
-
-		&__card {
-			width: 100%;
-			height: 104px;
-			align-items: center;
-			justify-content: center;
-			border-radius: 20px;
-			background-color: var(--color-bg-card);
-		}
-
-		// 卡片内 iconfont 码点图标，颜色需在使用处显式声明（UCSS 不保证继承）
-		&__card-iconfont {
-			font-size: 24px;
-			color: var(--color-primary);
-		}
-
-		&__card-text {
-			margin-top: 10px;
-			font-size: 13px;
-			font-weight: 600;
-			color: var(--color-text-secondary);
-		}
-
 		&__opt {
 			margin-bottom: 10px;
 			padding: 14px;
 			border-radius: 16px;
 			background-color: var(--color-bg-card);
+		}
+
+		&__tiles {
+			flex-direction: row;
+			margin-bottom: 10px;
+		}
+
+		&__tile {
+			flex: 1;
+			flex-direction: column;
+			align-items: center;
+			justify-content: center;
+			padding: 20px 0;
+			border-radius: 16px;
+			background-color: var(--color-bg-card);
+			margin-right: 10px;
+		}
+
+		&__tile--last {
+			margin-right: 0;
+		}
+
+		&__tile-text {
+			font-size: 13px;
+			color: var(--color-text-primary);
+			margin-top: 10px;
+		}
+
+		&__readonly {
+			font-size: 12px;
+			color: var(--color-text-tertiary);
+			margin: 0 4px 10px;
 		}
 
 		&__ot-wrap {
@@ -391,7 +405,7 @@
 		}
 
 		&__skill-name {
-			font-size: 13.5px;
+			font-size: 14px;
 			font-weight: 700;
 			color: var(--color-text);
 			overflow: hidden;
@@ -459,7 +473,7 @@
 		&__conn-tip {
 			margin-top: 16px;
 			padding: 0 18px 6px;
-			font-size: 11.5px;
+			font-size: 12px;
 			line-height: 18px;
 			text-align: center;
 			color: var(--color-text-tertiary);

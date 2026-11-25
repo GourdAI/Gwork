@@ -141,6 +141,11 @@ body.code-mode .usage-view { display: none !important; }
     display: flex;
     flex-direction: column;
     gap: 12px;
+    /* 月份轴改为 absolute 后的包含块与占位补偿（见 .usage-heat-months 注释）：
+       relative 建立包含块；padding-bottom 26px = 月份轴高 14 + 原 gap 12，
+       使 absolute 月份轴恰好落在网格下方原视觉位置，且不占 flex 流。 */
+    position: relative;
+    padding-bottom: 26px;
 }
 .usage-heat-grid {
     display: grid;
@@ -194,8 +199,60 @@ body.code-mode .usage-view { display: none !important; }
    宽度随 wrap = 网格宽，保证 left% 与列严格对齐。
    字号 11px：「10月/Oct」约 33px ≈ 2.6 列（欢迎页列宽 ≈ 12.8px），与 renderMonths 的
    LABEL_W=2.6 / MIN_GAP=3.0 常量互为契约，改字号必须同步改 JS 常量。 */
-.usage-heat-months { position: relative; height: 14px; font-size: 11px; line-height: 14px; color: var(--text-secondary); }
+/* 【必须 absolute 钉在 wrap 上，勿改回 flex 流子项】月份轴的子元素全是
+   position:absolute，**不贡献任何 intrinsic 宽度**（min-content = max-content = 0）。
+   作为 flex 流子项时它的宽度完全依赖 align-items:stretch；而网格有 intrinsic 宽度
+   （53 列 × min 10px + gap）撑得住——一旦某个祖先布局态让 stretch 失效，就会出现
+   「网格满宽、月份轴塌成 0 宽」的组合：renderMonths 写的 left:% 相对本盒宽度算，
+   0 宽的 0%~94% 全部等于 0，13 个月份标签全叠在左端（用户截图「月份都挤到一起」）。
+   改为 absolute + left:0/right:0 后，月份轴宽度由 wrap 的 padding box 直接决定，
+   与网格（width:100%，同一 padding box）**构造上恒同宽**，不再依赖任何 stretch 态；
+   top 由 wrap 的 padding-bottom:26px 让出（14px 轴高 + 12px 原 gap），视觉位置不变。 */
+.usage-heat-months { position: absolute; left: 0; right: 0; bottom: 0; height: 14px; font-size: 11px; line-height: 14px; color: var(--text-secondary); }
 .usage-heat-months span { position: absolute; top: 0; white-space: nowrap; }
+/* 窄容器降级（容器查询版，勿改回 @media 视口版）：
+   renderMonths 的 MIN_GAP=3.0 列是按欢迎页 680px（列宽≈12.8px）标定的，
+   3 列≈38px 足够放 11px 的「10月」(≈24px)。容器变窄后列宽同比缩小，相邻标签实测重叠。
+   【为什么必须用 @container 而不是 @media】决定标签挤不挤的是「月份轴自身宽度」，
+   不是视口宽度：桌面端侧栏可拖宽、代码模式/任务监控面板会挤压主区，
+   实测 1280px 视口下主区可被压到 320px（卡片 272px），此时 @media(max-width:560px)
+   根本不命中，12 个标签全量渲染 → 2 处重叠 + 3.36px 右溢出（已实测复现）。
+   反之 360px 视口下若主区被拉宽，@media 又会误抽稀。容器查询直接量轴宽，两种误判都消除。
+   .usage-heat-wrap 声明 container-type:inline-size 成为查询容器（只含块轴尺寸，
+   不影响自身布局；仓库已有同款用法：app.css 的 .sidebar-footer）。
+   抽稀策略（全部实测 12 语言 × 15 档宽度 0 重叠 0 溢出）：
+   - ≤430px：隔月抽稀（隐藏偶数位），间距翻倍到 6 列；末标签始终保留并右对齐贴边
+     （它的 left% 按满宽标定，窄容器下右缘会溢出，right:0 覆盖 left 收进容器）。
+   - ≤380px：再隐藏倒数第 2 个标签（12 标签时=10月，它与末标签 11月 仅隔 3 列≈17px，
+     放不下 24px 的「10月」；6 标签的统计页该位=第 4 个，与末标签间距同样不足）。
+   - ≤300px：只留首尾两个标签（中间奇数位也隐藏）。
+   - ≤170px：全部隐藏（此时连首尾 2 个标签都放不下，悬停提示仍给完整日期，信息不丢）。
+   不改 JS 常量：LABEL_W/MIN_GAP 与契约测试互为锁定，动它们会破坏既有断言。 */
+.usage-heat-wrap { container-type: inline-size; }
+@container (max-width: 430px) {
+    .usage-heat-months { font-size: 10px; }
+    .usage-heat-months span:nth-child(even) { display: none; }
+    .usage-heat-months span:last-child { display: block; left: auto !important; right: 0; }
+}
+@container (max-width: 380px) {
+    .usage-heat-months span:nth-last-child(2) { display: none; }
+}
+@container (max-width: 300px) {
+    .usage-heat-months span:nth-child(odd):not(:first-child):not(:last-child) { display: none; }
+}
+@container (max-width: 170px) {
+    .usage-heat-months span { display: none !important; }
+}
+/* 越南语特例（:lang(vi) 命中 <html lang>，由 app-i18n.js setLocale 写入）：
+   vi 的月份短名是「Tháng X」（≈49px），比中文「10月」(24px) 宽一倍，
+   680px 满宽下 12 个标签也放不下（实测 2 处重叠 + 1.42px 溢出）——
+   这是语言固有宽度问题，与容器宽窄无关，故不做容器查询、恒抽稀：
+   隐藏偶数位 + 首标签（前导残月，renderMonths 已保证次月锚点间距）+ 倒数第 2 个，
+   末标签右对齐贴边。实测 vi 全宽度档 0 重叠 0 溢出。 */
+:lang(vi) .usage-heat-months span:nth-child(even) { display: none; }
+:lang(vi) .usage-heat-months span:first-child { display: none; }
+:lang(vi) .usage-heat-months span:nth-last-child(2) { display: none; }
+:lang(vi) .usage-heat-months span:last-child { display: block; left: auto !important; right: 0; }
 
 /* ── 悬停浮层（.usage-heat-tip）───────────────────────────
  * 为什么不用原生 title：title 由操作系统/浏览器绘制，字体、圆角、间距、延迟全部

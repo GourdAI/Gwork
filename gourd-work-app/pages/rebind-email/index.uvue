@@ -1,4 +1,4 @@
-﻿<template>
+<template>
 	<view class="rebind" :class="themeClass">
 		<view class="rebind__nav">
 			<view class="rebind__back" @click="onBack">
@@ -342,7 +342,7 @@
 		}
 
 		&__code-btn-text {
-			font-size: 11.5px;
+			font-size: 12px;
 			font-weight: 700;
 			color: var(--color-primary);
 		}
@@ -376,7 +376,7 @@
 		&__back-step {
 			margin-top: 14px;
 			text-align: center;
-			font-size: 12.5px;
+			font-size: 13px;
 			font-weight: 650;
 			color: var(--color-text-tertiary);
 		}
@@ -400,7 +400,7 @@
 
 		&__text {
 			margin-left: 6px;
-			font-size: 11.5px;
+			font-size: 12px;
 			font-weight: 650;
 			color: var(--color-text-tertiary);
 		}

@@ -1,85 +1,58 @@
 <template>
-	<app-sheet :visible="visible" :title="title" @close="emit('close')">
-		<view v-if="view === 'main'">
-			<text v-if="modelList.length === 0" class="app-model__empty">{{ t('model.empty') }}</text>
-			<view v-for="item in modelList" :key="item.model" class="app-model__opt"
-				:class="item.name === draftModel ? 'app-model__opt--on' : ''">
-				<rice-cell :border="false" center :custom-style="cellStyle" @click="draftModel = item.name">
-					<template #title>
-						<view class="app-model__ot">
-							<text class="app-model__ot-title">{{ item.name }}</text>
-							<text class="app-model__ot-desc">{{ item.desc }}</text>
-						</view>
-					</template>
-					<template #rightIcon>
-						<view v-if="item.name === draftModel">
-							<rice-icon name="checked" size="14px" color="var(--color-primary)" />
-						</view>
-					</template>
-				</rice-cell>
-			</view>
-
-			<text class="app-model__heading">{{ t('home.model.settings') }}</text>
-			<rice-cell :title="t('home.model.think')" :value="draftThink" :border="true" center
-				:title-text-style="settingTitleStyle" :value-text-style="settingValueStyle"
-				@click="view = 'think'">
-				<template #rightIcon>
-					<rice-icon name="arrow-right" size="13px" color="var(--color-text-tertiary)" />
-				</template>
-			</rice-cell>
-			<rice-cell :title="t('home.model.context')" :value="draftContext" :border="false" center
-				:title-text-style="settingTitleStyle" :value-text-style="settingValueStyle"
-				@click="view = 'context'">
-				<template #rightIcon>
-					<rice-icon name="arrow-right" size="13px" color="var(--color-text-tertiary)" />
-				</template>
-			</rice-cell>
-		</view>
-
-		<view v-else-if="view === 'think'">
-			<view v-for="item in thinkList" :key="item.value" class="app-model__opt"
-				:class="item.name === draftThink ? 'app-model__opt--on' : ''">
-				<rice-cell :border="false" center :custom-style="cellStyle" @click="onPickThink(item.name)">
-					<template #title>
-						<view class="app-model__ot">
-							<text class="app-model__ot-title">{{ item.name }}</text>
-							<text class="app-model__ot-desc">{{ item.desc }}</text>
-						</view>
-					</template>
-					<template #rightIcon>
-						<view v-if="item.name === draftThink">
-							<rice-icon name="checked" size="14px" color="var(--color-primary)" />
-						</view>
-					</template>
-				</rice-cell>
+	<app-sheet :visible="visible" :title="t('home.model.title')" @close="emit('close')">
+		<rice-input v-model="search" :placeholder="t('model.provider.searchPlaceholder')" :clearable="true"
+			:custom-style="searchStyle" :placeholder-style="placeholderStyle" />
+		<text v-if="visibleGroups.length === 0" class="app-model__empty">{{ t('model.empty') }}</text>
+		<view class="app-model__list">
+			<view v-for="group in visibleGroups" :key="group.key" class="app-model__group">
+				<view class="app-model__group-head" @click="toggleGroup(group.key)">
+					<rice-icon name="app" size="14px" color="var(--color-text-tertiary)" />
+					<text class="app-model__group-name">{{ group.name }}</text>
+					<text class="app-model__group-count">{{ group.count.toString() }}</text>
+					<rice-icon :name="group.collapsed ? 'down' : 'up'" size="12px" color="var(--color-text-tertiary)" />
+				</view>
+				<view v-if="!group.collapsed" class="app-model__group-body">
+					<view v-for="item in group.models" :key="item.model" class="app-model__row"
+						:class="item.name === currentModel ? 'app-model__row--on' : ''"
+						@click="onPickModel(item.name)">
+						<rice-icon name="app" size="13px" color="var(--color-text-tertiary)" />
+						<text class="app-model__row-name" :class="item.name === currentModel ? 'app-model__row-name--on' : ''">{{ shortName(item) }}</text>
+						<rice-icon v-if="item.name === currentModel" name="checked" size="13px" color="var(--color-primary)" />
+					</view>
+				</view>
 			</view>
 		</view>
-
-		<view v-else>
-			<view v-for="item in contextList" :key="item.value" class="app-model__opt"
-				:class="item.name === draftContext ? 'app-model__opt--on' : ''">
-				<rice-cell :border="false" center :custom-style="cellStyle" @click="onPickContext(item.name)">
-					<template #title>
-						<view class="app-model__ot">
-							<text class="app-model__ot-title">{{ item.name }}</text>
-							<text class="app-model__ot-desc">{{ item.desc }}</text>
-						</view>
-					</template>
-					<template #rightIcon>
-						<view v-if="item.name === draftContext">
-							<rice-icon name="checked" size="14px" color="var(--color-primary)" />
-						</view>
-					</template>
-				</rice-cell>
-			</view>
-		</view>
-
 		<template #footer>
-			<view v-if="view === 'main'" class="app-model__foot">
-				<view class="app-model__confirm">
-					<rice-button :text="t('home.model.confirm')" color="transparent"
-						text-color="var(--color-text-inverse)" text-size="14px" width="100%" height="48px"
-						shape="square" @click="onConfirm" />
+			<!-- 关联选择固定在 footer：不随模型列表滚动、不依赖选中模型是否在清单里，
+			     搜索或折叠任何服务商后思考/上下文仍始终可选（对齐桌面 chips 语义）。 -->
+			<view class="app-model__settings">
+				<view v-if="thinkSelectable" class="app-model__setting-label-row">
+					<text class="app-model__setting-label">{{ t('home.model.think') }}</text>
+					<text class="app-model__setting-value">{{ thinkLabel }}</text>
+				</view>
+				<view v-if="thinkSelectable" class="app-model__chips">
+					<view v-for="item in thinkList" :key="item.value" class="app-model__chip"
+						:class="item.value === currentThink ? 'app-model__chip--on' : ''"
+						@click="onPickThink(item.value)">
+						<text class="app-model__chip-text" :class="item.value === currentThink ? 'app-model__chip-text--on' : ''">{{ item.name }}</text>
+					</view>
+				</view>
+				<view class="app-model__setting-label-row">
+					<text class="app-model__setting-label">{{ t('home.model.context') }}</text>
+					<text class="app-model__setting-value">{{ contextLabel }}</text>
+				</view>
+				<view class="app-model__chips">
+					<view v-for="item in contextList" :key="item.value" class="app-model__chip"
+						:class="item.value === currentContext ? 'app-model__chip--on' : ''"
+						@click="onPickContext(item.value)">
+						<text class="app-model__chip-text" :class="item.value === currentContext ? 'app-model__chip-text--on' : ''">{{ item.name }}</text>
+					</view>
+				</view>
+			</view>
+			<view class="app-model__foot">
+				<text class="app-model__foot-hint">{{ t('model.autoSaved') }}</text>
+				<view class="app-model__done" @click="emit('close')">
+					<text class="app-model__done-text">{{ t('common.done') }}</text>
 				</view>
 			</view>
 		</template>
@@ -92,6 +65,7 @@
 	import { i18n } from '@/locale/i18n.ts'
 	import AppSheet from '@/components/app-sheet/app-sheet.uvue'
 	import { useRunEnv } from '@/hooks/useRunEnv'
+	import type { LevelOption, ModelOption } from '@/data/app-data'
 
 	defineOptions({
 		name: 'app-model-sheet',
@@ -107,131 +81,352 @@
 
 	const emit = defineEmits<{
 		(e: 'close'): void
-		(e: 'confirm', model: string, think: string, context: string): void
+		(e: 'change', model: string, think: string, context: string): void
 	}>()
 
-	type SheetView = 'main' | 'think' | 'context'
-
-	const TITLE_KEYS: Record<string, string> = {
-		main: 'home.model.title',
-		think: 'home.think.title',
-		context: 'home.context.title'
+	type ProviderGroup = {
+		/** 段实例键：同名服务商可交错出现多段，绝不能跨段合并 */
+		key: string
+		id: string
+		name: string
+		count: number
+		collapsed: boolean
+		models: ModelOption[]
 	}
 
-	const view: Ref<SheetView> = ref<SheetView>('main')
-	const draftModel: Ref<string> = ref<string>('')
-	const draftThink: Ref<string> = ref<string>('')
-	const draftContext: Ref<string> = ref<string>('')
+	const search: Ref<string> = ref<string>('')
+	/** 折叠态持久化：桌面 model-dropdown-ui.js:40-51 localStorage 同款，跳页与重启后保留 */
+	const COLLAPSE_KEY: string = 'gwork_model_groups'
+	const collapsedGroups: Ref<Record<string, boolean>> = ref<Record<string, boolean>>(readCollapsedGroups())
 
-	const title: ComputedRef<string> = computed<string>((): string => t(TITLE_KEYS[view.value]))
+	function readCollapsedGroups(): Record<string, boolean> {
+		const empty: Record<string, boolean> = {}
+		try {
+			const raw: string | null = uni.getStorageSync(COLLAPSE_KEY) as string | null
+			// 无缓存时 uni.getStorageSync 可能返回 null，判空后再 JSON.parse
+			if (raw == null || raw.length === 0) return empty
+			const parsed: UTSJSONObject | null = JSON.parse(raw as string) as UTSJSONObject | null
+			if (parsed == null) return empty
+			const result: Record<string, boolean> = {}
+			Object.keys(parsed).forEach((key: string): void => {
+				const value: boolean | null = parsed[key] as boolean | null
+				if (typeof value === 'boolean') result[key] = value as boolean
+			})
+			return result
+		} catch (_) {
+			return empty
+		}
+	}
 
-	// 选中态的底色与边框在外层卡片上，cell 本身透明，只承担布局与点击
-	const cellStyle: UTSJSONObject = { backgroundColor: 'transparent', padding: '13px 14px' }
-	// 行内样式用 CSS 变量字符串，切换亮暗由变量继承自动跟随
-	const settingTitleStyle = computed((): UTSJSONObject => ({
-		color: 'var(--color-text)', fontSize: '13.5px', fontWeight: '600'
-	}))
-	const settingValueStyle = computed((): UTSJSONObject => ({
-		color: 'var(--color-text-tertiary)', fontSize: '12.5px', fontWeight: '600'
-	}))
+	const searchStyle: UTSJSONObject = { backgroundColor: 'var(--color-bg)', borderRadius: '12px', marginBottom: '10px' }
+	const placeholderStyle: ComputedRef<string> = computed<string>((): string => 'color:var(--color-text-tertiary);')
 
-	// 清单来自内核 /web/chat/models（useRunEnv 单例），打开时补拉一次
-	const { models, thinkLevels, contextWindows, refreshModels } = useRunEnv()
-	const modelList = models
-	const thinkList = thinkLevels
-	const contextList = contextWindows
+	const env = useRunEnv()
+	const modelList = env.models
+	const thinkList = env.thinkLevels
+	const contextList = env.contextWindows
+	/** 顶层 ref 绑定（模板对嵌套 ref 不做自动解包，直接写 env.xxx.value 在 UTS 模板里不可靠） */
+	const thinkSelectable = env.thinkSelectable
 
-	// 草稿只在弹层打开时同步，弹层内切换先暂存，点「确认」才回写页面
+	const currentModel: ComputedRef<string> = computed<string>((): string => env.modelValue.value)
+	const currentThink: ComputedRef<string> = computed<string>((): string => env.thinkValue.value)
+	const currentContext: ComputedRef<string> = computed<string>((): string => env.contextValue.value)
+	const thinkLabel: ComputedRef<string> = computed<string>((): string => {
+		const found: LevelOption | undefined = thinkList.value.find((item: LevelOption): boolean => item.value === currentThink.value)
+		return found != null ? found.name : props.think
+	})
+	const contextLabel: ComputedRef<string> = computed<string>((): string => {
+		const found: LevelOption | undefined = contextList.value.find((item: LevelOption): boolean => item.value === currentContext.value)
+		return found != null ? found.name : props.context
+	})
+
+	function providerIdOf(item: ModelOption): string {
+		return item.providerId.length > 0 ? item.providerId : (item.provider.length > 0 ? item.provider : '__other__')
+	}
+
+	/** 服务商 id → 展示名（一次线性扫描建表）。
+	 *  早期实现对每个分组都 modelList.find(...) 一遍：几百个模型 × 十几个分组是 O(n²)，
+	 *  在原生列表上光打开弹层就要卡一下。 */
+	const providerNames: ComputedRef<Map<string, string>> = computed<Map<string, string>>((): Map<string, string> => {
+		const map: Map<string, string> = new Map<string, string>()
+		modelList.value.forEach((item: ModelOption): void => {
+			const id: string = providerIdOf(item)
+			if (item.provider.length > 0 && (map.get(id) ?? '').length === 0) map.set(id, item.provider)
+		})
+		return map
+	})
+
+	function providerNameOf(id: string): string {
+		if (id === '__other__') return t('model.provider.other')
+		const name: string | undefined = providerNames.value.get(id)
+		return name != null && name.length > 0 ? name : id
+	}
+
+	/** 严格保序分段（桌面 ModelListOrder.buildEntries 同款）：只与紧邻上一模型比较，
+	 *  服务商名可交错出现多段，绝不跨段聚合（model-dropdown-ui.js:127-128）。 */
+	const allGroups: ComputedRef<ProviderGroup[]> = computed<ProviderGroup[]>((): ProviderGroup[] => {
+		const groups: ProviderGroup[] = []
+		modelList.value.forEach((item: ModelOption): void => {
+			const id: string = providerIdOf(item)
+			const previous: ProviderGroup | undefined = groups.length > 0 ? groups[groups.length - 1] : undefined
+			if (previous != undefined && previous.id === id) {
+				previous.models.push(item)
+				return
+			}
+			const key: string = id + '#' + groups.length.toString()
+			groups.push({ key, id, name: providerNameOf(id), count: 0, collapsed: false, models: [item] })
+		})
+		const current: ModelOption | undefined = modelList.value.find((item: ModelOption): boolean => item.name === currentModel.value || item.model === currentModel.value)
+		const activeId: string = current != null ? providerIdOf(current) : ''
+		// 【阈值按「去重后的服务商数」判，不是段数】同一服务商可切成多段（保序不聚合），
+		// 用段数会让「只有 1 家服务商、但被切成 4 段」误触发全折叠，
+		// 桌面 isCollapsed 用的是 ctx.groupCount（服务商数）。
+		const distinct: string[] = []
+		groups.forEach((group: ProviderGroup): void => {
+			if (distinct.indexOf(group.id) < 0) distinct.push(group.id)
+		})
+		groups.forEach((group: ProviderGroup): void => {
+			group.count = group.models.length
+			// 【折叠态按服务商 id 记忆，不按段实例键】桌面 groupKey(provider) 同款：
+			// 用段键会记住一个已经不存在的段编号，下次重开弹层所有组都回到默认策略，
+			// 用户手动展开过的服务商白展开一次（表现为「折叠记忆时好时坏」）。
+			const memorized: boolean | undefined = collapsedGroups.value[group.id]
+			group.collapsed = memorized != null ? memorized : (distinct.length >= 3 && group.id !== activeId)
+		})
+		return groups
+	})
+
+	const visibleGroups: ComputedRef<ProviderGroup[]> = computed<ProviderGroup[]>((): ProviderGroup[] => {
+		const terms: string[] = search.value.trim().toLowerCase().split(' ').filter((term: string): boolean => term.length > 0)
+		return allGroups.value.map((group: ProviderGroup): ProviderGroup => {
+			if (terms.length === 0) {
+				return { key: group.key, id: group.id, name: group.name, count: group.count, collapsed: group.collapsed, models: group.models }
+			}
+			const providerHit: boolean = terms.every((term: string): boolean => group.name.toLowerCase().indexOf(term) >= 0)
+			const matched: ModelOption[] = providerHit ? group.models : group.models.filter((item: ModelOption): boolean => {
+				const hay: string = (item.name + ' ' + item.model + ' ' + item.desc + ' ' + item.provider).toLowerCase()
+				return terms.every((term: string): boolean => hay.indexOf(term) >= 0)
+			})
+			// 搜索期间全部展开（桌面 model-dropdown-ui.js:210 同款）
+			return { key: group.key, id: group.id, name: group.name, count: matched.length, collapsed: false, models: matched }
+		}).filter((group: ProviderGroup): boolean => group.models.length > 0)
+	})
+
+	function shortName(item: ModelOption): string {
+		const prefix: string = item.provider + '-'
+		return item.provider.length > 0 && item.name.indexOf(prefix) === 0 ? item.name.slice(prefix.length) : item.name
+	}
+
+	function syncOptions(): void {
+		env.syncOptionsForModel(currentModel.value)
+	}
+
 	watch((): boolean => props.visible, (visible: boolean): void => {
 		if (!visible) return
-		view.value = 'main'
-		draftModel.value = props.model
-		draftThink.value = props.think
-		draftContext.value = props.context
-		if (modelList.value.length === 0) refreshModels()
+		// 桌面 model-selector.js:362-366：打开只清搜索词，折叠态持久化，不清空
+		search.value = ''
+		syncOptions()
+		env.refreshModels()
+	})
+
+	// 异步回读只刷新选项与当前值，不覆盖用户在弹层内的任何草稿——本弹层无草稿，选中即提交。
+	watch([(): string => currentModel.value, (): string => currentThink.value], (): void => {
+		if (props.visible) syncOptions()
 	})
 
 	function t(key: string): string {
 		return i18n.global.t(key)
 	}
 
-	function onPickThink(name: string): void {
-		draftThink.value = name
-		view.value = 'main'
+	function toggleGroup(key: string): void {
+		const group: ProviderGroup | undefined = allGroups.value.find((item: ProviderGroup): boolean => item.key === key)
+		if (group == null) return
+		const next: Record<string, boolean> = {}
+		Object.keys(collapsedGroups.value).forEach((existing: string): void => {
+			next[existing] = collapsedGroups.value[existing]
+		})
+		// 落盘键必须是服务商 id（与 allGroups 的读取口径一致）；写成段实例键会导致
+		// 下次打开弹层读不到，折叠记忆失效。
+		next[group.id] = !group.collapsed
+		collapsedGroups.value = next
+		try {
+			uni.setStorageSync(COLLAPSE_KEY, JSON.stringify(next))
+		} catch (_) {
+			// 存储失败不阻塞交互
+		}
 	}
 
-	function onPickContext(name: string): void {
-		draftContext.value = name
-		view.value = 'main'
+	/** 选中即生效：对齐桌面 selectModel/selectThinking/selectContext，无确认按钮。
+	 *  三个值始终传「原始码」，由 useRunEnv 统一落到对应 sessionId。 */
+	function onPickModel(name: string): void {
+		emit('change', name, currentThink.value, currentContext.value)
 	}
-
-	function onConfirm(): void {
-		emit('confirm', draftModel.value, draftThink.value, draftContext.value)
+	function onPickThink(value: string): void {
+		emit('change', currentModel.value, value, currentContext.value)
+	}
+	function onPickContext(value: string): void {
+		emit('change', currentModel.value, currentThink.value, value)
 	}
 </script>
 
 <style lang="scss">
 	.app-model {
-		&__opt {
-			margin-bottom: 10px;
-			border-radius: 15px;
-			border-width: 1px;
-			border-style: solid;
-			border-color: var(--color-border);
-			background-color: var(--color-bg-card);
-
-			&--on {
-				border-color: var(--color-primary);
-				background-color: var(--color-brand-soft);
-			}
-		}
-
-		&__ot {
-			flex: 1;
-			min-width: 0;
+		&__list {
+			width: 100%;
 			flex-direction: column;
-		}
-
-		&__ot-title {
-			font-size: 13.5px;
-			font-weight: 700;
-			color: var(--color-text);
-		}
-
-		&__ot-desc {
-			margin-top: 3px;
-			font-size: 11px;
-			line-height: 15.4px;
-			color: var(--color-text-tertiary);
-		}
-
-		&__heading {
-			margin-top: 16px;
-			margin-left: 4px;
-			margin-bottom: 4px;
-			font-size: 11px;
-			font-weight: 700;
-			letter-spacing: 0.4px;
-			color: var(--color-text-tertiary);
-		}
-
-		&__foot {
-			margin-top: 8px;
-			padding-top: 12px;
-			border-top-width: 1px;
-			border-top-style: solid;
-			border-top-color: var(--color-border);
-		}
-
-		&__confirm {
-			border-radius: 15px;
-			background-color: var(--color-primary);
 		}
 
 		&__empty {
 			padding: 14px 4px;
 			font-size: 13px;
 			color: var(--color-text-tertiary);
+		}
+
+		&__group {
+			margin-bottom: 6px;
+		}
+
+		&__group-head {
+			flex-direction: row;
+			align-items: center;
+			padding: 6px 10px;
+			background-color: var(--color-bg);
+		}
+
+		&__group-name {
+			flex: 1;
+			min-width: 0;
+			margin-left: 8px;
+			font-size: 13px;
+			font-weight: 700;
+			color: var(--color-text-secondary);
+			overflow: hidden;
+			text-overflow: ellipsis;
+			white-space: nowrap;
+		}
+
+		&__group-count {
+			margin-left: 8px;
+			font-size: 11px;
+			color: var(--color-text-tertiary);
+		}
+
+		&__group-body {
+			flex-direction: column;
+			padding: 0 4px;
+		}
+
+		&__row {
+			flex-direction: row;
+			align-items: center;
+			padding: 7px 10px;
+			/* 桌面端过程行同款：透明底、无边框、无圆角，模型行只靠文字与勾选区分 */
+		}
+
+		&__row-name {
+			flex: 1;
+			min-width: 0;
+			margin-left: 8px;
+			font-size: 13px;
+			line-height: 19px;
+			color: var(--color-text);
+			overflow: hidden;
+			text-overflow: ellipsis;
+			white-space: nowrap;
+		}
+
+		&__row-name--on {
+			font-weight: 700;
+			color: var(--color-primary);
+		}
+
+		&__settings {
+			/* footer 区不参与高度压缩：模型列表再长也只压缩上面的滚动区，
+			   否则思考档位/上下文 chips 会被挤出可视区，表现为「没法选」 */
+			flex-shrink: 0;
+			margin: 4px 0 10px;
+			padding: 8px 10px;
+			border-radius: 12px;
+			background-color: var(--color-brand-soft);
+			flex-direction: column;
+		}
+
+		&__setting-label-row {
+			flex-direction: row;
+			align-items: center;
+			margin: 4px 0 6px;
+		}
+
+		&__setting-label {
+			flex: 1;
+			font-size: 12px;
+			font-weight: 700;
+			color: var(--color-text-secondary);
+		}
+
+		&__setting-value {
+			font-size: 11px;
+			color: var(--color-text-tertiary);
+		}
+
+		&__chips {
+			flex-direction: row;
+			flex-wrap: wrap;
+			margin-bottom: 8px;
+		}
+
+		&__chip {
+			padding: 5px 10px;
+			margin: 0 6px 6px 0;
+			border-radius: 9px;
+			border-width: 1px;
+			border-style: solid;
+			border-color: var(--color-border);
+			background-color: var(--color-bg-card);
+		}
+
+		&__chip--on {
+			border-color: var(--color-primary);
+			background-color: var(--color-primary);
+		}
+
+		&__chip-text {
+			font-size: 12px;
+			color: var(--color-text-secondary);
+		}
+
+		&__chip-text--on {
+			color: var(--color-text-inverse);
+			font-weight: 700;
+		}
+
+		&__foot {
+			flex-shrink: 0;
+			margin-top: 8px;
+			padding-top: 10px;
+			border-top-width: 1px;
+			border-top-style: solid;
+			border-top-color: var(--color-border);
+			flex-direction: row;
+			align-items: center;
+		}
+
+		&__foot-hint {
+			flex: 1;
+			font-size: 11px;
+			color: var(--color-text-tertiary);
+		}
+
+		&__done {
+			padding: 9px 18px;
+			border-radius: 12px;
+			background-color: var(--color-primary);
+		}
+
+		&__done-text {
+			font-size: 13px;
+			font-weight: 700;
+			color: var(--color-text-inverse);
 		}
 	}
 </style>

@@ -1,6 +1,0 @@
-{
-  "minApiLevel": "9",
-  "dependencies": {
-    "uni-ai-md": "./libs/uni-ai-md.har"
-  }
-}

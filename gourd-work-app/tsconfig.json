@@ -7,6 +7,9 @@
     "allowJs": true,
     "esModuleInterop": true,
     "baseUrl": ".",
+    // 源码一律写全扩展名（@/utils/tools.ts），这是 HBuilderX/UTS 的约定；
+    // 开启后 tsc 才不再对每处 .ts 后缀报 TS5097（历史基线里占 32 条）。
+    "allowImportingTsExtensions": true,
     "paths": {
       "@/*": ["./*"]
     }
@@ -17,9 +20,13 @@
     "**/*.ts",
     "**/*.d.ts"
   ],
+  // 第三方插件里的自测用例与自带 d.ts（IE11 WeakMap）不被本项目源码引用，
+  // 会带进 test/assert/fs 与 WeakMap 声明冲突等无关诊断，只在 type-check 时才有意义，
+  // 这里统一排除；真正的 check 配置见 tsconfig.typecheck.json。
   "exclude": [
     "node_modules",
     "unpackage",
+    "types",
     "uni_modules/*/uniCloud-aliyun/cloudfunctions"
   ]
 }

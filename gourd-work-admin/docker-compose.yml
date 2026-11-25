@@ -21,7 +21,9 @@ services:
     restart: always
     command: --log-dir /app/logs
     ports:
-      - "3000:3000"
+      # 默认只绑回环：`3000:3000` 会把后台暴露到宿主机所有网卡（同网段可直连，
+      # 绕开线上 nginx）。需要局域网访问时用 GWORK_BIND_ADDR 显式指定网卡。
+      - "${GWORK_BIND_ADDR:-127.0.0.1}:3000:3000"
     volumes:
       - ./data:/data
       - ./logs:/app/logs

@@ -1,4 +1,6 @@
 target/
+# 本地测试工具链（MinGW binutils 解包，供 GNU 工具链 cargo test 的 windres/ar）
+build/mingw-extract/
 !.mvn/wrapper/maven-wrapper.jar
 # Spring Boot 解包/误生成的构建残骸（不应出现在任何模块根目录）
 BOOT-INF/
@@ -65,6 +67,18 @@ work
 .gwork/
 downloads/
 _scratch/
+# 应用打包产物（APK/AAB/IPA/HAP）：发布签名包体积大、每次构建都变，
+# 且曾实测把 build/GWork-android-0.0.1.apk 误纳入版本库。
+*.apk
+*.aab
+*.ipa
+*.hap
+*.keystore
+*.jks
+*.p12
+!gourd-work-app/build/brand/*.cjs
+!gourd-work-app/build/*.cjs
+!gourd-work-app/build/*.js
 # Local build cache & scratch output (never commit; regenerated on demand)
 gourdai-java/gourd-ai-tauri/.cache/
 .tmp/

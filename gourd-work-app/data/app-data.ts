@@ -1,8 +1,8 @@
 /**
  * 首页与对话页共享的数据类型与剩余静态占位数据。
  *
- * 设备 / 工作区 / 模型 / 会话已接真实链路（hooks/useDevices、useRunEnv、useConversations）；
- * 权限、技能、连接器仍为演示内容。技能 / 连接器的标识色属于内容色（与头像同理），
+ * 设备 / 工作区 / 模型 / 会话 / 权限 / 技能 / 连接器已接真实链路
+ * （hooks/useDevices、useRunEnv、useConversations）。技能 / 连接器的标识色属于内容色（与头像同理），
  * 不参与亮暗主题切换，因此保留在后端数据位置而不是 $theme-palette。
  */
 
@@ -24,18 +24,31 @@ export type WorkspaceOption = {
 }
 
 export type PermissionOption = {
+	/** 协议码：内核 access/select 与 input.accessMode 的 wire 值（'default' | 'full'）。
+	 *  【不能用展示文案当键】切语言后所有比对会静默失配（二次确认弹窗失效） */
 	name: string
-	desc: string
+	/** i18n 键：展示名与描述经 permissionLabel/permissionDesc 现取，随语言切换 */
+	labelKey: string
+	descKey: string
 	danger: boolean
 }
 
 export type ModelOption = {
-	/** 内核模型标识（POST models/select 的 modelName 字段） */
+	/** 带前缀的可选模型 name（settings.models 的 key/name；POST models/select 必须传它），
+	 *  裸 model 字段只是配置内的短 id，内核 contains_key 不认。 */
 	model: string
 	name: string
 	desc: string
-	/** 该模型可选的思考深度码（内核 thinkingLevels，空=不支持选择） */
+	/** 服务商展示名；内核 /web/chat/models 下发，空串归入「其他」 */
+	provider: string
+	/** 服务商唯一 id；兼容 Java 内核，空串时按 provider 分组 */
+	providerId: string
+	/** 接口标准；旧内核未下发 thinkingLevels 时用于兜底档位 */
+	standard: string
+	/** 该模型可选的思考深度码（内核 thinkingLevels；hasThinkingLevels=false 时按 standard 兜底） */
 	thinkingLevels: string[]
+	/** 内核是否明确下发 thinkingLevels；空数组=明确不可调，仅保留 auto */
+	hasThinkingLevels: boolean
 }
 
 export type LevelOption = {
@@ -46,14 +59,18 @@ export type LevelOption = {
 	desc: string
 }
 
+/** 技能选择项。id = 内核 slash id（技能目录名，发送时前置 "/<id> "）；name = 展示名（不上 wire）。 */
 export type SkillOption = {
+	id: string
 	name: string
 	desc: string
 	badge: string
 	color: string
 }
 
+/** 连接器选择项。id = 内核服务器目录名（mcp/select 提交口径）；name = 展示名。 */
 export type ConnectorOption = {
+	id: string
 	name: string
 	desc: string
 	enabled: boolean
@@ -61,11 +78,146 @@ export type ConnectorOption = {
 	icon: string
 }
 
+/** 待发送附件（mobile-link v1.1：input 内联 base64）。bytes 为原始字节数，供限额校验与展示。 */
+export type PendingAttachment = {
+	name: string
+	type: string // 'image' | 'file'
+	dataBase64: string
+	bytes: number
+	/** 图片 MIME 子类型（不含 'image/' 前缀，如 'jpeg'/'png'）；选图器回填 */
+	mime: string
+}
+
 /** AI 消息生命周期（对齐 uni-ai-x 会话状态机）：流式输出中 / 正常完成 / 用户手动停止 */
 export type ChatMsgStatus = 'processing' | 'done' | 'stopped'
 
-/** 会话内单条消息；meta 为设计稿 AI 气泡底部的状态行（如「已完成 2 秒」）。
-	status / thinking 仅 AI 消息消费：thinking 为真表示思考中（尚未吐正文），渲染 loading */
+/** 桌面端过程行的类型；气泡内按帧时序平铺，不与最终正文混成一个文本框。
+ *  text 是过程中的 Markdown/正文增量块，最终态只保留最后一个 text 块常驻。 */
+export type ChatBlockKind = 'text' | 'thinking' | 'tool' | 'agent' | 'batch' | 'error' | 'retry' | 'notice' | 'qa'
+
+/** 状态点口径（桌面端 .tool-status-icon）：loading/done/warn/reject 四态 */
+export type ChatBlockStatus = 'loading' | 'done' | 'warn' | 'reject'
+
+/** 交互卡中的一个选项（question 帧 args.questions[i].options[j]，契约 §5.1）。
+ *  description 是可选新字段，detail 是模型自发用过的别名，解析时统一收进 description。 */
+export type AskOption = {
+	/** 原始 label：出站答案与选中判定一律用它，绝不用展示用短标题 */
+	label: string
+	description: string
+	recommended: boolean
+}
+
+/** 交互卡中的一道题（question 帧 args.questions[i]） */
+export type AskQuestion = {
+	header: string
+	detail: string
+	options: AskOption[]
+	/** 契约 §5.1 可选字段：仅当选项可同时成立时为真 */
+	multiSelect: boolean
+}
+
+/** 一道题的作答态。与 questions 等长同序，未作答的项 answered=false。
+ *  单独存 selectedLabel(s)/supplement 而不是只存 text：换选项要保留已写的补充，
+ *  多选要高亮命中项，两者都需要结构化字段（桌面 app-message.js:4025-4320 同构）。 */
+export type AskAnswer = {
+	index: number
+	/** 出站 text：单选=label 或「label（补充：…）」；多选=「a、b、补充」 */
+	text: string
+	selectedLabel: string
+	selectedLabels: string[]
+	supplement: string
+	skipped: boolean
+	custom: boolean
+	answered: boolean
+}
+
+/** 交互卡在气泡里的角色：
+ *  - hitl     待审批（同意/拒绝）
+ *  - question 待作答（选项 + 自由输入）
+ *  - resolved 已闭环（只读回显：审批已放行 / 已答内容） */
+export type ChatBlockInteract = '' | 'hitl' | 'question' | 'resolved'
+
+/** 一条「扁平语义轨迹」：对齐桌面端 .thinking-block / .tool-card / .agent-card /
+ *  .turn-batch-header / .chunk-error / .chunk-retry 的单行头 + 可折叠体。
+ *  刻意不带圆角灰底卡片：桌面端 process-flat-contract 已钉死「无竖条、无圆角、透明底」。 */
+export type ChatBlock = {
+	id: string
+	kind: ChatBlockKind
+	/** 单行头主标签（13px 正体） */
+	label: string
+	/** rice-icon 名，统一 14px 线性图标 */
+	icon: string
+	/** 参数 / 文件名 / 描述摘要，单行省略 */
+	args: string
+	/** 折叠态仍可读的首行/末行摘要 */
+	preview: string
+	/** 展开体（思考全文 / 工具结果 / 子智能体摘要 / 正文增量） */
+	body: string
+	status: ChatBlockStatus
+	/** 耗时文案（1.2s / 340ms） */
+	duration: string
+	/** 运行批次开盖时间戳（仅 kind=batch 且 status=loading 使用）：
+	 *  UI 层每秒 tick 据此推算「正在执行中 · Ns」，与收口后的整批耗时同口径 */
+	startedAt: number
+	failed: boolean
+	/** 交互卡（HITL / question）与错误/重试/问答凭据常驻，不进整轮折叠 */
+	process: boolean
+	/** 运行批次盖子 id；成员靠它跟随盖子折叠 */
+	batchId: string
+	/** 批次成员数（仅 kind=batch 使用） */
+	batchCount: number
+	/** 批次折叠标记（仅 kind=batch 使用）：创建即 true（默认折叠，点击才展开），收口保持 true */
+	batchCollapsed: boolean
+	/** 过程行展开态（思考全文/工具结果 body）：默认 false 只露行头，点击行头才展开。
+	 *  2026-11 用户拍板：思考/工具内容默认关闭；交互卡/错误/文件变更卡不受此开关影响（常驻） */
+	rowOpen: boolean
+	/** 子智能体归属名，供同卡复用与标题展示 */
+	agentName: string
+	/** 工具/子智能体动作 id，帧配对用 */
+	actionId: string
+	/** 交互卡角色：'' = 普通过程行；hitl/question = 可作答；resolved = 已闭环只读回显 */
+	interact: ChatBlockInteract
+	/** 交互卡题面（question 帧解析结果；hitl 卡为空数组） */
+	questions: AskQuestion[]
+	/** 交互卡作答态（与 questions 等长同序） */
+	answers: AskAnswer[]
+	/** 提交在途：UI 置灰防重复点击（桌面 state.submitted 同款） */
+	submitting: boolean
+	/** 已提交失败的原因；非空时 UI 显示重试入口并保留答案 */
+	submitError: string
+	/** hitl 卡的命令原文（审批卡正文；question 卡为空串） */
+	command: string
+	/** 已闭环回显文案（resolved 卡的正文；审批「已同意」/ 作答「a、b」） */
+	resolvedText: string
+	/** 文件变更卡（args='fileChanges' 的 notice 块）的文件行；其余块恒为空数组。
+	 *  同 run 的 file_changes 帧按 revision 整卡替换（桌面 onFileChangesChunk 同口径） */
+	changes: ChatFileChange[]
+	/** 文件变更卡「再显示 N 个文件」展开态：默认折叠只露 3 行（桌面 COLLAPSED_ROWS 同款） */
+	changesOpen: boolean
+	/** 裸工具名（去 source/ 前缀）：图标/本地化映射用，PC data-tool-name 同口径。
+	 *  非工具块为空串。label 已是本地化显示名，此字段保留原始注册名供查表。 */
+	bareTool: string
+	/** 工具行文件名 chip（args.file_path 的 basename，PC .tool-file 同口径）；无则空串 */
+	fileName: string
+	/** edit 工具头部增删统计（PC .tool-diff-stat）：+N -M 拆两段着色；无则空串 */
+	diffAdd: string
+	diffDel: string
+	/** 思考行收口耗时（PC「已思考 (Ns)」的 Ns）；运行中为空串 */
+	thoughtTime: string
+}
+
+/** 文件变更卡的一行（summary.files[i] 的展示投影，只取 UI 需要的字段） */
+export type ChatFileChange = {
+	path: string
+	/** ADDED / MODIFIED / DELETED → A / M / D 徽标 */
+	kind: string
+	additions: number
+	deletions: number
+}
+
+/** 会话内单条消息；meta 为 AI 气泡底部的状态行。
+ *  blocks 是气泡直接子级、按帧时序平铺（桌面端 insertBeforeActions 同款），
+ *  text 仍是最终正文快照：历史 /messages 只给文本、滚动锚点也依赖它。 */
 export type ChatMessage = {
 	id: string
 	role: 'user' | 'ai'
@@ -73,6 +225,22 @@ export type ChatMessage = {
 	meta: string
 	status: ChatMsgStatus
 	thinking: boolean
+	blocks: ChatBlock[]
+	/** 用户消息的图片附件（imagePaths 经 /web/chat/attachment/meta 换回的 dataUrl 缩略图）：
+	 *  纯附件消息 text 只有「[图片N]」占位，图片本体全在这里（PC .user-attach-imgs 同款）。
+	 *  AI 消息恒为空数组。meta 拉取失败/降级时保持空数组——占位文案兜底，不留破图标。 */
+	imageUrls: string[]
+	/** 运行中插话（steer_applied）标记：PC appendSteerNote 同款——它是用户在任务
+	 *  执行中途补发的一句话，按【用户气泡】形态展示，仅多一枚「插话」身份徽标。
+	 *  旧的 notice 工具行形态（挂在 AI 轨迹里）已废弃：视觉像内核事件、不像用户说的话。
+	 *  普通用户消息恒为 false。 */
+	steer: boolean
+	/** 整轮 Compact 摘要头（done/stopped 后生成，只含状态词+耗时，如「已完成 12s」）；
+	 *  空=运行态。分类计数不再拼进长文本（窄屏折行遮挡真因），由 counts 驱动图标 chips。 */
+	summary: string
+	/** 摘要展开态，默认收起：只留最终正文 */
+	compactOpen: boolean
+	counts: { tools: number; reasons: number; agents: number; batches: number; texts: number }
 }
 
 export type Conversation = {
@@ -84,12 +252,24 @@ export type Conversation = {
 	messages: ChatMessage[]
 }
 
-/** 会话产出文件；icon 决定卡片占位图标（doc=文档类，image=图片类），详情字段待接口定义 */
+/** 会话产出文件（数据源 = 内核 GET /web/chat/changes/session，与桌面任务监控「产出」区同源）。
+ *  只做 UI 投影：内核返回的原始行见 hooks/useArtifacts.parseArtifacts。 */
 export type ArtifactFile = {
+	/** 会话工作区内的相对路径（原样透传给 filer/read 预览） */
+	path: string
+	/** 文件名（path 的 basename，卡片主文案） */
 	name: string
+	/** 扩展名（大写，无扩展名为空串）：卡片副标题的「MD 文件」用 */
+	ext: string
+	/** ADDED / MODIFIED / DELETED → A / M / D（与消息内文件变更卡同口径） */
 	kind: string
-	icon: 'doc' | 'image'
-	size: string
+	additions: number
+	deletions: number
+	/** 内核 binary 标记：true 时不做内联预览（仅元信息 + 提示到桌面端查看）。
+	 *  注意这是**账本历史**值，可能与当前内容不符，详情以内核当次返回为准。 */
+	binary: boolean
+	/** 扩展名判定为图片：只影响卡片图标（图片同样不做内联预览） */
+	image: boolean
 }
 
 /** 全局「对话」区的内部键：不落 UI（展示名走 i18n conv.title），也是 root='' 的映射键。
@@ -97,27 +277,14 @@ export type ArtifactFile = {
 export const DEFAULT_WORKSPACE: string = '__chat__'
 
 export const PERMISSIONS: PermissionOption[] = [
-	{ name: '默认权限', desc: '仅可访问当前工作空间内的文件', danger: false },
-	{ name: '允许完全访问', desc: '可读写本机文件并执行命令', danger: true }
+	{ name: 'default', labelKey: 'home.run.permDefault', descKey: 'home.run.permDefaultDesc', danger: false },
+	{ name: 'full', labelKey: 'home.run.permFull', descKey: 'home.run.permFullDesc', danger: true }
 ]
 
-export const SKILLS: SkillOption[] = [
-	{ name: '需求PRD转产品原型', desc: '需求PRD到产品原型 prd-to-prototype', badge: '需', color: '#b8860b' },
-	{ name: 'AI交付前全自动自检技能', desc: 'AI交付前全自动自检技能。任何一次向用户交付前自动校验', badge: 'A', color: '#2f8f5b' },
-	{ name: '合同条款审查与修订', desc: '站在指定一方立场修订不利条款，再做交叉矛盾检查', badge: '合', color: '#6b5bd2' },
-	{ name: 'B站评论分析', desc: '输入B站视频链接获取一级评论，支持分页与情感分析', badge: 'B', color: '#6b5bd2' },
-	{ name: '市场调研', desc: '提供市场分析、消费者洞察与竞品对比', badge: '市', color: '#4a8f4a' }
-]
+// 技能/连接器不再放演示数据：清单必须来自设备内核真实接口
+// （/web/settings/skills/installed、/web/settings/mcp/servers，见 hooks/useRunEnv.ts）。
+// 设备离线/未装任何技能时显示空态文案，绝不编造假条目。
 
-export const CONNECTORS: ConnectorOption[] = [
-	{ name: '腾讯会议', desc: '通过命令行创建、查询和管理腾讯会议。', enabled: true, color: '#2f7df6', icon: 'camera' },
-	{ name: '腾讯文档', desc: '创建、编辑和协作腾讯文档。用 AI 自动化处理文档。', enabled: false, color: '#2f7df6', icon: 'file' },
-	{ name: 'MasterGo 莫高设计', desc: '连接 MasterGo 画布，让 AI 进入设计流程。', enabled: false, color: '#4f8cff', icon: 'mountain' }
-]
-
-/** 演示产物清单：接口接入前对所有会话展示同一份（设计稿 S3 弹层示例数据） */
-export const ARTIFACTS: ArtifactFile[] = [
-	{ name: '信息架构梳理.md', kind: 'MD', icon: 'doc', size: '12.4 KB' },
-	{ name: '首页与侧栏结构图.png', kind: 'PNG', icon: 'image', size: '2.4 MB' },
-	{ name: 'gwork-mobile-v3.html', kind: 'HTML', icon: 'doc', size: '318.3 KB' }
-]
+// 产物清单不再放演示数据：必须来自设备内核真实账本
+// （GET /web/chat/changes/session，见 hooks/useArtifacts.ts）。
+// 设备离线 / 该会话尚无产出时显示空态文案，绝不编造假文件名。

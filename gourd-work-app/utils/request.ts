@@ -41,8 +41,23 @@ export type ApiClient = {
 	connect: ApiMethodFn
 }
 
-/** 响应判定结果：ok 表示成功；失败时 message 为展示文案，silent 为 true 时不弹 toast（由实例自行处理） */
-export type ResponseVerdict = { ok: true } | { ok: false; message: string; businessCode?: number; silent?: boolean }
+/**
+ * 响应判定结果：ok 表示成功；失败时 message 为展示文案，silent 为 true 时不弹 toast（由实例自行处理）。
+ *
+ * 为什么不是 `{ok:true} | {ok:false; message:string; ...}` 的可辨识联合：
+ * 本项目 tsconfig 是 `strict: false`（strictNullChecks 关闭），TS 不会按 `ok` 的真假收窄
+ * 联合成员，`if (verdict.ok) ... else verdict.message` 会报 TS2339「Property 'message' does
+ * not exist」。故改为「成功/失败共用一组可选字段 + 使用处兜底」：类型检查干净，运行时语义不变。
+ */
+export type ResponseVerdict = {
+	ok: boolean
+	/** 失败时给用户看的文案；成功时不需要 */
+	message?: string
+	/** 后端业务码（HTTP 状态或信封 code），仅用于 ApiError 携带 */
+	businessCode?: number
+	/** true=调用方自行提示，工厂不弹 toast */
+	silent?: boolean
+}
 
 /** 各实例自定义的响应判定，只决定成败与文案，不做通用的 HTTP 解析 */
 export type ResponseInterceptor = (statusCode: number, body: ApiBody | null) => ResponseVerdict
@@ -122,8 +137,8 @@ export function createApiClient(config: ApiClientConfig): ApiClient {
 						resolve({ ...res, data: body as T })
 						return
 					}
-					if (!verdict.silent) showError(verdict.message)
-					reject(new ApiError(verdict.message, config.errorSubject, res.statusCode, verdict.businessCode ?? 0, body))
+					if (!verdict.silent) showError(verdict.message ?? i18n.global.t('request.failed'))
+					reject(new ApiError(verdict.message ?? i18n.global.t('request.failed'), config.errorSubject, res.statusCode, verdict.businessCode ?? 0, body))
 				},
 				fail: () => {
 					const message = i18n.global.t('request.network')

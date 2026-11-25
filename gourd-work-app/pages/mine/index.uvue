@@ -308,7 +308,7 @@
 
 		&__email {
 			margin-top: 4px;
-			font-size: 11.5px;
+			font-size: 12px;
 			color: var(--color-text-tertiary);
 			overflow: hidden;
 			text-overflow: ellipsis;
@@ -346,7 +346,7 @@
 
 		&__label {
 			flex: 1;
-			font-size: 13.5px;
+			font-size: 14px;
 			font-weight: 600;
 			color: var(--color-text);
 		}
@@ -380,7 +380,7 @@
 		}
 
 		&__center {
-			font-size: 13.5px;
+			font-size: 14px;
 			font-weight: 700;
 			color: var(--color-text);
 
@@ -445,7 +445,7 @@
 
 		&__desc {
 			margin-top: 3px;
-			font-size: 11.5px;
+			font-size: 12px;
 			color: var(--color-text-tertiary);
 		}
 	}

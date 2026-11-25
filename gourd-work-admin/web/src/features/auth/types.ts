@@ -43,6 +43,12 @@ export interface RegisterPayload {
   verification_code?: string
   aff_code?: string
   turnstile?: string
+  /**
+   * Mirrors `LoginPayload.passwordEncryptionEnabled`: when the admin has
+   * PASSWORD_LOGIN_ENCRYPTION on, the plaintext must not go on the wire here
+   * either — the register endpoint decrypts the same v2 envelope.
+   */
+  passwordEncryptionEnabled?: boolean
 }
 
 export interface PasswordResetPayload {

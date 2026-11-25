@@ -9,9 +9,9 @@
 				</view>
 				<view class="app-chat__hd">
 					<text class="app-chat__title" @click="onRename">{{ title }}</text>
-					<!-- 详情页环境行不展示权限段，仅设备与工作空间（设计稿 S3） -->
+					<!-- 头部只展示 设备 | 工作空间；权限入口收敛在运行弹层（与工作空间同组） -->
 					<app-env-bar class="app-chat__env" :device="device" :device-online="deviceOnline"
-						:workspace="convWorkspace" :permission="permission" :show-permission="false"
+						:workspace="convWorkspace"
 						@open-run="runSheetVisible = true"></app-env-bar>
 				</view>
 				<view class="app-chat__icon" @click="onNewChat">
@@ -35,10 +35,14 @@
 						<!-- 气泡宽度上限靠定宽 wrapper 实现：UCSS 的 max-width 不支持百分比；AI 消息占满整行，用户消息 82% 上限 -->
 						<view class="app-chat__bubble-wrap"
 							:class="msg.role === 'user' ? 'app-chat__bubble-wrap--user' : 'app-chat__bubble-wrap--ai'">
-							<app-chat-bubble :message="msg"></app-chat-bubble>
+							<app-chat-bubble :message="msg" :show-head="headIds.indexOf(msg.id) >= 0"
+								@approve="onInteractApprove" @answer="onInteractAnswer" @edit="onInteractEdit"></app-chat-bubble>
 						</view>
 					</view>
 				</list-item>
+				<!-- 底部留白：最后一条消息贴着输入区时会被裁掉半行，滚到底也读不全。
+				     必须放在锚点之前：锚点要在最末尾，scroll-into-view 才是真正到底。 -->
+				<list-item style="height:10px;"></list-item>
 				<list-item style="height:1px;" id="msg-anchor-a" v-show="bottomAnchorId == 'msg-anchor-a'"></list-item>
 				<list-item style="height:1px;" id="msg-anchor-b" v-show="bottomAnchorId == 'msg-anchor-b'"></list-item>
 			</list-view>
@@ -49,22 +53,24 @@
 		<view v-if="expanded" class="app-chat__catcher" @click="expanded = false"></view>
 
 		<app-composer v-model="draft" :expanded="expanded" :model="model" :tag="attachTag" :processing="processing"
-			:column-style="colStyle" input-id="app-chat-composer-input" @expand="expanded = true"
+			:column-style="colStyle" input-id="app-chat-composer-input" :attachments="pendingAttachments" @expand="expanded = true"
 			@collapse="expanded = false" @send="onSend" @stop="onStop" @open-model="modelSheetVisible = true"
-			@open-plus="plusSheetVisible = true"></app-composer>
+			@open-plus="plusSheetVisible = true" @remove-attach="onRemoveAttach"></app-composer>
 
 		<app-run-sheet :visible="runSheetVisible" :device="device" :workspace="convWorkspace" :permission="permission"
 			:lock-env="true" @close="runSheetVisible = false" @update-permission="onUpdatePermission"></app-run-sheet>
 
 		<app-model-sheet :visible="modelSheetVisible" :model="model" :think="think" :context="context"
-			@close="modelSheetVisible = false" @confirm="onConfirmModel"></app-model-sheet>
+			@close="modelSheetVisible = false" @change="onChangeModel"></app-model-sheet>
 
 		<app-plus-sheet :visible="plusSheetVisible" :selected-skill="selectedSkill"
-			:connector-states="connectorStates" @close="plusSheetVisible = false" @attach="onAttach"
-			@select-skill="onSelectSkill" @toggle-connector="onToggleConnector"></app-plus-sheet>
+			:connector-states="connectorStates" @close="plusSheetVisible = false"
+			@select-skill="onSelectSkill" @toggle-connector="onToggleConnector" @attach="onAttach"></app-plus-sheet>
 
-		<app-artifact-sheet :visible="artifactSheetVisible" :artifacts="artifacts" @close="artifactSheetVisible = false"
-			@open="onOpenArtifact"></app-artifact-sheet>
+		<app-artifact-sheet :visible="artifactSheetVisible" :files="artifactFiles" :phase="artifactPhase"
+			:error="artifactError" :additions="artifactAdditions" :deletions="artifactDeletions"
+			:root="artifactRoot" @close="artifactSheetVisible = false"
+			@retry="onReloadArtifacts"></app-artifact-sheet>
 
 		<!-- APP 端禁用原生 dialogPage：其关闭动画期内重开会叠开原生页，滞留的透明页会吞掉全屏点击 -->
 		<rice-action-sheet v-model:show="menuVisible" :actions="menuActions" :use-dialog-page="false"
@@ -76,14 +82,15 @@
 </template>
 
 <script setup lang="ts">
-	import { computed, nextTick, ref, watch } from 'vue'
+	import { computed, nextTick, onUnmounted, ref, watch } from 'vue'
 	import type { ComputedRef, Ref } from 'vue'
 	import { i18n } from '@/locale/i18n.ts'
 	import { useViewport, CHAT_COLUMN_WIDTH } from '@/hooks/useViewport'
-	import { useRunEnv } from '@/hooks/useRunEnv'
-	import { useConversations } from '@/hooks/useConversations'
+	import { useRunEnv, permissionLabel } from '@/hooks/useRunEnv'
+	import { useConversations, inputWithinBudget } from '@/hooks/useConversations'
 	import { workspaceLabel } from '@/hooks/useWorkspaces'
 	import { gworkSignedIn } from '@/utils/gwork-auth.ts'
+	import { refreshAssistantIdentity } from '@/hooks/useAssistantIdentity'
 	import AppEnvBar from '@/components/app-env-bar/app-env-bar.uvue'
 	import AppComposer from '@/components/app-composer/app-composer.uvue'
 	import AppRunSheet from '@/components/app-run-sheet/app-run-sheet.uvue'
@@ -93,8 +100,10 @@
 	import AppInputDialog from '@/components/app-input-dialog/app-input-dialog.uvue'
 	import AppChatBubble from '@/components/app-chat-bubble/app-chat-bubble.uvue'
 	import type { ActionSheetAction } from '@/uni_modules/rice-ui/components/rice-action-sheet/type.uts'
-	import { ARTIFACTS } from '@/data/app-data'
-	import type { ArtifactFile, ChatMessage } from '@/data/app-data'
+	import { useArtifacts } from '@/hooks/useArtifacts'
+	import { DEFAULT_WORKSPACE } from '@/data/app-data'
+	import { pickCamera, pickAlbum, pickFile, mergeAttachments } from '@/utils/attach-picker'
+	import type { AskAnswer, ChatBlock, ChatMessage, ConnectorOption, PendingAttachment, SkillOption } from '@/data/app-data'
 
 	defineOptions({
 		name: 'app-chat',
@@ -130,7 +139,8 @@
 	const env = useRunEnv()
 	const {
 		activeConversation,
-		renameConversation, togglePin, removeConversation, sendMessage, stopMessage
+		renameConversation, togglePin, removeConversation, sendMessage, stopMessage,
+		approveHitl, answerQuestion, setQuestionAnswer
 	} = useConversations()
 
 	const {
@@ -140,8 +150,21 @@
 
 	const expanded: Ref<boolean> = ref<boolean>(false)
 	const draft: Ref<string> = ref<string>('')
-	// 接口接入前所有会话共用同一份演示清单（data/app-data.ts ARTIFACTS）
-	const artifacts: ArtifactFile[] = ARTIFACTS
+	/** 待发送附件（v1.1 内联 base64）：随下条消息发出后清空 */
+	const pendingAttachments: Ref<PendingAttachment[]> = ref<PendingAttachment[]>([])
+	// 产物弹层数据源：内核 /web/chat/changes/session（与桌面任务监控「产出」区同源）。
+	// 绝不使用演示数据——拉取失败由弹层自身落 error 态并可重试。
+	const {
+		files: artifactFiles, phase: artifactPhase, error: artifactError,
+		additions: artifactAdditions, deletions: artifactDeletions,
+		load: loadArtifacts, reset: resetArtifacts, invalidate: invalidateArtifacts
+	} = useArtifacts()
+	/** 产物预览必须透传的会话工作区根（path 相对它；多工作区下不传会读错文件） */
+	const artifactRoot: ComputedRef<string> = computed<string>((): string => {
+		const conv = activeConversation.value
+		if (conv == null) return ''
+		return conv.workspace === DEFAULT_WORKSPACE ? '' : conv.workspace
+	})
 	const runSheetVisible: Ref<boolean> = ref<boolean>(false)
 	const modelSheetVisible: Ref<boolean> = ref<boolean>(false)
 	const plusSheetVisible: Ref<boolean> = ref<boolean>(false)
@@ -183,11 +206,43 @@
 	const processing: ComputedRef<boolean> = computed<boolean>((): boolean => {
 		return messages.value.some((msg: ChatMessage): boolean => msg.role === 'ai' && msg.status === 'processing')
 	})
-	// 流式期间消息条数不变、只有尾条文本增长，滚动锚点需跟随文本长度一起抖动
+	// 消息数量 / 文本 / 过程块数量与内容变化后滚到底。
+	// 【旧实现只跟 text.length】流式期间工具与子智能体帧只往 blocks 里写（正文没变），
+	// scrollTick 不动 → 新行永远不触发滚动，用户停在半空看不到后续输出。
+	// 这里把「块数量 + 块内文本长度」一起算进签名，任何可见高度变化都能触发。
 	const scrollTick: ComputedRef<number> = computed<number>((): number => {
 		const list: ChatMessage[] = messages.value
 		const last: ChatMessage | undefined = list.length > 0 ? list[list.length - 1] : undefined
-		return list.length + (last != null ? last.text.length : 0)
+		if (last == null) return list.length
+		let weight: number = last.text.length + last.summary.length
+		last.blocks.forEach((item: ChatBlock): void => {
+			// 卡体常驻展示（不再由 expanded 门控），故有界正文长度始终计入高度签名：
+			// 长工具结果持续增长时 preview 有 120 字符上限，只盯 preview 会滚不到底。
+			weight += 1 + item.preview.length + Math.min(item.body.length, 2400)
+		})
+		return list.length * 1000000 + last.blocks.length * 1000 + weight
+	})
+
+	/** 身份头分配：对齐桌面 assistantRowShouldShowHead（app-message.js:677-699）。
+	 *  单位是「最近一条真实用户消息」——多轮对话每轮用户行后第一条 AI 行带头；
+	 *  同轮内的续段（插话 / 问答记录 / HITL 恢复段）省头。
+	 *  没有用户行（会话首条 / 异常 / 手工触发）时无条件带头：宁可多显示，不可丢头。 */
+	const headIds: ComputedRef<string[]> = computed<string[]>((): string[] => {
+		const list: ChatMessage[] = messages.value
+		const ids: string[] = []
+		let seenAiSinceUser: boolean = false
+		for (let i = 0; i < list.length; i++) {
+			const msg: ChatMessage = list[i]
+			if (msg.role === 'user') {
+				seenAiSinceUser = false
+				continue
+			}
+			if (seenAiSinceUser) continue
+			ids.push(msg.id)
+			seenAiSinceUser = true
+		}
+		// 会话首条若是 AI 行（回放起点无用户行）也带头——上面循环已天然覆盖
+		return ids
 	})
 	const pinned: ComputedRef<boolean> = computed<boolean>((): boolean => {
 		const conv = activeConversation.value
@@ -207,16 +262,78 @@
 	watch(activeId, (): void => {
 		initialScrollBottom.value = messages.value.length > 0
 		scrollTop.value = 0
+		// 产物清单按会话隔离：切走必须失效，否则上一条会话的产物会冒充当前会话
+		resetArtifacts()
 	})
 
-	// 消息数量或流式尾条文本变化后滚到底
+	// 助手名称（桌面上可在「设置 → 通用」改名）：设备上线后再拉一次，
+	// 启动期往往链路还没就绪，只靠 App.onLaunch 那一次会一直显示默认名
+	watch(deviceOnline, (online: boolean): void => {
+		if (online) refreshAssistantIdentity()
+	}, { immediate: true })
+
+	// 一轮任务跑完 → 产物账本已经变了。这里只「标脏」不清空：
+	// 屏上清单先留着（避免闪 loading），但下次打开弹层必须重新拉，否则用户
+	// 刚产出的文件在弹层里看不见（缓存冒充最新结果）。
+	watch(processing, (now: boolean, before: boolean): void => {
+		if (before && !now) invalidateArtifacts()
+	})
+
+	// 二次补滚 timer 持句柄：流式期间每帧都排一个 60ms 短 timer，
+	// 新帧到来先清旧的（同一批高度变化只需补滚一次），卸载时一并清理（项目 timer 纪律）
+	let scrollFixTimer: number = -1
+	// 消息数量或流式尾条内容变化后滚到底
 	watch(scrollTick, (): void => {
 		nextTick((): void => {
 			bottomAnchorId.value = bottomAnchorId.value === 'msg-anchor-a' ? 'msg-anchor-b' : 'msg-anchor-a'
 			// 限幅在 10 万~20 万间震荡：持续递增会累计到数百万，导致 list-view 内部状态异常（uni-ai-x 经验）
 			scrollTop.value = scrollTop.value > 100000 ? 100000 : scrollTop.value + 100000
 		})
+		if (scrollFixTimer !== -1) clearTimeout(scrollFixTimer)
+		scrollFixTimer = setTimeout((): void => {
+			scrollFixTimer = -1
+			// 二次补滚：list-item 高度在首帧后还会变（流式 text 折行、图标字体异步就绪），
+			// 只滚一次会停在「差一点点到底」的位置，表现为「到最底部展示有问题」
+			scrollTop.value = scrollTop.value > 100000 ? 100000 : scrollTop.value + 100000
+		}, 60)
 	})
+
+	onUnmounted((): void => {
+		if (scrollFixTimer !== -1) clearTimeout(scrollFixTimer)
+	})
+
+	/** 返回键拦截：聊天态内嵌弹层（重命名 > 长按菜单 > 产物 > 加号 > 模型 > 运行环境）先消化，
+	 *  宿主 onBackPress 经 ref 调用；返回 true 表示已消费。
+	 *  不做这一环时返回键会直接把会话抽屉盖上来，z-index 更高的弹层成孤儿浮在抽屉上 */
+	function handleBack(): boolean {
+		if (renameVisible.value) {
+			renameVisible.value = false
+			return true
+		}
+		if (menuVisible.value) {
+			menuVisible.value = false
+			return true
+		}
+		if (artifactSheetVisible.value) {
+			artifactSheetVisible.value = false
+			return true
+		}
+		if (plusSheetVisible.value) {
+			plusSheetVisible.value = false
+			return true
+		}
+		if (modelSheetVisible.value) {
+			modelSheetVisible.value = false
+			return true
+		}
+		if (runSheetVisible.value) {
+			runSheetVisible.value = false
+			return true
+		}
+		return false
+	}
+
+	defineExpose({ handleBack })
 
 	function t(key: string, values?: Record<string, string>): string {
 		if (values == null) return i18n.global.t(key)
@@ -247,6 +364,8 @@
 		if (conv == null) return
 		if (key === 'artifacts') {
 			artifactSheetVisible.value = true
+			// 打开即拉：force=false 时同会话已有成功结果直接复用（反复打开零网络）
+			loadArtifacts(conv)
 			return
 		}
 		if (key === 'rename') {
@@ -266,7 +385,7 @@
 
 	function onSend(text: string): void {
 		const content: string = text.trim()
-		if (content.length === 0) {
+		if (content.length === 0 && pendingAttachments.value.length === 0) {
 			uni.showToast({ title: t('home.emptySend'), icon: 'none' })
 			return
 		}
@@ -286,10 +405,22 @@
 			uni.showToast({ title: device.value.length === 0 ? t('chat.deviceRequired') : t('chat.deviceOffline'), icon: 'none' })
 			return
 		}
+		const atts: PendingAttachment[] = pendingAttachments.value
+		// 信封体积预检在清空草稿/附件之前：超限时用户输入必须原样保留
+		if (!inputWithinBudget(content, atts)) return
 		draft.value = ''
-		attachTag.value = ''
 		expanded.value = false
-		sendMessage(conv.id, content)
+		pendingAttachments.value = []
+		const accepted: boolean = sendMessage(conv.id, content, undefined, atts,
+			(failText: string, failAtts: PendingAttachment[]): void => {
+				// 异步失败回填：正文回草稿、附件回待发送列（按当前值重校验合并）
+				if (draft.value.length === 0) draft.value = failText
+				if (failAtts.length > 0) pendingAttachments.value = mergeAttachments(pendingAttachments.value, failAtts)
+			})
+		if (!accepted) {
+			draft.value = content
+			pendingAttachments.value = mergeAttachments(pendingAttachments.value, atts)
+		}
 	}
 
 	/** 停止当前回复：保留已吐出的内容并落「已停止」（对齐 uni-ai-x 的 state='stop'） */
@@ -299,47 +430,104 @@
 		stopMessage(conv.id)
 	}
 
+	/* ---- 交互卡（ask 问答 / HITL 审批）：气泡转发上来的三项操作，
+	        统一落到 useConversations 的作答链路（提交即续轮，内置失败回退） ---- */
+
+	function onInteractApprove(actionId: string, approved: boolean): void {
+		const conv = activeConversation.value
+		if (conv == null) return
+		approveHitl(conv.id, actionId, approved)
+	}
+
+	function onInteractAnswer(actionId: string): void {
+		const conv = activeConversation.value
+		if (conv == null) return
+		answerQuestion(conv.id, actionId)
+	}
+
+	function onInteractEdit(actionId: string, index: number, patch: AskAnswer): void {
+		const conv = activeConversation.value
+		if (conv == null) return
+		setQuestionAnswer(conv.id, actionId, index, patch)
+	}
+
 	function onUpdatePermission(name: string): void {
-		env.setPermission(name)
-		uni.showToast({ title: t('home.permission.switched', { name: name }), icon: 'none' })
+		// 受理才提示；失败回滚与报错在 setPermission 内完成。展示名走 i18n（name 是协议码）
+		if (!env.setPermission(name)) return
+		uni.showToast({ title: t('home.permission.switched', { name: permissionLabel(name) }), icon: 'none' })
 	}
 
-	function onConfirmModel(nextModel: string, nextThink: string, nextContext: string): void {
+	/** 选中即生效，不关闭弹层；与首页同口径 */
+	function onChangeModel(nextModel: string, nextThink: string, nextContext: string): void {
 		env.setModelConfig(nextModel, nextThink, nextContext)
-		modelSheetVisible.value = false
-		uni.showToast({ title: t('home.model.saved'), icon: 'none' })
 	}
 
-	// 产物详情页未实现，待接口接入后由弹层点卡片进入
-	function onOpenArtifact(artifact: ArtifactFile): void {
-		uni.showToast({ title: t('chat.artifact.detailPending'), icon: 'none' })
+	/** 重试：失败态点「重试」强制重拉（force=true 绕过复用门禁） */
+	function onReloadArtifacts(): void {
+		loadArtifacts(activeConversation.value, true)
 	}
 
-	function onAttach(name: string): void {
-		attachTag.value = name
+	function onSelectSkill(id: string): void {
+		// 再点同一技能=取消选择；id 是内核 slash 目录名，展示名走真实清单
+		const next: string = selectedSkill.value === id ? '' : id
+		selectedSkill.value = next
+		const found = env.skills.value.find((s: SkillOption): boolean => s.id === next)
+		attachTag.value = next.length > 0 ? t('home.skillTag', { name: found != null ? found.name : next }) : ''
 		plusSheetVisible.value = false
-		uni.showToast({ title: t('home.plus.attached', { name: name }), icon: 'none' })
+		if (next.length > 0) {
+			uni.showToast({ title: t('home.skills.selected', { name: found != null ? found.name : next }), icon: 'none' })
+		}
 	}
 
-	function onSelectSkill(name: string): void {
-		selectedSkill.value = name
-		attachTag.value = t('home.skillTag', { name: name })
-		plusSheetVisible.value = false
-		uni.showToast({ title: t('home.skills.selected', { name: name }), icon: 'none' })
-	}
-
-	function onToggleConnector(name: string): void {
-		const on: boolean = env.toggleConnector(name)
-		uni.showToast({
-			title: on ? t('home.connectors.on', { name: name }) : t('home.connectors.off', { name: name }),
-			icon: 'none'
+	function onToggleConnector(id: string): void {
+		// 成功 toast 由提交结果驱动（onDone 仅在内核受理成功后回调），失败回滚在 hook 内
+		env.toggleConnector(id, (on: boolean): void => {
+			const found = env.connectors.value.find((c: ConnectorOption): boolean => c.id === id)
+			const label: string = found != null ? found.name : id
+			uni.showToast({
+				title: on ? t('home.connectors.on', { name: label }) : t('home.connectors.off', { name: label }),
+				icon: 'none'
+			})
 		})
+	}
+
+	/** 附件三入口（v1.1 内联 base64）：拍照/相册/文件 → 压缩 → 待发送列。
+	 *  回填一律经 mergeAttachments 按当前值重校验（picker 互斥 + 限额兜底，防并发绕过） */
+	function onAttach(kind: string): void {
+		plusSheetVisible.value = false
+		const existing: PendingAttachment[] = pendingAttachments.value
+		if (kind === 'camera') {
+			pickCamera(existing).then((item: PendingAttachment | null): void => {
+				if (item != null) pendingAttachments.value = mergeAttachments(pendingAttachments.value, [item])
+			})
+			return
+		}
+		if (kind === 'album') {
+			pickAlbum(existing).then((items: PendingAttachment[]): void => {
+				if (items.length > 0) pendingAttachments.value = mergeAttachments(pendingAttachments.value, items)
+			})
+			return
+		}
+		pickFile(existing).then((items: PendingAttachment[]): void => {
+			if (items.length > 0) pendingAttachments.value = mergeAttachments(pendingAttachments.value, items)
+		})
+	}
+
+	function onRemoveAttach(index: number): void {
+		const next: PendingAttachment[] = []
+		for (let i = 0; i < pendingAttachments.value.length; i++) {
+			if (i !== index) next.push(pendingAttachments.value[i])
+		}
+		pendingAttachments.value = next
 	}
 </script>
 
 <style lang="scss">
 	.app-chat {
 		flex: 1;
+		// 键盘压缩视口时必须允许收缩（flex 子项默认 min-height:auto 会拒绝收缩，
+		// 底部输入盒被顶出可视范围——三轮报障「停止按钮被遮挡」的布局根因之一）
+		min-height: 0;
 		flex-direction: column;
 		// 状态栏高度由页面根节点 .home 统一让出，组件内不再重复加
 		padding-bottom: env(safe-area-inset-bottom);

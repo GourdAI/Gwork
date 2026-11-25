@@ -15,30 +15,34 @@
 				</template>
 			</rice-cell>
 
-			<rice-cell class="app-run__opt" :class="lockEnv ? 'app-run__opt--locked' : ''" :border="false" center
-				:custom-style="cellStyle" :title="t('home.run.workspace')"
-				:label="lockEnv ? t('conv.lockedEnvHint') : t('home.run.workspaceHint')"
-				:title-text-style="titleStyle" :label-style="descStyle" :value="workspace"
-				:value-text-style="valueStyle" :arrow="!lockEnv" arrow-direction="down"
-				@click="onTapEnv('ws')">
-				<template #leftIcon>
-					<view class="app-run__oi">
-						<text class="iconfont app-run__oi-font">&#xe67c;</text>
-					</view>
-				</template>
-			</rice-cell>
-
-			<rice-cell class="app-run__opt" :border="false" center :custom-style="cellStyle"
-				:title="t('home.run.permission')" :label="t('home.run.permissionHint')"
-				:title-text-style="titleStyle" :label-style="descStyle" :value="permission"
-				:value-text-style="permissionDanger ? valueDangerStyle : valueStyle"
-				@click="view = 'perm'">
-				<template #leftIcon>
-					<view class="app-run__oi">
-						<text class="iconfont app-run__oi-font">&#xe98b;</text>
-					</view>
-				</template>
-			</rice-cell>
+			<!-- 工作空间 + 权限模式同组一张卡（设计稿定稿）：两行无独立边框，
+			 中间细分隔线，圆角由外层卡裁切；权限行任何态都可调（会话内也能切档） -->
+			<view class="app-run__group">
+				<rice-cell class="app-run__opt app-run__opt--sub" :class="lockEnv ? 'app-run__opt--locked' : ''"
+					:border="false" center :custom-style="cellStyle" :title="t('home.run.workspace')"
+					:title-text-style="titleStyle" :label="lockEnv ? t('conv.lockedEnvHint') : ''"
+					:label-style="descStyle" :value="workspace"
+					:value-text-style="valueStyle" :arrow="!lockEnv" arrow-direction="down"
+					@click="onTapEnv('ws')">
+					<template #leftIcon>
+						<view class="app-run__oi">
+							<text class="iconfont app-run__oi-font">&#xe67c;</text>
+						</view>
+					</template>
+				</rice-cell>
+				<view class="app-run__group-sep"></view>
+				<rice-cell class="app-run__opt app-run__opt--sub" :border="false" center :custom-style="cellStyle"
+					:title="t('home.run.permission')" :title-text-style="titleStyle" :value="permissionLabel(permission)"
+					:value-text-style="permissionDanger ? valueDangerStyle : valueStyle" arrow arrow-direction="down"
+					@click="view = 'perm'">
+					<template #leftIcon>
+						<view class="app-run__oi" :class="permissionDanger ? 'app-run__oi--danger' : ''">
+							<text class="iconfont app-run__oi-font"
+								:class="permissionDanger ? 'app-run__oi-font--danger' : ''">&#xe98b;</text>
+						</view>
+					</template>
+				</rice-cell>
+			</view>
 		</view>
 
 		<view v-else-if="view === 'device'">
@@ -106,7 +110,7 @@
 		<view v-else>
 			<rice-cell v-for="item in PERMISSIONS" :key="item.name" class="app-run__opt"
 				:class="item.name === permission ? 'app-run__opt--on' : ''" :border="false" center
-				:custom-style="cellStyle" :title="item.name" :label="item.desc"
+				:custom-style="cellStyle" :title="permissionLabel(item.name)" :label="permissionDesc(item.name)"
 				:title-text-style="titleStyle" :label-style="descStyle"
 				@click="onPickPermission(item.name)">
 				<template #leftIcon>
@@ -135,6 +139,7 @@
 	import type { DeviceOption, WorkspaceOption } from '@/data/app-data'
 	import { useDevices } from '@/hooks/useDevices'
 	import { useWorkspaces, workspaceLabel } from '@/hooks/useWorkspaces'
+	import { permissionLabel, permissionDesc } from '@/hooks/useRunEnv'
 
 	defineOptions({
 		name: 'app-run-sheet',
@@ -252,6 +257,22 @@
 	}
 
 	function onPickPermission(name: string): void {
+		// 切到「允许完全访问」需二次确认（安全护栏，桌面同语义）：取消则停留原档位
+		if (name === PERMISSIONS[1].name && props.permission !== name) {
+			uni.showModal({
+				title: t('home.permission.confirmTitle'),
+				content: t('home.permission.confirmBody'),
+				confirmText: t('home.permission.confirmOk'),
+				cancelText: t('home.permission.confirmCancel'),
+				success: (r: ShowModalSuccess): void => {
+					if (r.confirm) {
+						emit('update-permission', name)
+						view.value = 'main'
+					}
+				}
+			})
+			return
+		}
 		emit('update-permission', name)
 		view.value = 'main'
 	}
@@ -291,6 +312,25 @@
 			&--sub-on {
 				background-color: var(--color-brand-soft) !important;
 			}
+		}
+
+		// 工作空间 + 权限模式同组卡（设计稿定稿：两行一张卡，中间细分隔线）
+		&__group {
+			flex-direction: column;
+			margin-bottom: 10px;
+			border-radius: 15px;
+			border-width: 1px;
+			border-style: solid;
+			border-color: var(--color-border);
+			background-color: var(--color-bg-card);
+			overflow: hidden;
+		}
+
+		&__group-sep {
+			height: 1px;
+			margin-left: 14px;
+			margin-right: 14px;
+			background-color: var(--color-border);
 		}
 
 		&__oi {

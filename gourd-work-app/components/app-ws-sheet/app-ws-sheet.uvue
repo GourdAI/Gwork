@@ -1,0 +1,164 @@
+<template>
+	<!-- 新对话的工作空间选择：未选择=对话（全局区固定首行），选中即生效并关闭。
+		侧栏不再承担选择职责，这里只影响「本次新对话」的归属空间 -->
+	<app-sheet :visible="visible" :title="t('home.workspace.title')" @close="emit('close')">
+		<rice-cell class="app-ws__opt" :class="isChat ? 'app-ws__opt--on' : ''" :border="false" center
+			:custom-style="cellStyle" :title="chatLabel" :title-text-style="titleStyle"
+			:label="t('home.ws.chatHint')" :label-style="descStyle" @click="onPick(DEFAULT_WORKSPACE)">
+			<template #leftIcon>
+				<view class="app-ws__oi">
+					<text class="iconfont app-ws__oi-font">&#xe7ab;</text>
+				</view>
+			</template>
+			<template #rightIcon>
+				<view v-if="isChat" class="app-ws__check">
+					<rice-icon name="checked" size="16px" color="var(--color-primary)" />
+				</view>
+			</template>
+		</rice-cell>
+
+		<text v-if="projects.length === 0" class="app-ws__empty">{{ t('home.ws.empty') }}</text>
+		<view v-else class="app-ws__list">
+			<rice-cell v-for="(item, index) in projects" :key="item.root" class="app-ws__opt app-ws__opt--sub"
+				:class="rowClass(index, item)" :border="false" center :custom-style="cellStyle"
+				:title="item.name" :title-text-style="titleStyle" @click="onPick(item.root)">
+				<template #leftIcon>
+					<view class="app-ws__oi">
+						<text class="iconfont app-ws__oi-font">&#xe67c;</text>
+					</view>
+				</template>
+				<template #rightIcon>
+					<view v-if="item.root === currentWs" class="app-ws__check">
+						<rice-icon name="checked" size="16px" color="var(--color-primary)" />
+					</view>
+				</template>
+			</rice-cell>
+		</view>
+	</app-sheet>
+</template>
+
+<script setup lang="ts">
+	import { computed } from 'vue'
+	import type { ComputedRef } from 'vue'
+	import { i18n } from '@/locale/i18n.ts'
+	import AppSheet from '@/components/app-sheet/app-sheet.uvue'
+	import { DEFAULT_WORKSPACE } from '@/data/app-data'
+	import type { WorkspaceOption } from '@/data/app-data'
+	import { useWorkspaces, workspaceLabel } from '@/hooks/useWorkspaces'
+
+	defineOptions({
+		name: 'app-ws-sheet',
+		styleIsolation: 'app-and-page'
+	})
+
+	const props = withDefaults(defineProps<{
+		visible: boolean
+	}>(), {
+		visible: false
+	})
+
+	const emit = defineEmits<{
+		(e: 'close'): void
+		(e: 'select', root: string): void
+	}>()
+
+	const spaces = useWorkspaces()
+	const currentWs: ComputedRef<string> = computed<string>((): string => spaces.current.value)
+	const isChat: ComputedRef<boolean> = computed<boolean>((): boolean => currentWs.value === DEFAULT_WORKSPACE)
+	const projects: ComputedRef<WorkspaceOption[]> = computed<WorkspaceOption[]>((): WorkspaceOption[] => spaces.projects.value)
+	const chatLabel: ComputedRef<string> = computed<string>((): string => workspaceLabel(DEFAULT_WORKSPACE))
+
+	// 选中态底色铺在外层卡片上，cell 自身透明（与 run-sheet 同口径）
+	const cellStyle: UTSJSONObject = { backgroundColor: 'transparent', padding: '13px 14px' }
+	const titleStyle: UTSJSONObject = { color: 'var(--color-text)', fontSize: '13.5px', fontWeight: '700' }
+	const descStyle: UTSJSONObject = { color: 'var(--color-text-tertiary)', fontSize: '11px', lineHeight: '15.4px', marginTop: '3px' }
+
+	function t(key: string): string {
+		return i18n.global.t(key)
+	}
+
+	function rowClass(index: number, item: WorkspaceOption): string {
+		let cls: string = index > 0 ? 'app-ws__opt--sub-top' : ''
+		if (item.root === currentWs.value) {
+			cls += cls.length > 0 ? ' app-ws__opt--sub-on' : 'app-ws__opt--sub-on'
+		}
+		return cls
+	}
+
+	function onPick(root: string): void {
+		emit('select', root)
+	}
+</script>
+
+<style lang="scss">
+	.app-ws {
+		&__opt {
+			margin-bottom: 10px;
+			border-radius: 15px;
+			border-width: 1px;
+			border-style: solid;
+			border-color: var(--color-border);
+			background-color: var(--color-bg-card) !important;
+
+			&--on {
+				border-color: var(--color-primary);
+				background-color: var(--color-brand-soft) !important;
+			}
+
+			&--sub {
+				margin-bottom: 0;
+				border-width: 0;
+				border-radius: 0;
+				// 基类底色带 !important，子行透明底同口径升级，否则卡片底会透进子行
+				background-color: transparent !important;
+			}
+
+			&--sub-top {
+				border-top-width: 1px;
+				border-top-style: solid;
+				border-color: var(--color-border);
+			}
+
+			&--sub-on {
+				background-color: var(--color-brand-soft) !important;
+			}
+		}
+
+		&__oi {
+			width: 34px;
+			height: 34px;
+			margin-right: 12px;
+			border-radius: 11px;
+			align-items: center;
+			justify-content: center;
+			background-color: var(--color-bg-hover);
+		}
+
+		&__oi-font {
+			font-size: 18px;
+			color: var(--color-primary);
+		}
+
+		&__check {
+			margin-left: 5px;
+		}
+
+		&__list {
+			flex-direction: column;
+			margin-top: 4px;
+			margin-bottom: 10px;
+			border-radius: 15px;
+			border-width: 1px;
+			border-style: solid;
+			border-color: var(--color-border);
+			background-color: var(--color-bg-card);
+			overflow: hidden;
+		}
+
+		&__empty {
+			padding: 14px 4px;
+			font-size: 13px;
+			color: var(--color-text-tertiary);
+		}
+	}
+</style>

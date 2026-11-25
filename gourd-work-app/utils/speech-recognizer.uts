@@ -9,7 +9,7 @@
  * 本文件必须是 .uts（不能是 .ts）：蒸汽模式下 import UTS 插件的模块要参与 UTS 编译，
  * 插件才会被注册进原生编译管线；.ts 宿主不触发注册，插件会按普通 JS 模块解析，
  * 报 [plugin:uts] Could not resolve "android.content.Context"。
- * 与 uni-ai-x（.uts/.uvue 宿主 import uni-ai-md 插件）同构。
+ * 与 app-md-text.uvue（.uvue 宿主 import markdown-parse.uts 纯逻辑模块）同理。
  *
  * 插件用「插件根目录」import（@/uni_modules/gwork-speech），由编译器按平台解析到
  * utssdk 平台目录下的 index.uts 并注册原生编译；不能带 utssdk 平台路径（见 vite 插件
@@ -17,7 +17,7 @@
  */
 
 // #ifdef APP
-import { isSpeechAvailable, startListening, stopListening, cancelListening } from '@/uni_modules/gwork-speech'
+import { isSpeechAvailable, startListening, stopListening, cancelListening, openPermissionSettings } from '@/uni_modules/gwork-speech'
 // #endif
 // #ifdef APP-ANDROID || APP-HARMONY
 import type { SpeechError } from '@/uni_modules/gwork-speech/utssdk/interface.uts'
@@ -30,6 +30,18 @@ export type SpeechStartResult = {
 	ok: boolean
 	text: string | null
 	errorKey: string | null
+	/**
+	 * 权限终态专用：true = 系统不会再弹授权框（Android/鸿蒙勾「不再询问」；iOS 拒绝过即如此），
+	 * 宿主应弹「去设置」引导框而非普通 toast。其余失败恒 false。
+	 */
+	permissionBlocked: boolean
+}
+
+/** 跳转本应用系统设置页（权限被永久拒绝后的唯一恢复路径）；Web/小程序无操作 */
+export function openSpeechPermissionSettings(): void {
+	// #ifdef APP
+	openPermissionSettings()
+	// #endif
 }
 
 // 语言真源：业务宿主（app-composer.uvue，Vue 管线）按应用 locale 映射成 BCP-47 标签后注入。
@@ -98,7 +110,7 @@ export function isSpeechSupported(): boolean {
  */
 export function startSpeechSession(maxDurationMs: number, onPartial: (text: string) => void): Promise<SpeechStartResult> {
 	// #ifdef APP
-	if (active) return Promise.resolve<SpeechStartResult>({ ok: false, text: null, errorKey: null })
+	if (active) return Promise.resolve<SpeechStartResult>({ ok: false, text: null, errorKey: null, permissionBlocked: false })
 	active = true
 	settled = false
 	lastPartial = ''
@@ -113,7 +125,7 @@ export function startSpeechSession(maxDurationMs: number, onPartial: (text: stri
 				onPartial(text)
 			},
 			onResult: (text: string): void => {
-				finishSession({ ok: true, text: text, errorKey: null })
+				finishSession({ ok: true, text: text, errorKey: null, permissionBlocked: false })
 			},
 			onError: (error: SpeechError): void => {
 				console.error('gwork-speech', error.code, error.detail)
@@ -123,13 +135,19 @@ export function startSpeechSession(maxDurationMs: number, onPartial: (text: stri
 					probedAvailable = false
 				}
 				const key = ERROR_TEXT_KEY.get(error.code)
-				finishSession({ ok: false, text: null, errorKey: key != null ? key : 'home.voice.recognizeFail' })
+				// 权限被永久拒绝（勾「不再询问」/iOS 拒绝过）：宿主弹「去设置」引导框而非 toast
+				let blocked = false
+				if (error.code == 'permission') {
+					const flag = error.doNotAskAgain
+					blocked = flag != null && flag!
+				}
+				finishSession({ ok: false, text: null, errorKey: key != null ? key : 'home.voice.recognizeFail', permissionBlocked: blocked })
 			}
 		})
 	})
 	// #endif
 	// #ifndef APP
-	return Promise.resolve<SpeechStartResult>({ ok: false, text: null, errorKey: 'home.voice.unsupported' })
+	return Promise.resolve<SpeechStartResult>({ ok: false, text: null, errorKey: 'home.voice.unsupported', permissionBlocked: false })
 	// #endif
 }
 
@@ -144,9 +162,9 @@ export function stopSpeechSession(): void {
 		stopTimer = 0
 		// 插件层 3s 兜底也失效的极端情况：以已有中间结果落地，绝不悬挂
 		if (lastPartial.length > 0) {
-			finishSession({ ok: true, text: lastPartial, errorKey: null })
+			finishSession({ ok: true, text: lastPartial, errorKey: null, permissionBlocked: false })
 		} else {
-			finishSession({ ok: false, text: null, errorKey: 'home.voice.recognizeFail' })
+			finishSession({ ok: false, text: null, errorKey: 'home.voice.recognizeFail', permissionBlocked: false })
 		}
 	}, 5000)
 	stopListening()

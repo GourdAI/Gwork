@@ -76,7 +76,80 @@ const ALLOWED_PATHS: &[&str] = &[
     "/web/chat/sessions/delete",
     "/web/chat/sessions/rename",
     "/web/chat/projects",
+    // v1.1：技能/连接器选择器与附件缩略图回显。刻意不含 attachment/upload——
+    // multipart 过不了字符串信封，移动端附件走 /web/chat/input 内联 base64。
+    "/web/chat/mcp/select",
+    "/web/chat/attachment/meta",
+    // v1.2：会话产物流（移动端「全部产物」弹层与桌面任务监控「产出」区同源）。
+    // changes/session 是只读的跨 run 合并清单；filer/read 用于产物文本详情预览。
+    // 刻意不含 changes/undo/*、changes/reapply/*、filer/write：移动端不提供任何
+    // 改写产物的入口；也刻意不含 filer/raw——它是字节流端点（Java `ctx.output(bytes)`，
+    // 二进制过不了字符串信封），且 `resolveForRaw` 允许 50MB，放行只有流量与内存风险，
+    // 而移动端详情对图片走「请在桌面端查看」（见 app-artifact-sheet.openDetail）。
+    // filer/read 另受 ROOT_SCOPED_PATHS 的 root 闸门约束（见 query_root_of/root_scope_allowed）。
+    "/web/chat/changes/session",
+    "/web/chat/filer/read",
+    "/web/settings/skills/installed",
+    "/web/settings/mcp/servers",
 ];
+
+/// 需要额外校验 `root` 查询参数的路径（在 ALLOWED_PATHS 之外的第二道闸门）。
+///
+/// **Why this exists**：内核 `filer/read` 的契约是「`path` 必须落在 `root` 之内」，
+/// 而 `root` 本身**由调用方任意给出**（`FileService.resolveRoot` 只做
+/// `toAbsolutePath().normalize()`，不做注册校验；Rust `effective_root` 只要求绝对路径）。
+/// 也就是说 `root=C:\Users\me&path=.ssh/id_rsa` 能读到任意文件。桌面端可以直接这样做
+/// 是因为请求就发在用户自己的本机环回口上；但一旦这条路径进了设备链路白名单，
+/// 任何持有效移动端 token 的调用方（或被改写的后台）就获得了**远程任意文件读取**。
+/// 设备侧因此要求：`root` 要么为空（→ 内核自身 workspace），要么等于
+/// `projects.json` 里注册过的项目根——与移动端 UI 的唯一来源（/web/chat/projects）同口径。
+const ROOT_SCOPED_PATHS: &[&str] = &[
+    "/web/chat/filer/read",
+    "/web/chat/filer/raw",
+    "/web/chat/changes/session",
+];
+
+/// 从 query 串里取 `root` 参数（percent-decode 后 trim）。无该键返回 None。
+///
+/// 注意 `root=`（空值）与「没有 root 键」都表示「用内核自身 workspace」，两者都放行；
+/// 只有非空值才进注册校验。
+pub(crate) fn query_root_of(query: &str) -> Option<String> {
+    for pair in query.trim_start_matches('?').split('&') {
+        let mut kv = pair.splitn(2, '=');
+        if kv.next() == Some("root") {
+            let raw = kv.next().unwrap_or("");
+            return Some(percent_decode(raw).trim().to_string());
+        }
+    }
+    None
+}
+
+/// 路径归一化比较（`normalize_path` 消掉 `.`/`..`/相对前缀，Windows 再忽略大小写与尾分隔符）。
+fn same_root_path(a: &str, b: &str) -> bool {
+    let norm = |s: &str| {
+        let n = gourd_work_core::projects::normalize_path(std::path::Path::new(s));
+        let n = n.to_string_lossy().trim_end_matches(['/', '\\']).to_string();
+        if cfg!(windows) { n.to_lowercase() } else { n }
+    };
+    norm(a) == norm(b)
+}
+
+/// root 闸门：空 → 放行（内核 workspace）；非空 → 必须是 `projects.json` 注册的项目根。
+///
+/// **性能取舍**：`load_projects()` 每次都读一遍 `projects.json`（几 KB 的小文件）。
+/// 这里刻意不缓存：注册表随时会被桌面端增删项目，缓存就得处理失效，而这条路径
+/// 只由用户主动点产物卡片/打开弹层触发（不是轮询、不是每帧），一次小文件同步读
+/// 的代价远小于「用了过期白名单把合法根拒掉」或「放过已移除的根」的风险。
+/// 若将来这里被改成高频调用，再引入带 mtime 校验的缓存。
+pub(crate) fn root_scope_allowed(root: &str) -> bool {
+    let trimmed = root.trim();
+    if trimmed.is_empty() {
+        return true;
+    }
+    gourd_work_core::projects::load_projects()
+        .iter()
+        .any(|p| !p.path.trim().is_empty() && same_root_path(&p.path, trimmed))
+}
 
 // ─── 信封（§2）───────────────────────────────────────────────────────────────
 
@@ -176,6 +249,28 @@ pub(crate) fn input_session_from_res(body: &str) -> Option<String> {
         return None;
     }
     Some(sid.to_string())
+}
+
+/// query 串里的 sessionId（percent-decode 后 trim）。无该键返回 None。
+///
+/// 【为什么 GET 也要取 · 2026-11-24 用户报障「移动端看运行中任务一直卡住不动」】
+/// 移动端打开会话走 `GET /web/chat/replay?sessionId=…`（body 恒空），旧实现只认
+/// POST body 里的 sessionId → 手机查看他端（PC）发起的运行中任务时，gate 订阅
+/// 从未建立，内核流帧（含 done/error）一帧都到不了手机：占位永久「思考中」。
+/// 白名单内的会话级 GET（replay/messages/pendingQuestion 等）同样要 ensure。
+pub(crate) fn query_session_of(query: &str) -> Option<String> {
+    for pair in query.trim_start_matches('?').split('&') {
+        let mut kv = pair.splitn(2, '=');
+        if kv.next() == Some("sessionId") {
+            let raw = kv.next().unwrap_or("");
+            let sid = percent_decode(raw).trim().to_string();
+            if !sid.is_empty() && valid_session_id(&sid) {
+                return Some(sid);
+            }
+            return None;
+        }
+    }
+    None
 }
 
 /// 请求体里自带的 sessionId（续聊场景：input/interrupt 等都带）。
@@ -326,8 +421,31 @@ pub(crate) fn app_version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
 
+/// 判断 `http://` 之后的 `host[:port][/path]` 是否指向本机回环。
+///
+/// 明文 `ws://` 只在开发态（内核/后台都在 127.0.0.1）成立；对外部主机必须用
+/// https，否则 query 里的会话 token 会在网络上明文传输（见 `link_url`）。
+pub(crate) fn is_loopback_host(host_and_rest: &str) -> bool {
+    let authority = host_and_rest.split('/').next().unwrap_or("");
+    // Strip the port, keeping IPv6 brackets intact: `[::1]:3000` → `[::1]`.
+    let host = if let Some(rest) = authority.strip_prefix('[') {
+        match rest.split_once(']') {
+            Some((inner, _)) => inner,
+            None => return false,
+        }
+    } else {
+        authority.split(':').next().unwrap_or("")
+    };
+    matches!(host, "127.0.0.1" | "localhost" | "::1")
+}
+
 /// §2：`{base}/api/gwork/device/link?token=..&deviceId=..&name=..&platform=..&appVersion=..`
-/// host http→ws / https→wss（开发态 loopback base 是 http，映射成 ws）。
+/// host http→ws / https→wss。
+///
+/// **明文 `ws://` 只允许回环**：token 走 query（H5 无法设 WS header），若把
+/// `http://` 基址无条件下折成 `ws://`，任何自建或经环境变量改成 http 的部署都会
+/// 把会话凭据明文发到网络上。开发态 loopback 基址（127.0.0.1/localhost/[::1]）
+/// 仍然映射成 `ws://`，其余一律拒绝并要求 https。
 pub(crate) fn link_url(
     base: &str,
     token: &str,
@@ -340,6 +458,12 @@ pub(crate) fn link_url(
     let ws_base = if let Some(rest) = base.strip_prefix("https://") {
         format!("wss://{}", rest)
     } else if let Some(rest) = base.strip_prefix("http://") {
+        if !is_loopback_host(rest) {
+            return Err(format!(
+                "refusing plaintext ws:// for non-loopback account base (use https): {}",
+                base
+            ));
+        }
         format!("ws://{}", rest)
     } else {
         return Err(format!("account base has no http(s) scheme: {}", base));
@@ -423,6 +547,20 @@ pub(crate) async fn forward_to_kernel_with_timeout(
 ) -> ResEnvelope {
     if !ALLOWED_PATHS.contains(&req.path.as_str()) {
         return forbidden_res(&req.req_id);
+    }
+    // 第二道闸门：根目录类端点必须指向已注册项目根（否则等于远程任意文件读取）。
+    // query 的 `root` 与 `cwd`（→ X-Session-Cwd 头）都能决定内核的解析根，两者都要过闸；
+    // Java 的 resolveChangeRoot 虽然自己对 headerCwd 也做注册校验，但设备侧不能依赖
+    // 「另一侧恰好也校验了」——旧版/异构内核未必有那层。
+    if ROOT_SCOPED_PATHS.contains(&req.path.as_str()) {
+        if let Some(root) = query_root_of(&req.query) {
+            if !root_scope_allowed(&root) {
+                return forbidden_res(&req.req_id);
+            }
+        }
+        if !root_scope_allowed(&req.cwd) {
+            return forbidden_res(&req.req_id);
+        }
     }
     let method = match req.method.to_ascii_uppercase().as_str() {
         "GET" => reqwest::Method::GET,
@@ -785,9 +923,14 @@ async fn serve_connection(
                                 let cancel2 = cancel.clone();
                                 tokio::spawn(async move {
                                     let is_input = req.path == "/web/chat/input";
-                                    // 请求自带 sessionId（续聊）：先确保订阅，
-                                    // 内核开始跑时帧才不会漏（§2.3）。
-                                    if let Some(sid) = session_from_req_body(&req) {
+                                    // 请求自带 sessionId（续聊 POST body / 会话级
+                                    // GET query）：先确保订阅，内核开始跑时帧才
+                                    // 不会漏（§2.3）。GET replay 也 ensure——移动端
+                                    // 打开他端运行中的会话全靠这条路径建 gate 订阅
+                                    // （ensure 幂等，重复 GET 不会叠连接）。
+                                    let sid = session_from_req_body(&req)
+                                        .or_else(|| query_session_of(&req.query));
+                                    if let Some(sid) = sid {
                                         if let Ok(mut g) = subs.lock() {
                                             g.ensure(&sid, &origin, &kauth, &out, &cancel2);
                                         }
@@ -1215,6 +1358,51 @@ mod tests {
     }
 
     #[test]
+    fn query_session_of_reads_and_decodes_the_session_param() {
+        // 移动端打开会话的真实形态：GET replay，sessionId 在 query，body 恒空。
+        // 旧实现只认 POST body → 手机看他端运行中任务永远收不到 gate 帧（卡死真因）。
+        assert_eq!(
+            query_session_of("sessionId=work-ab12cd34&rounds=10"),
+            Some("work-ab12cd34".into())
+        );
+        assert_eq!(
+            query_session_of("?sessionId=work-1&afterSeq=42&limit=500"),
+            Some("work-1".into())
+        );
+        assert_eq!(query_session_of("root="), None);
+        assert_eq!(query_session_of("sessionId="), None);
+        // 非法 id 不建订阅（与 body 路径同口径防注入）。
+        assert_eq!(query_session_of("sessionId=..%2Fevil"), None);
+        assert_eq!(query_session_of("sessionId=work%2F1"), None);
+    }
+
+    #[test]
+    fn query_session_of_edge_forms_and_injection_guards() {
+        // review 补充边界（2026-11-24 二轮）：
+        // 键位置无关：sessionId 在中间/末尾同样命中。
+        assert_eq!(
+            query_session_of("rounds=10&sessionId=work-mid&beforeSeq=99"),
+            Some("work-mid".into())
+        );
+        assert_eq!(query_session_of("root=x&sessionId=work-tail"), Some("work-tail".into()));
+        // 首个 sessionId 非法即拒绝，绝不回退扫描后续重复键（防「合法键掩护注入键」）。
+        assert_eq!(query_session_of("sessionId=..%2Fevil&sessionId=work-ok"), None);
+        // 反斜杠 / 控制字符 / 空白（percent 编码后）同样拒绝。
+        assert_eq!(query_session_of("sessionId=work%5C1"), None);
+        assert_eq!(query_session_of("sessionId=work%0A1"), None);
+        assert_eq!(query_session_of("sessionId=work%201"), None);
+        // 超长 id（>128）拒绝：防订阅表被恶意撑爆。
+        let long = "a".repeat(129);
+        assert_eq!(query_session_of(&format!("sessionId={}", long)), None);
+        // 空 query / 无键 / 只有 '?'。
+        assert_eq!(query_session_of(""), None);
+        assert_eq!(query_session_of("?"), None);
+        // 相似键不误命中（xsessionId / sessionId2）。
+        assert_eq!(query_session_of("xsessionId=work-1"), None);
+        assert_eq!(query_session_of("sessionId2=work-1"), None);
+    }
+
+    #[test]
     fn session_from_req_body_json_and_form() {
         let mut req = ReqEnvelope {
             req_id: "r".into(), method: "POST".into(), path: "/web/chat/input".into(),
@@ -1299,6 +1487,30 @@ mod tests {
         let d = link_url("http://127.0.0.1:3000/", "t", &id, "n", "windows", "0.3.0").unwrap();
         assert!(d.starts_with("ws://127.0.0.1:3000/api/gwork/device/link?"));
         assert!(link_url("ftp://x", "t", &id, "n", "windows", "0").is_err());
+    }
+
+    #[test]
+    fn plaintext_ws_is_refused_outside_loopback() {
+        // The session token rides in the query (H5 cannot set WS headers), so a
+        // non-loopback http base would put a live credential on the wire in the
+        // clear. Only 127.0.0.1 / localhost / [::1] may degrade to ws://.
+        let id = DeviceIdentity { device_id: "dev-ab12cd34".into() };
+        for base in [
+            "http://example.com",
+            "http://192.168.1.10:3000",
+            "http://10.0.0.5",
+            "http://127.0.0.1.evil.com",
+        ] {
+            let err = link_url(base, "t", &id, "n", "windows", "0").unwrap_err();
+            assert!(err.contains("refusing plaintext ws://"), "{} → {}", base, err);
+        }
+        for base in ["http://localhost:3000", "http://[::1]:3000", "http://127.0.0.1"] {
+            assert!(
+                link_url(base, "t", &id, "n", "windows", "0").unwrap().starts_with("ws://"),
+                "{} must stay reachable for local dev",
+                base
+            );
+        }
     }
 
     #[test]
@@ -1425,6 +1637,60 @@ mod tests {
         let res = forward_to_kernel(&client, &origin, &None, &r).await;
         assert_eq!(res.status, 403);
         server.abort();
+    }
+
+    // ── 根目录闸门（防远程任意文件读取）──
+
+    #[test]
+    fn query_root_of_reads_and_decodes_the_root_param() {
+        assert_eq!(query_root_of("root="), Some(String::new()));
+        assert_eq!(query_root_of("root"), Some(String::new()));
+        assert_eq!(query_root_of("sessionId=work-1"), None);
+        assert_eq!(
+            query_root_of("sessionId=w&root=C%3A%5Cproj%20x"),
+            Some("C:\\proj x".to_string())
+        );
+        // 前导 ? 与参数顺序都不影响
+        assert_eq!(
+            query_root_of("?a=1&root=D%3A%2Fwork&b=2"),
+            Some("D:/work".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn root_scoped_paths_reject_unregistered_roots() {
+        // 空 root / 无 root 键 = 用内核自身 workspace，放行
+        assert!(root_scope_allowed(""));
+        assert!(root_scope_allowed("   "));
+        // 未注册的绝对路径必须被拒——这正是「远程任意文件读取」的入口形态
+        assert!(!root_scope_allowed("C:\\Windows\\System32"));
+        assert!(!root_scope_allowed("/etc"));
+
+        let (origin, server) = fake_kernel(Duration::ZERO).await;
+        let client = kernel_client();
+        // query root 越权 → 403，且不得打到内核
+        let mut r = req("/web/chat/filer/read");
+        r.query = "path=.ssh%2Fid_rsa&root=C%3A%5CWindows".into();
+        assert_eq!(forward_to_kernel(&client, &origin, &None, &r).await.status, 403);
+        // cwd 头同样能改解析根，也要拦
+        let mut r2 = req("/web/chat/filer/read");
+        r2.query = "path=.ssh%2Fid_rsa".into();
+        r2.cwd = "C:\\Windows".into();
+        assert_eq!(forward_to_kernel(&client, &origin, &None, &r2).await.status, 403);
+        // 空 root 的合法请求照常转发
+        let mut ok = req("/web/chat/filer/read");
+        ok.query = "path=README.md&root=".into();
+        let res = forward_to_kernel(&client, &origin, &None, &ok).await;
+        assert_eq!(res.status, 200);
+        server.abort();
+    }
+
+    #[test]
+    fn filer_raw_is_not_allowlisted() {
+        // 字节流端点过不了字符串信封，且上限 50MB；移动端从不调用它。
+        assert!(!ALLOWED_PATHS.contains(&"/web/chat/filer/raw"));
+        assert!(!ALLOWED_PATHS.contains(&"/web/chat/filer/write"));
+        assert!(!ALLOWED_PATHS.contains(&"/web/chat/changes/undo/file"));
     }
 
     #[tokio::test]

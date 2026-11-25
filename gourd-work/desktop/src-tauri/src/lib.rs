@@ -555,3 +555,44 @@ fn kernel_bridge_script(kernel_origin: &str) -> String {
         serde_json::Value::String(kernel_origin.to_string())
     )
 }
+
+#[cfg(test)]
+mod csp_contract_tests {
+    //! CSP × 内联样式契约（Rust 侧真值锁，与 desktop/test/csp-inline-contract.test.js 配对）。
+    //!
+    //! 【2026-11-23 事故】csp 从 null 改严格后，Tauri codegen 给每个 HTML 资产注入
+    //! 内联 <script> 的 sha256 hash；CSP3 规定 hash/nonce 出现时浏览器忽略
+    //! 'unsafe-inline' → titlebar_ui/ipc_bridge 运行时注入的 <style>、app-heatmap
+    //! 的 grid/月份轴内联 style 属性、app-turn-display 的限高窗补偿全被拦，
+    //! 即用户报障「窗控/月份轴/消息区」三症状。修复 = security 配置
+    //! dangerousDisableAssetCspModification: ["script-src","style-src"]。
+    //!
+    //! 这里读的是 generate_context! 编译进二进制的**真实配置**（不是磁盘 JSON），
+    //! 并用与 tauri-codegen / manager::set_csp 完全相同的 can_modify 判定，
+    //! 保证「构建产物里 hash 注入确实被禁」而不是「配置文件里写了但没生效」。
+
+    fn ctx() -> tauri::Context<tauri::Wry> {
+        tauri::generate_context!()
+    }
+
+    #[test]
+    fn csp_hash_injection_is_disabled_for_script_and_style() {
+        let c = ctx();
+        let d = &c.config().app.security.dangerous_disable_asset_csp_modification;
+        assert!(!d.can_modify("script-src"),
+            "script-src 的资产 hash 注入未禁用：unsafe-inline 会被浏览器忽略");
+        assert!(!d.can_modify("style-src"),
+            "style-src 的资产 hash 注入未禁用：运行时注入样式/内联 style 属性全被拦");
+    }
+
+    #[test]
+    fn csp_keeps_unsafe_inline_and_strict_directives() {
+        let c = ctx();
+        let csp = c.config().app.security.csp.as_ref()
+            .expect("csp 不得为 null（安全加固须保留）").to_string();
+        assert!(csp.contains("style-src") && csp.contains("'unsafe-inline'"),
+            "style-src 必须显式放行 unsafe-inline（窗控/热力图/批次窗的生存前提）");
+        assert!(csp.contains("object-src 'none'"), "object-src 'none' 不得丢失");
+        assert!(csp.contains("form-action 'none'"), "form-action 'none' 不得丢失");
+    }
+}

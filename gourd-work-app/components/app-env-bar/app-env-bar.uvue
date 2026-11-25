@@ -1,5 +1,6 @@
 <template>
-	<!-- 设计稿：运行环境整行是一个无边框无底色的按钮，设备 | 工作空间› | 权限› 三段 -->
+	<!-- 设计稿：运行环境整行是一个无边框无底色的按钮，设备 | 工作空间› 两段。
+		 权限不在头部展示（用户定稿）：入口收敛在「任务运行设置」弹层里，与工作空间同组。 -->
 	<view class="app-env-bar" @click="emit('open-run')">
 		<view class="app-env-bar__dev">
 			<view class="app-env-bar__dev-icon">
@@ -14,48 +15,28 @@
 			<text class="app-env-bar__seg-name">{{ workspace }}</text>
 			<rice-icon name="arrow-right" size="12px" color="var(--color-text-tertiary)"></rice-icon>
 		</view>
-		<view v-if="showPermission" class="app-env-bar__sep"></view>
-		<view v-if="showPermission" class="app-env-bar__seg">
-			<text class="iconfont app-env-bar__seg-glyph"
-				:class="permissionDanger ? 'app-env-bar__seg-glyph--danger' : ''">&#xe98b;</text>
-			<text class="app-env-bar__seg-name"
-				:class="permissionDanger ? 'app-env-bar__seg-name--danger' : ''">{{ permission }}</text>
-			<rice-icon name="arrow-right" size="12px" color="var(--color-text-tertiary)"></rice-icon>
-		</view>
 	</view>
 </template>
 
 <script setup lang="ts">
-	import { computed } from 'vue'
-	import type { ComputedRef } from 'vue'
-	import { PERMISSIONS } from '@/data/app-data'
-
 	defineOptions({
 		name: 'app-env-bar',
 		styleIsolation: 'app-and-page'
 	})
 
-	const props = withDefaults(defineProps<{
+	withDefaults(defineProps<{
 		device: string
 		deviceOnline: boolean
 		workspace: string
-		permission: string
-		showPermission?: boolean
 	}>(), {
 		device: '',
 		deviceOnline: false,
-		workspace: '',
-		permission: '',
-		showPermission: true
+		workspace: ''
 	})
 
 	const emit = defineEmits<{
 		(e: 'open-run'): void
 	}>()
-
-	const permissionDanger: ComputedRef<boolean> = computed<boolean>((): boolean => {
-		return props.permission === PERMISSIONS[1].name
-	})
 </script>
 
 <style lang="scss">
@@ -123,29 +104,16 @@
 			align-items: center;
 		}
 
-		&__seg-glyph {
-			font-size: 12px;
-			color: var(--color-text-secondary);
-
-			&--danger {
-				color: var(--color-error);
-			}
-		}
-
 		&__seg-name {
 			margin-left: 4px;
 			margin-right: 5px;
-			max-width: 62px;
+			max-width: 96px;
 			font-size: 12px;
 			font-weight: 600;
 			color: var(--color-text-secondary);
 			overflow: hidden;
 			text-overflow: ellipsis;
 			white-space: nowrap;
-
-			&--danger {
-				color: var(--color-error);
-			}
 		}
 	}
 </style>

@@ -21,6 +21,12 @@ export type SpeechError = {
 	code: SpeechErrorCode
 	/** 平台原始错误码/描述，仅用于日志排查，不参与 UI 文案 */
 	detail: string
+	/**
+	 * permission 码专用：true = 用户拒绝且系统不会再弹授权框（Android 勾「不再询问」/
+	 * iOS 拒绝过一次），此时只能引导去系统设置手动开启；false/缺省 = 普通拒绝，可再次申请。
+	 * Android 端派发；iOS/鸿蒙暂不区分（缺省按普通拒绝处理）。
+	 */
+	doNotAskAgain?: boolean
 }
 
 export type StartListeningOptions = {

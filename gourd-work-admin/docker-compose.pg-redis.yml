@@ -1,15 +1,27 @@
 # 本地全栈部署：修改后的源码构建 + PostgreSQL + Redis
 #
-# 启动：docker compose -f docker-compose.pg-redis.yml up -d --build
+# 启动：先准备 .env（见 .env.example 里的 GWORK_DB_PASSWORD / GWORK_REDIS_PASSWORD），
+#   然后 docker compose -f docker-compose.pg-redis.yml --env-file .env up -d --build
 # 停止：docker compose -f docker-compose.pg-redis.yml down
 # 日志：docker compose -f docker-compose.pg-redis.yml logs -f
-# 访问：http://localhost:3000 或 http://<本机局域网IP>:3000（首次进入完成初始化向导创建管理员）
-# 端口绑定 0.0.0.0：允许局域网内其他设备通过宿主机 IP 访问；localhost/127.0.0.1 同样可用。
-# 若只想对单个网卡开放，改回 "192.168.x.x:3000:3000"；若只保留本机访问，改回 "127.0.0.1:3000:3000"。
+# 访问：http://localhost:3000（首次进入完成初始化向导创建管理员）
+#
+# 【安全默认值】端口只绑回环 127.0.0.1：这个 compose 用的是开发凭据，
+# 以前的 0.0.0.0 绑定让同网段任何主机都能直连后台，绕开公网 nginx 的全部限制。
+# 需要局域网调试时用 GWORK_BIND_ADDR 显式放开，例如：
+#   $env:GWORK_BIND_ADDR='192.168.1.10'; docker compose ... up -d
+#
+# 数据库/缓存口令**没有默认值**：GWORK_DB_PASSWORD / GWORK_REDIS_PASSWORD 未设置时
+# 直接启动失败（compose 的 :? 语法），而不是静默用 `123456` 这种弱口令起一套
+# 对内网可达的数据库。口令请用 URL/ Shell 安全字符（字母数字 + `-_.~`），
+# 因为 SQL_DSN 是 URL、Redis 的 requirepass 经 shell 展开，`@ : / # " $` 会破坏解析。
+#
+# 【已有 pg_data 卷】POSTGRES_USER 保持 `root` 不改：官方 postgres 镜像只在
+# PGDATA 为空时执行 initdb，改用户名对已有卷无效（角色仍是 root），却会让
+# SQL_DSN 以不存在的 `gwork` 角色认证，整栈起不来。强口令由下面的 :? 保证。
 #
 # 与仓库 docker-compose.yml 的区别：app 服务由 image: calciumion/new-api:latest
 # 改为 build: . + Dockerfile.local，确保运行的是本地修改过的源码（含 installers 功能）。
-# 数据库/缓存连接串沿用仓库官方配置。
 
 services:
   gourd-work-admin:
@@ -21,18 +33,20 @@ services:
     restart: unless-stopped
     command: --log-dir /app/logs
     ports:
-      - "0.0.0.0:3000:3000"
+      - "${GWORK_BIND_ADDR:-127.0.0.1}:3000:3000"
     volumes:
       - ./data:/data
       - ./logs:/app/logs
     environment:
-      - SQL_DSN=postgresql://root:123456@postgres:5432/new-api
-      - REDIS_CONN_STRING=redis://:123456@redis:6379
+      - SQL_DSN=postgresql://root:${GWORK_DB_PASSWORD:?GWORK_DB_PASSWORD must be set (no default dev password)}@postgres:5432/new-api
+      - REDIS_CONN_STRING=redis://:${GWORK_REDIS_PASSWORD:?GWORK_REDIS_PASSWORD must be set (no default dev password)}@redis:6379
       - TZ=Asia/Shanghai
       - ERROR_LOG_ENABLED=true
       - BATCH_UPDATE_ENABLED=true
       - NODE_NAME=gourd-work-admin-local
       - DEFAULT_LANGUAGE=zh-CN
+      # 本地 compose 走 http，secure cookie 无法生效；线上反向代理部署必须设 true
+      # （否则 refresh/logout 的 Origin 校验会被跳过）。
       - SESSION_COOKIE_SECURE=false
     depends_on:
       redis:
@@ -52,11 +66,15 @@ services:
     image: redis:latest
     container_name: gourd-work-admin-redis
     restart: unless-stopped
-    command: ["redis-server", "--requirepass", "123456"]
+    # 口令从环境变量注入；`command` 里的变量由 shell 展开，未设置时 compose 已在
+    # 上面用 :? 拦下，不会以无密码状态启动。
+    command: ["sh", "-c", "exec redis-server --requirepass \"$${GWORK_REDIS_PASSWORD}\""]
+    environment:
+      - GWORK_REDIS_PASSWORD=${GWORK_REDIS_PASSWORD:?GWORK_REDIS_PASSWORD must be set (no default dev password)}
     networks:
       - gourd-net
     healthcheck:
-      test: ["CMD-SHELL", "redis-cli -a 123456 ping | grep -q PONG"]
+      test: ["CMD-SHELL", "redis-cli -a \"$${GWORK_REDIS_PASSWORD}\" ping | grep -q PONG"]
       interval: 5s
       timeout: 3s
       retries: 10
@@ -66,15 +84,19 @@ services:
     container_name: gourd-work-admin-pg
     restart: unless-stopped
     environment:
-      POSTGRES_USER: root
-      POSTGRES_PASSWORD: 123456
-      POSTGRES_DB: new-api
+      - POSTGRES_USER=root
+      - POSTGRES_PASSWORD=${GWORK_DB_PASSWORD:?GWORK_DB_PASSWORD must be set (no default dev password)}
+      - POSTGRES_DB=new-api
+      # healthcheck 用 $${...}（容器 shell 展开）做带认证的查询，需要该变量进容器
+      - GWORK_DB_PASSWORD=${GWORK_DB_PASSWORD:?GWORK_DB_PASSWORD must be set (no default dev password)}
     volumes:
       - pg_data:/var/lib/postgresql/data
     networks:
       - gourd-net
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U root -d new-api"]
+      # pg_isready 只探端口、不校验角色/口令，旧卷或口令错配时会误报 healthy
+      # 并让 depends_on 放行业务容器；改用带认证的查询，确保应用真能连上。
+      test: ["CMD-SHELL", "PGPASSWORD=\"$${GWORK_DB_PASSWORD}\" psql -h 127.0.0.1 -U root -d new-api -c 'select 1' >/dev/null || exit 1"]
       interval: 5s
       timeout: 3s
       retries: 10

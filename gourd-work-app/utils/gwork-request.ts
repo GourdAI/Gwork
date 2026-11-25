@@ -11,7 +11,7 @@
  * 本实例不用工厂的 token 注入（access token 由 gwork-auth.ts 管理并在临期时
  * 先 refresh），故不配 tokenKey。
  */
-import { createApiClient, type ApiBody, type ApiClient, type ApiRequestOptions, type ApiResponse, type ResponseVerdict } from '@/utils/request.ts'
+import { createApiClient, ApiError, type ApiBody, type ApiClient, type ApiRequestOptions, type ApiResponse, type ResponseVerdict } from '@/utils/request.ts'
 import { i18n } from '@/locale/i18n.ts'
 import { GWORK_BASES, GWORK_REQUEST_TIMEOUT, originOf } from '@/config/gwork-config.ts'
 
@@ -74,8 +74,58 @@ function interceptGworkResponse(statusCode: number, body: ApiBody | null): Respo
 	}
 }
 
+/**
+ * 真正允许「匿名」的端点白名单（登录注册流程本身，以及用 Cookie 而非
+ * Bearer 鉴权的续期端点）。
+ *
+ * 本实例所有请求都写 `anon: true` 并手动带 Bearer（见文件头注释），因此
+ * `anon` 在这个实例里**不代表**「不需要身份」。缺了鉴权头却仍以匿名身份发出，
+ * 后台会回 401，用户只看到「未登录」而没人知道是漏写 header —— 更糟的是，
+ * 将来若某个业务接口误配成匿名可访问，漏写 header 的调用会**静默成功**。
+ * 所以除下面这批端点外，缺 Authorization 一律在发请求前抛错（fail-closed）。
+ */
+const GWORK_ANONYMOUS_PATHS: string[] = [
+	'/api/status',
+	'/api/user/login',
+	'/api/user/login/encryption-key',
+	'/api/user/register',
+	'/api/verification',
+	// 续期用 refresh cookie + X-Auth-Session，凭证不在 Authorization 头里；
+	// 放行它不会是漏洞（后台对 refresh 有自己的 Cookie/Origin/会话校验）。
+	'/api/user/auth/refresh'
+]
+
+function isAnonymousPath(path: string): boolean {
+	const bare: string = path.split('?')[0]
+	// /api/verification 带 query，其余为精确匹配；一律按去掉 query 后比较
+	return GWORK_ANONYMOUS_PATHS.indexOf(bare) >= 0
+}
+
 /** 对锁定站点发请求；未锁定时先探测 */
 async function call<T>(method: 'get' | 'post' | 'put', path: string, data?: Record<string, any> | null, options?: ApiRequestOptions): Promise<ApiResponse<T>> {
+	if (!isAnonymousPath(path)) {
+		const header: Record<string, string> | undefined = options != null ? options.header : undefined
+		let hasAuth: boolean = false
+		if (header != null) {
+			const keys: string[] = Object.keys(header)
+			for (let i = 0; i < keys.length; i++) {
+				if (keys[i].toLowerCase() === 'authorization' && header[keys[i]].length > 0) {
+					hasAuth = true
+					break
+				}
+			}
+		}
+		if (!hasAuth) {
+			// 漏带凭据的调用必须立刻失败，不能静默以匿名身份发出
+			throw new ApiError(
+				'gwork request without Authorization: ' + path,
+				'gwork',
+				0,
+				0,
+				null
+			)
+		}
+	}
 	const idx = await ensureGworkHost()
 	const client = clients[idx]
 	if (method === 'get') return client.get<T>(path, data, options)

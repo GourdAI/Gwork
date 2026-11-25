@@ -345,7 +345,13 @@ test('★ 双镜像同步：交互卡判定 / 漏斗接线 / 接管接线（desk
         const src = fs.readFileSync(f, 'utf8').replace(/\r\n/g, '\n');
         assert.ok(src.includes('function isInteractiveCard(el) {'), '模块缺交互卡判定: ' + f);
         assert.ok(src.includes('isInteractiveCard: isInteractiveCard,'), '模块出口缺判定: ' + f);
-        assert.ok(src.includes('if (isInteractiveCard(el)) {\n            closeBatchFor(bubble);'), '运行态缺边界分支: ' + f);
+        /* 接管路径（滚动窗轮修复）：骨架卡可能已带 data-turn-batch 入批，
+           必须先 detachInteractiveMember(el) 摘标记再 closeBatchFor(bubble) 收口，
+           否则收口把待审批卡一并折叠隐藏（审批按钮消失，任务卡死）。
+           旧断言钉「if 后直接 closeBatchFor」的旧形态，会把正确修复判红。 */
+        assert.ok(src.includes('if (isInteractiveCard(el)) {'), '运行态缺边界分支: ' + f);
+        assert.ok(/if \(isInteractiveCard\(el\)\) \{[\s\S]{0,400}?detachInteractiveMember\(el\);\s*\n\s*closeBatchFor\(bubble\);/.test(src),
+            '运行态边界分支必须先摘成员标记再收口（防审批卡被折叠吞掉）: ' + f);
     }
 });
 

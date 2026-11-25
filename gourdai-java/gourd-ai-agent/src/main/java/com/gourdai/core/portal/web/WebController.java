@@ -1231,11 +1231,41 @@ public class WebController {
     public Result chat_input(Context ctx, String input, UploadedFile[] attachments, String attachmentTypes[], String model, String sessionId,
                              String[] attachmentPaths, String[] attachmentPathTypes) {
         try {
+            // mobile-link v1.1：设备中转链路只能发字符串 body，移动端以 JSON 提交
+            // （附件内联 base64）。Solon 的 param()/表单绑定不读 JSON body——必须先
+            // 摊平，否则整条输入被静默当成空表单（丢 sessionId、丢 input、丢附件）。
+            // 表单/multipart 请求（桌面端）不进此分支，行为不变。
+            JsonInputBody json = null;
+            if (JsonInputBody.looksLikeJson(ctx)) {
+                try {
+                    json = JsonInputBody.parse(ctx);
+                } catch (IllegalArgumentException bad) {
+                    return Result.failure(400, bad.getMessage());
+                }
+                input = json.param("input");
+                model = json.param("model");
+                sessionId = json.param("sessionId");
+                attachments = json.filesArray();
+                attachmentTypes = json.fileTypesArray();
+                attachmentPaths = json.paramValues("attachmentPaths");
+                attachmentPathTypes = json.paramValues("attachmentPathTypes");
+            }
             if (sessionId == null || sessionId.isEmpty()) {
-                sessionId = ctx.headerOrDefault("X-Session-Id", "web");
+                // v1.1：移动端新任务不带 sessionId——必须铸造新 id 并随响应返回
+                // （data.sessionId，与 Rust 内核同构），设备侧据此订阅 gate。
+                // 旧行为兜底 "web" 只留给不带 JSON 的旧表单客户端（浏览器路径由
+                // getSessionId/X-Session-Id 头驱动，不受影响）。
+                sessionId = ctx.header("X-Session-Id");
+                if (Assert.isEmpty(sessionId)) {
+                    if (json != null) {
+                        sessionId = SessionLocator.PREFIX_WORK + java.util.UUID.randomUUID().toString().replace("-", "").substring(0, 12);
+                    } else {
+                        sessionId = "web";
+                    }
+                }
             }
             String sessionCwd = SessionCwdCodec.decode(ctx.header("X-Session-Cwd"));
-            String clientMessageId = ctx.param("clientMessageId");
+            String clientMessageId = json != null ? json.param("clientMessageId") : ctx.param("clientMessageId");
 
             if (sessionId.contains("..") || sessionId.contains("/") || sessionId.contains("\\")) {
                 ctx.status(400);
@@ -1251,12 +1281,12 @@ public class WebController {
                 }
             }
 
-            String hitlAction = ctx.param("hitlAction");
-            String questionAnswer = ctx.param("questionAnswer");
+            String hitlAction = json != null ? json.param("hitlAction") : ctx.param("hitlAction");
+            String questionAnswer = json != null ? json.param("questionAnswer") : ctx.param("questionAnswer");
             // 挂起任务身份标识：前端提交问答/审批时声明「正在回应哪一次调用」。
             // 不传时（旧前端）降级为旧行为，由 WebGate 记警告日志，见 WebGate#onChatInput 注释。
-            String actionId = ctx.param("actionId");
-            String accessMode = ctx.param("accessMode");
+            String actionId = json != null ? json.param("actionId") : ctx.param("actionId");
+            String accessMode = json != null ? json.param("accessMode") : ctx.param("accessMode");
 
             // busy 请求不允许改变活动任务的会话根；真正的原子 busy 判定在 WebGate 输入锁内完成。
             // questionAnswer 与 hitlAction 一样属于“恢复已挂起任务”的输入，不按 busy 拒绝。
@@ -1283,7 +1313,14 @@ public class WebController {
                 return Result.failure(409, "Action mismatch: the pending task has changed");
             }
 
-            // 返回简单 JSON，前端通过 WebSocket 接收 AI 结果
+            // 返回简单 JSON，前端通过 WebSocket 接收 AI 结果。
+            // v1.1：JSON 请求（设备中转）需要 data.sessionId 才能订阅 gate——
+            // 与 Rust 内核同构；旧表单客户端忽略多出的 data 字段，行为不变。
+            if (json != null) {
+                Map<String, Object> data = new LinkedHashMap<>();
+                data.put("sessionId", sessionId);
+                return Result.succeed(data);
+            }
             return Result.succeed();
         } catch (Throwable e) {
             LOG.error("[Web] chat_input error: {}", e.getMessage());

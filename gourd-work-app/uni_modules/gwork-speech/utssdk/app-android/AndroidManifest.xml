@@ -7,6 +7,10 @@
 			<action android:name="android.speech.RecognitionService" />
 		</intent>
 	</queries>
+	<!-- 录音权限随插件自带（manifest merge 保证）：不依赖宿主 manifest.json 配置正确。
+		历史事故：宿主把 permissions 错放 app-android 顶层（正确位置 distribute.permissions），
+		打包静默丢弃，APK 缺此权限 → 系统拒绝授权且不弹框，语音永远报权限错误 -->
+	<uses-permission android:name="android.permission.RECORD_AUDIO" />
 	<application>
 	</application>
 </manifest>

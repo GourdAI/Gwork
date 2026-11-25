@@ -189,14 +189,34 @@ pub trait WsTransport: Send + Sync {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct TungsteniteWs;
 
+/// v1.1 device-link message cap (PROTOCOL.md §2.1): `/web/chat/input` may
+/// carry inline base64 attachments (≤12MB encoded) and `res` bodies relay
+/// attachment/meta dataUrl batches (≤24MB). tungstenite's 64MB default would
+/// already pass those, but we pin an explicit 32MB budget so the contract is
+/// enforced here rather than inherited from a library default.
+pub const LINK_MAX_MESSAGE_BYTES: usize = 32 * 1024 * 1024;
+
+/// WebSocket config for the device link. `max_frame_size` stays at the
+/// library default: one message may span many frames, only the assembled
+/// message is bounded. Channels keep the defaults via `connect_async`.
+pub fn link_ws_config() -> tokio_tungstenite::tungstenite::protocol::WebSocketConfig {
+    // tungstenite 0.24: builder-style fields, not methods.
+    let mut cfg = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default();
+    cfg.max_message_size = Some(LINK_MAX_MESSAGE_BYTES);
+    cfg
+}
+
 #[async_trait]
 impl WsTransport for TungsteniteWs {
     async fn connect(&self, url: &str) -> anyhow::Result<WsPair> {
-        let connect = tokio_tungstenite::connect_async(url);
+        let connect = tokio_tungstenite::connect_async_with_config(url, Some(link_ws_config()), false);
+        // Only the redacted form may reach an error string: the raw URL carries
+        // the session token in its query and this text is written to disk.
+        let shown = redact_url(url);
         let (stream, _response) = tokio::time::timeout(WS_CONNECT_TIMEOUT, connect)
             .await
-            .map_err(|_| anyhow::anyhow!("WebSocket handshake timed out after 30s: {}", url))?
-            .map_err(|e| anyhow::anyhow!("WebSocket handshake failed for {}: {}", url, e))?;
+            .map_err(|_| anyhow::anyhow!("WebSocket handshake timed out after 30s: {}", shown))?
+            .map_err(|e| anyhow::anyhow!("WebSocket handshake failed for {}: {}", shown, e))?;
 
         let (sink, source) = stream.split();
         Ok(WsPair {
@@ -251,6 +271,68 @@ impl WsSource for TtSource {
 pub type SharedHttp = Arc<dyn HttpTransport>;
 /// Convenience alias used across the channel modules.
 pub type SharedWs = Arc<dyn WsTransport>;
+
+/// Log-safe rendering of a URL: scheme/host/path kept verbatim, credential
+/// bearing query **values** replaced with `[redacted]`.
+///
+/// WHY (measured, not guessed): the device-link socket carries its session JWT
+/// in the query string (`?token=…`, PROTOCOL.md §0/§5 — H5 cannot set WS
+/// headers). `TungsteniteWs::connect` used to interpolate the whole URL into
+/// its error string, which the desktop shell writes to
+/// `~/.gwork/logs/gwork-desktop.log`; a live access token then sat in a plain
+/// file on disk, re-written on every reconnect. Reporting the handshake target
+/// is genuinely useful for debugging, so the URL is redacted rather than
+/// dropped.
+pub fn redact_url(url: &str) -> String {
+    let Some(qidx) = url.find('?') else {
+        return url.to_string();
+    };
+    let (head, rest) = url.split_at(qidx);
+    let mut out = String::with_capacity(url.len());
+    out.push_str(head);
+    out.push('?');
+    for (i, pair) in rest[1..].split('&').enumerate() {
+        if i > 0 {
+            out.push('&');
+        }
+        match pair.split_once('=') {
+            Some((k, _)) if is_sensitive_query_key(k) => {
+                out.push_str(k);
+                out.push_str("=[redacted]");
+            }
+            _ => out.push_str(pair),
+        }
+    }
+    out
+}
+
+/// Query keys whose value must never reach a log file. Matched case-insensitively
+/// on the whole key (plus the usual `…_token` / `…Token` suffixes) so ordinary
+/// parameters such as `keyword` or `deviceId` stay readable.
+fn is_sensitive_query_key(key: &str) -> bool {
+    let k = key.trim().to_ascii_lowercase();
+    matches!(
+        k.as_str(),
+        "token"
+            | "access_token"
+            | "refresh_token"
+            | "id_token"
+            | "secret"
+            | "client_secret"
+            | "password"
+            | "api_key"
+            | "apikey"
+            | "key"
+            | "sig"
+            | "signature"
+            | "auth"
+            | "authorization"
+            | "cookie"
+    ) || k.ends_with("_token")
+        || k.ends_with("_secret")
+        || k.ends_with("_key")
+        || k.ends_with("_password")
+}
 
 pub(crate) fn truncate(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
@@ -483,6 +565,24 @@ mod tests {
         // or produce mojibake on a multi-byte boundary.
         assert_eq!(truncate("你好世界", 2), "你好…");
         assert_eq!(truncate("ab", 5), "ab");
+    }
+
+    #[test]
+    fn redact_url_hides_credential_values_only() {
+        let raw = "wss://h/api/gwork/device/link?token=eyJhbGciOi.eyJzdWIi.c2ln&deviceId=dev-1a2b&name=My%20PC";
+        let out = redact_url(raw);
+        assert!(!out.contains("eyJhbGciOi"), "token must be gone: {}", out);
+        assert!(out.contains("token=[redacted]"), "{}", out);
+        assert!(out.contains("deviceId=dev-1a2b"), "{}", out);
+        assert!(out.contains("name=My%20PC"), "{}", out);
+        assert!(out.starts_with("wss://h/api/gwork/device/link?"), "{}", out);
+    }
+
+    #[test]
+    fn redact_url_keeps_urls_without_query_and_plain_keys() {
+        assert_eq!(redact_url("wss://h/api/status"), "wss://h/api/status");
+        let out = redact_url("wss://h/p?keyword=abc&limit=10&refresh_token=x");
+        assert_eq!(out, "wss://h/p?keyword=abc&limit=10&refresh_token=[redacted]");
     }
 
     #[tokio::test]

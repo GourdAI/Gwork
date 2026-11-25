@@ -2,8 +2,19 @@
 <template data-mount=".main-area">
     <!-- Welcome View -->
     <div class="welcome-view welcome-compact" id="welcomeView">
+        <!-- 品牌吉祥物「团子」动图（GIF 透明底，亮/暗主题通用，无需按主题换图）。
+             静态品牌标 /img/favicon.png、/img/logo.svg 仍用于侧栏、会话头像与 favicon，
+             此处只替换新建任务页的商标位置。
+
+             用 <picture> 而非裸 <img>：GIF 的循环是图片解码层自带的，CSS 的
+             @media (prefers-reduced-motion) / theme.css 里那条全局 animation-duration
+             都**管不到**它，只能靠 media 属性整张换成静态首帧 PNG 才真正停住。
+             这比用 JS 监听 matchMedia 再改 src 更稳：不占主线程、不依赖脚本先于渲染执行。 -->
         <a class="welcome-avatar" href="https://www.gourdwork.com/" target="_blank" rel="noopener noreferrer">
-            <img src="/img/favicon.png" alt="GWork" />
+            <picture>
+                <source srcset="/img/mascot-tuanzi-static.png" media="(prefers-reduced-motion: reduce)" />
+                <img class="welcome-avatar-mascot" src="/img/mascot-tuanzi.gif" alt="GWork" />
+            </picture>
         </a>
         <div class="welcome-title" id="welcomeTitle" data-i18n="app.welcome_title">你好，我是 GWork ！</div>
         <!-- 活跃热力图卡片（与「使用统计」同口径，固定 26 周窗口）：位于 hero 与输入框之间；

@@ -75,6 +75,7 @@ function reconcileSessionRunning(sess, opts) {
             console.warn('[WebGate] reconcile: server idle, force finishStream for', sess.sessionId);
             sess.activeRunId = null;
             sess._pendingClientMessageId = null;
+            sess._pendingEchoIds = {};
             sess._awaitingSendAck = false;
             // 与正常 done 路径对齐：强制收尾也必须放行消息队列派发，
             // 否则早前因流式态被抑制的排队消息会永远不再触发。
@@ -363,16 +364,75 @@ function sendSteer(sess, text, imagePaths, filePaths) {
     });
 }
 
+/* 登记「已发出、尚未收到回显」的 clientMessageId（sendMessage / 队列派发 / busy 补发共用）。
+   集合逐条销账可覆盖整段在途窗口：单槽位 _pendingClientMessageId 连发两条时会被覆盖，
+   前一条的回显认不出自己 → 被当他人消息重复渲染。只保留最近 32 条，
+   避免异常路径（回显永不到达）无限增长。 */
+function registerPendingEchoId(sess, id) {
+    if (!sess || !id) return;
+    if (!sess._pendingEchoIds) sess._pendingEchoIds = {};
+    sess._pendingEchoIds[id] = true;
+    var echoKeys = Object.keys(sess._pendingEchoIds);
+    if (echoKeys.length > 32) {
+        for (var ek = 0; ek <= echoKeys.length - 32; ek++) delete sess._pendingEchoIds[echoKeys[ek]];
+    }
+}
+window.registerPendingEchoId = registerPendingEchoId;
+
 function sendMessage(forceQueue) {
     var inputEl = inChatMode ? chatInput : welcomeInput;
     var rawText = inputEl ? inputEl.value : '';
     var text = getInputText();
+    /* 技能小卡片注入：chip 表面是展示名、内部 data-skill-id 是真实 id。
+       后端斜杠技能协议（Java SkillInvocation / Rust 同口径）只认 "/id ..." 文本，
+       因此发送前把全部 chip 的 id 依次前置为 "/id " 段——多个技能即多段前缀，
+       服务端按序注入各技能规约。展示名与 chip 本身都不进入 wire 文本。
+
+       ⚠ prefix 只是「路由附加物」，不是用户键入的命令：isCommand 等一切
+       「用户是否手打了斜杠命令」的判定都必须基于 userTyped（注入前原文），
+       否则挂了 chip 的普通请求会因 text 以 / 开头被误判为命令，进而被下面的
+       「命令需 Tab 排队 / 命令不支持附件」拦截，消息发不出去。 */
+    var userTyped = text;
+    var chips = (inputEl && typeof getSkillChips === 'function') ? getSkillChips(inputEl) : [];
+    var chipIds = chips.map(function (c) { return c.id; });
+    /* 行首的子代理协议段（"@name "）。后端 WebGate / WsGate / CliShell 一律按
+       `input.startsWith("@")` + `indexOf(" ")` 剥出 agentName，剥完才把余下文本交给
+       命令/技能解析（SkillInvocation 又要求 `startsWith("/")`）。两道判定都锚在行首，
+       于是技能 id 前缀【必须插在 @ 段之后】：直接前置会把 @ 挤出首位 → agentName 恒
+       null → 子代理静默降级成一句普通提示词（chip 还挂在界面上，用户看不出异常）。
+       折叠分支替换正文时同理，必须把 @ 段一起带上（见下方 foldedEcho 处）。 */
+    var agentSegMatch = /^@\S+\s+/.exec(text);
+    var agentSeg = agentSegMatch ? agentSegMatch[0] : '';
+    var prefix = '';
+    if (chipIds.length > 0) {
+        for (var ci = 0; ci < chipIds.length; ci++) prefix += '/' + chipIds[ci] + ' ';
+        text = agentSeg + prefix + text.substring(agentSeg.length);
+        // rawText 只喂给 foldLongInputToAttachment（折叠成 TXT），不参与后端路由，
+        // 故按它自己的行首独立判定，避免 text 已 trim 而 rawText 未 trim 时切错偏移。
+        var rawSegMatch = /^@\S+\s+/.exec(rawText);
+        var rawAgentSeg = rawSegMatch ? rawSegMatch[0] : '';
+        rawText = rawAgentSeg + prefix + rawText.substring(rawAgentSeg.length);
+    }
     if (!text && pendingFiles.length === 0) return;
 
+    /* 只选了子代理、没写正文：后端子代理路由要求 `input.startsWith("@")` 且
+       `indexOf(" ") > 0`（WebGate:786 / WsGate:255 / CliShell:342 三处同口径）。
+       "@general" 没有那个空格 → agentName 恒为 null → 整串被当普通提示词发给
+       主代理，用户明明选了子代理却完全没生效，界面上也看不出任何异常。
+       注意 getInputText() 是 trim 过的，replaceCmdToken 补的尾随空格救不了这一种；
+       而补一句默认文本又会让子代理收到无信息量的指令。故就地拦下并提示补内容，
+       输入框文本、chip 与附件一律保留（与「命令不能带附件」同一种软拦截语义）。 */
+    if (!agentSeg && /^@\S+$/.test(text)) {
+        if (typeof showToast === 'function') {
+            showToast(GourdI18n.t('streaming.subagent_needs_content'), 'info');
+        }
+        return;
+    }
+
     /* 问答挂起路由：当前会话有待作答的结构化问答卡时，输入框文本等价于卡片内「其他补充」，
-       直接记为当前题的自定义答案，不得进入普通发送链路（streaming/steer/queue 行为不受影响）。
-       附件不能进答案（答案协议只有 text 字段）：先落盘再排入队列，等本轮作答恢复的任务结束后
-       由队列链路带附件发送——既不阻塞作答，也不静默吞掉附件。 */
+        直接记为当前题的自定义答案，不得进入普通发送链路（streaming/steer/queue 行为不受影响）。
+        附件不能进答案（答案协议只有 text 字段）：先落盘再排入队列，等本轮作答恢复的任务结束后
+        由队列链路带附件发送——既不阻塞作答，也不静默吞掉附件。 */
     if (activeSessionId && sessionMap[activeSessionId]
             && typeof getPendingQuestionState === 'function') {
         var pendingQuestion = getPendingQuestionState(sessionMap[activeSessionId]);
@@ -394,7 +454,9 @@ function sendMessage(forceQueue) {
     
     if (isBlocked) {
         var blockedSess = sessionMap[activeSessionId];
-        var isCommand = text && text.trim().charAt(0) === '/';
+        /* 命令判定基于 userTyped：用户手打 /clear 之类才算命令；chip 前缀不是。
+           否则挂技能的普通插话会被当成命令，撞上「命令需 Tab 排队」直接 return。 */
+        var isCommand = userTyped && userTyped.trim().charAt(0) === '/';
         if (isCommand && pendingFiles.length > 0) {
             // 命令是纯文本协议：带附件排队会被后端当普通消息发给模型（附件让命令判定失效），
             // 把 "/rerun" 变成一句提示词。明确拦下，而不是让用户事后发现命令没执行。
@@ -427,7 +489,11 @@ function sendMessage(forceQueue) {
         ? foldLongInputToAttachment(rawText) : false;
     if (folded === null) return;
     if (folded === true) {
+        /* 折叠替换正文后，技能 chip 与子代理段都不在替换文本里，必须一并补回，
+           否则用户挂着的技能/子代理会随折叠静默失效（chip 仍在界面上，更迷惑）。
+           顺序同样是 @ 段在前：后端剥 agentName 的判定锚在行首。 */
         text = GourdI18n.t('streaming.long_input_prompt');
+        if (chipIds.length > 0 || agentSeg) text = agentSeg + prefix + text;
         if (inputEl) {
             inputEl.value = '';
             inputEl._manualH = 0;
@@ -447,7 +513,21 @@ function sendMessage(forceQueue) {
     }
 
     // Build display text
+    /* 气泡回显「人读形态」：wire 文本为后端路由前置了 /id 段，
+       气泡里若照抄会把 _user_xxx 这类目录 id 甩给用户。改为 chip 展示名
+       （[名称] 标记）+ 用户可读正文。
+       展示名用函数开头捕获的 chips 快照，不再回查 DOM —— 折叠分支已清空
+       inputEl、且 chip 容器已独立，回查既拿不到正确正文也会指向空容器。
+       正文取 text 去掉【协议段】的部分：普通发送是用户原文，折叠后是
+       long_input_prompt（若此处误用 inputEl.value 会得到空串，气泡只剩技能名）。
+       要剥的是 agentSeg + prefix 两段（@ 段在行首、prefix 紧随其后），只按
+       prefix.length 切会留下半个 @name 尾巴或切进正文。 */
     var displayText = text || '';
+    if (chips.length > 0) {
+        var shown = '';
+        for (var ck = 0; ck < chips.length; ck++) shown += '[' + chips[ck].name + '] ';
+        displayText = shown + text.substring(agentSeg.length + prefix.length);
+    }
     if (!displayText && filesToSend.length > 0) {
         var first = filesToSend[0];
         if (first.attachmentsType === 'image') {
@@ -478,6 +558,10 @@ function sendMessage(forceQueue) {
     }
     appendUserMessage(sess, displayText, imageDataUrls, fileAttachments);
     sess._pendingClientMessageId = 'msg-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10);
+    registerPendingEchoId(sess, sess._pendingClientMessageId);
+    /* 无 id 帧兜底的身份依据：记下本轮乐观气泡的 wire 原文。旧 bundled UI（不带
+       clientMessageId）连新内核时，user 广播帧只能按「尾部同文」认亲（见 dispatch）。 */
+    sess._lastSentWireText = text;
     sess._requestStartSeq = sess.lastEventSeq || 0;
     sess._awaitingSendAck = true;
     sess._sendAckConfirmed = false;
@@ -788,6 +872,45 @@ function gateFrameScopeMismatch(chunk) {
     return (k !== null && k !== gateRxScopeKey);
 }
 
+/* 已提交水位推进。
+   insertBeforeActions 给主气泡每个块盖了单调递增的 data-ins-seq；本函数在「不可逆帧」
+   到达时把水位推到当前最大序号，意思是「序号 <= 水位的块已经代表真实发生过的副作用，
+   任何后续回滚都不得触碰」。
+
+   为什么需要水位而不是简单清空当前气泡：一个 run 只有一个 .msg-bubble，里面装着该 run
+   所有 turn 的块。流中断重传只作废<b>当前 turn</b>，而本 run 早前 turn 已经执行完的工具
+   （写过的文件、跑过的测试）是必须保留的证据。data-run-id 是 run 级，粒度太粗，用它删
+   会把证据一起抹掉。
+
+   只在主线路推进，两类帧刻意排除：
+   - 子代理帧（resolveAgentState 有归属）：其内容落在 .agent-card 内部，不参与主气泡扫描；
+   - 后台帧（args.background）：与主代理流式帧交错到达，拿它当水位会把主代理正在输出的
+     半成品提前锁成「已提交」，导致该回滚的回滚不掉。 */
+function advanceCommitWatermark(sess, chunk) {
+    if (!sess || !chunk) return;
+    if (chunk.args && chunk.args.background) return;
+    try {
+        if (typeof resolveAgentState === 'function' && chunk.args && resolveAgentState(sess, chunk.args)) return;
+    } catch (e) { /* 归属判定失败按主线路处理，宁可多提交也不误删 */ }
+    switch (chunk.type) {
+        // 工具真实执行完毕：卡片与其结果是副作用的凭证。
+        case 'action_end':
+        // 审批已放行 / 用户已作答：交互资产不可回滚。
+        case 'hitl_released':
+        case 'question_answered':
+        // turn 正常收口（context_size 由每个 turn 的 Done 发出，trace 是 run 级收口）。
+        case 'context_size':
+        case 'trace':
+        /* 上下文压缩分隔线：压缩是内核侧<b>已经发生且不可逆</b>的事实（messages 已被重写、
+           帧已落盘），与工具执行完毕同级。若不推进水位，本轮 LLM 流中途失败触发
+           discardPartialRetryDom 时会把分隔线一起摘掉 —— 屏幕上没有分隔线，而刷新/回放后
+           又出现，实时视图与历史分叉。 */
+        case 'context_compacted':
+            sess._commitSeq = sess._insSeq || 0;
+            break;
+    }
+}
+
 function onWebChunk(sess, chunk) {
     try {
         if (gateFrameScopeMismatch(chunk)) return;
@@ -811,6 +934,17 @@ function onWebChunk(sess, chunk) {
             return;
         }
 
+        /* tps_progress 是模型流式输出期间的 transient 速率帧（≥500ms 一帧，刻意不带 phase）。
+           与 agent_progress 同级的纯被动帧：只定向刷新用量卡里的 TPS / TTFT 两个 span。
+           必须在此短路，不得走下方完整路径，否则每帧都会：① 刷 lastEventAt / 清 silenceTimer，
+           把速率心跳喂给主流停滞看门狗；② removeInlineThinking 闪掉正在显示的内联思考指示器；
+           ③ inferPhaseFromType 降级推断覆写 sess.phase。历史回放（app-history.js 直接调本入口）
+           同样在此被拦下——该帧不落盘，但回放链路上仍做一次防御，避免单例 DOM 被历史帧写脏。 */
+        if (chunk.type === 'tps_progress') {
+            if (typeof window.updateContextTpsLive === 'function') window.updateContextTpsLive(sess, chunk);
+            return;
+        }
+
         // 事件活跃时间戮：看门狗/对账用它判断“是否长时间无任何事件”
         sess.lastEventAt = Date.now();
 
@@ -826,10 +960,9 @@ function onWebChunk(sess, chunk) {
         if (nextPhase) sess.phase = nextPhase;
 
         // 相位变化后，同步刷新「已经挂在页面上」的独立等待指示器（.thinking-row）文案。
-        // 它在发送时就被创建（showThinking），文案取当时的相位（waiting），此后只有内容帧
-        // 到达时才会被 removeThinking 整个移除 —— 于是一旦本轮不产出任何内容帧（如思维链被
-        // 屏蔽的模型：思考真实发生但文本全空），它就会长期停在「等待响应」并持续累加计时。
-        // 气泡内指示器（.inline-thinking）不在此处理：它每次显示都会重新 applyPhaseLabel。
+        // 【2026-11 指示器已退役】showThinking / showInlineThinking 均为 no-op（用户拍板
+        // 「底部思考中不要再展示，页面总是一跳一跳」），新会话不再产生 thinkingEl；
+        // 本分支只剩历史残留行的文案刷新兜底，保留不删。
         if (nextPhase && sess.thinkingEl && typeof applyPhaseLabel === 'function') {
             applyPhaseLabel(sess.thinkingEl, nextPhase);
         }
@@ -917,41 +1050,71 @@ function onWebChunk(sess, chunk) {
                 }
                 break;
     /* agent_start / agent_end 的收敛动作（finishThinkingBlock / finishPendingTool / clearRetryChunk）
-       对<b>前台</b>子代理帧是正确的：它经父 sink 下发，此刻主代理正阻塞在 ACTION 段等它，
-       主代理的思考/工具帧不可能同时到达，收敛不会误伤任何在途内容。
-       但<b>后台</b>帧（args.background，由 WebGate 旁路推送）与主代理自己的流式帧必然交错——
-       这正是「主代理提交后台任务后继续推进」的直接后果。此时若仍收敛，每来一个后台
-       start/end 帧就会把主代理<b>正在输出</b>的思考块强制定稿（文案改「思考完成」、清计时器、
-       清空 buffer），用户看到的是思考块被反复打断、内容撕裂成多条。 */
+       只在「主代理此刻不可能有在途内容」时才是安全的：前台子代理经父 sink 下发，主代理阻塞在
+       ACTION 段等它，收敛不会误伤；而后台帧（args.background）与主代理自己的流式帧必然交错——
+       这正是「主代理提交后台任务后继续推进」的直接后果。若仍收敛，每来一个后台 start/end 帧
+       就会把主代理<b>正在输出</b>的思考块强制定稿（文案改「思考完成」、清计时器、清空 buffer）。
+
+       【判据从「帧是否后台」扩到「帧是否属于本轮」】`args.background` 描述的是帧的**来源**，
+       而危险来自帧的**到达时机**：前台子代理的委派跑在 detach 的任务上（tools/agent.rs 前台
+       分支），父 run 被取消/结束后它仍会收尾，agent_end 可能落在「用户已发下一条消息、新一轮
+       正在流式输出」之后。此时 background=false，旧判据放行，正把新 run 的思考块提前定稿。
+       故额外比对卡片 data-run-id 与 sess.currentRunId：不相等即陈旧帧，跳过收敛。
+       卡片不存在（agent_start 的常态，那时还没建房）视为非陈旧，行为与改造前一致。 */
     case 'agent_start':
     case 'agent_end': {
         var isBgAgentFrame = !!(chunk.args && chunk.args.background);
-        if (!isBgAgentFrame) {
+        if (!isBgAgentFrame && !isStaleAgentFrame(sess, chunk.args)) {
             finishThinkingBlock(sess); finishPendingTool(sess); clearRetryChunk(sess);
         }
         appendAgentBadge(sess, chunk, chunk.type === 'agent_start');
         break;
     }
-            case 'error':  finishThinkingBlock(sess); finishAgentThinkingBlock(sess); clearRetryChunk(sess); if (typeof markToolCardFailed === 'function') markToolCardFailed(sess);
+            case 'error':  finishThinkingBlock(sess); finishAgentThinkingBlock(sess); clearRetryChunk(sess);
                 // 统一以红色错误块渲染，不再写入智能体卡片体：
                 // 后端 WebChunk.ofError 不携带 sessionId/agentName，无法可靠归属；
                 // 若写入某智能体卡，错误会被当作该智能体的正常正文渲染（误导），
                 // 且并行多智能体时归属无从选择。主对话错误块是唯一可靠位置。
+                /* discardPartial=true 来自 Frame::error_discarding（损坏门控在干净重试用尽后终止 run）。
+                   最后一次尝试的乱码 delta 已经渲染（乱码气泡 + 孤儿骨架工具卡），且不会再有 stream_retry
+                   来清理——stream_retry 只在重试*之前*发。必须在 appendErrorChunk 之前回滚：回滚删的是水位之上
+                   未提交的块，先建错误块再回滚会把刚建的错误块一并删掉。
+                   用户主动 Stop 的 cancel 路径不带 discardPartial：那里的半成品是用户想保留的真实产出，绝不能删。 */
+                if (chunk.discardPartial) {
+                    try { discardPartialRetryDom(sess); }
+                    catch (e) { reportStreamPipelineError('discardPartialRetryDom', e, chunk); }
+                } else if (typeof markToolCardFailed === 'function') {
+                    // 非丢弃路径才标失败：discardPartial 时卡片已被回滚移除，再标无意义且会写进游离节点。
+                    markToolCardFailed(sess);
+                }
                 appendErrorChunk(sess, chunk.text);
                 break;
             case 'retry':  finishThinkingBlock(sess); finishPendingTool(sess);
+                /* discardPartial=true 来自 Frame::stream_retry：transport 重发了一次<b>已经
+                   下发过 delta</b> 的请求。引擎侧已清空累加器，前端必须同步丢掉本次尝试渲染
+                   出来的半成品，否则重传后同一段答案出现两遍、骨架工具卡永远停在 loading。
+                   必须在 appendRetryChunk 之前执行：回滚会把 retryEl 一并清掉（它也在气泡里），
+                   先建提示再回滚会把刚建好的提示删掉。 */
+                if (chunk.discardPartial) {
+                    try { discardPartialRetryDom(sess); }
+                    catch (e) { reportStreamPipelineError('discardPartialRetryDom', e, chunk); }
+                }
                 // 后端不会转发子代理的 RetryEvent（TaskTalent 只转发 ContextUsage/ToolCallStart/ToolCallEnd/ReasonDelta/ReasonEnd），
                 // 故 retry 恒为主代理事件；且 WebChunk.ofRetry 不携带 agentName，无法归属，
                 // 始终在主对话展示重试提示（下一 chunk 到达时自动清除），不得写入智能体卡片体
                 appendRetryChunk(sess, chunk.text);
                 break;
         case 'hitl':   finishThinkingBlock(sess); finishAgentThinkingBlock(sess); finishPendingTool(sess); clearRetryChunk(sess); appendHitlCard(sess, chunk.toolName, chunk.command, chunk.actionId);
-            /* 【完全访问兜底自动放行 · 2026-11 用户报障「切了完全访问还弹授权框」·与 desktop 镜像一致】
-               会话档位已是 full 时这张卡本不该存在（Java 引擎按轮首快照门控，运行中切档对
-               本轮不生效）。渲染后立即走与点击批准完全相同的路径（handleHitlResponse）。
-               三重门禁：① 回放帧不触发（历史卡由 hitl_released 收口，重放批准会 ACTION_MISMATCH）；
-               ② 每 actionId 只自动提交一次（防失败回退→再渲染→再提交死循环）；
-               ③ 档位按会话查询，别的会话切 full 不影响本会话。 */
+            /* 【完全访问兜底自动放行 · 2026-11 用户报障「切了完全访问还弹授权框」】
+               会话档位已是 full 时这张卡本不该存在：后端旧内核按 run 启动时的快照门控，
+               运行中切档对已 spawn 的 run 不生效。这里按【本端会话档位】兜底：渲染后立即
+               走与点击批准完全相同的路径（handleHitlResponse），命令执行、结果回填、
+               失败回退全部复用既有链路。三重门禁防误放：
+               ① 回放帧不触发（历史里的 hitl 卡由 hitl_released/后续结果收口，重放批准会 409）；
+               ② 每 actionId 只自动提交一次（防失败回退→再渲染→再提交的死循环；失败后
+                  restoreHitlCardPending 恢复手动按钮，用户仍可点）；
+               ③ 档位查询按会话（modeForSession），别的会话切 full 不影响本会话。
+               新内核已在 bash 门活读档位，本分支正常情况下不会再命中，仅兜底旧内核/竞态。 */
             if (!sess._replaying && window.GourdAccessMode
                     && typeof window.GourdAccessMode.modeForSession === 'function'
                     && window.GourdAccessMode.modeForSession(sess.sessionId) === 'full') {
@@ -997,6 +1160,10 @@ function onWebChunk(sess, chunk) {
                         updateContextIndicator(chunk, sess);
                     } else if (!sess.lastContextChunk
                             || (chunk.createdAt || 0) >= (sess.lastContextChunk.createdAt || 0)) {
+                        // 后台会话只存快照、不碰单例 DOM。但结算清态必须与前台一致：
+                        // 否则残留的 _ctxLive 会在切回该会话时经 liveMetrics 覆盖这里刚存下的
+                        // 权威 generationMs/generatedTokens/ttftMs。
+                        if (typeof endContextLive === 'function') endContextLive(sess, chunk);
                         sess.lastContextChunk = chunk;
                     }
                 }
@@ -1009,6 +1176,10 @@ function onWebChunk(sess, chunk) {
                 }
                 break;
         }
+        // 水位推进必须在帧自身的 DOM 建完之后：insertBeforeActions 已为它盖好序号，
+        // 此刻把水位推到最大序号才等于「本帧产出已提交」。放在 switch 外统一判定，
+        // 避免在每个 case 里各写一遍而漏帧。
+        advanceCommitWatermark(sess, chunk);
         sess.silenceTimer = setTimeout(function() {
             if (!sess.isStreaming) return;
             // 存在活跃子智能体卡片时：运行中状态由卡片头部状态标识闪烁表示，
@@ -1196,12 +1367,55 @@ function finishStream(sess, opts) {
     sess._lastCreatedAt = null;
 
     // 轮末收敛：把该轮变更卡片定位到本轮节点组末尾（流式中新节点可能晚于卡片到达）
-    if (typeof window.repositionFileChangeCards === 'function') window.repositionFileChangeCards(sess);
+    if (typeof window.repositionFileChangeCards === 'function') {
+        try { window.repositionFileChangeCards(sess); } catch (e) { /* 收尾不允许中断 */ }
+    }
+    // 左侧产出面板轮末即时刷新（不再只等 6s 轮询）；挂起态多一次 GET 亦无害，
+    // refreshTaskMonitor 内部自带 isOpen / 欢迎页门禁。必须用 try 包住：此处位于
+    // finishStream 中段，任何同步异常都会跳过后面全部 DOM 收尾与状态复位。
+    try {
+        if (typeof window.refreshTaskMonitor === 'function') window.refreshTaskMonitor();
+    } catch (e) { /* 收尾不允许中断 */ }
 
     // 流式结束，显示复制按钮（流式过程中被隐藏）
+    var liveFoldRow = null;
     if (sess.currentBubbleEl) {
         var doneRow = $(sess.currentBubbleEl).closest('.msg-row')[0];
         if (doneRow) $(doneRow).find('.msg-actions').show();
+        /* resetStreamState 会把 currentBubbleEl 置 null，收口折叠要在那之后执行，
+           故此处先快照本轮 row（唯一权威落点，不用全容器重扫）。 */
+        liveFoldRow = doneRow || null;
+    }
+
+    /* 【挂起 done 的轮边界收口】keepBatchIndex 要保留的是【会话级批次索引】
+       （toolBatchesById / completedActionIds，供恢复后 action_end 认领原卡片容器），
+       不是【DOM 层运行态】。挂起 done（ask_user / HITL，chunk.suspended=true）时
+       旧气泡其实已经是终态：用户作答后 appendQuestionAnswerRecord 与恢复段帧会在
+       resetStreamState 清空的指针下另起一条全新 assistant 气泡，旧气泡从此无人收口。
+       实证（落盘帧 work-mw4m8qep，用户 2026-11「ask 好像也有同样的问题」）：
+       done suspended → 等待 9.6 分钟 → question_answered → 恢复段新 runId，
+       屏幕上留下「正在执行中 · 10min 12s」的 running 盖子（ticker 跨整个等待期
+       一直累加）+ 恢复段新气泡的「正在执行中 · 26s」，与插话缺陷完全同构。
+
+       故挂起收尾也必须在【清指针之前】做一次 DOM 层轮边界收口，复用
+       settleSteerTurnBoundary（命名沿袭插话修复，语义已是通用轮边界）：
+       摘 agent-live / 显示 msg-actions / closeBatchFor 把 running 盖子定格为
+       「执行工具 N 次」，并按 ended:true 折成整轮摘要 —— 与回放同口径，否则
+       实时不折、刷新后折（用户 2026-11「插话前的好像不会自动折叠」）。
+       它不动任何流式状态、缓冲、按钮态与批次索引，因此与 keepBatchIndex 的
+       保留语义零冲突。
+       【status: 'suspended'】挂起段不发 trace 帧（后端 done_suspended 直接 return），
+       气泡永远无徽标，摘要文案会回落「已完成」把等待作答谎报成已完成。
+       传覆盖位让其显示「已挂起」。恢复段的内容属于新气泡，不计入本段摘要。
+
+       护栏与下方真收口分支对齐：回放 / prepend / 游离渲染容器一律跳过
+       （helper 自身还有一层 _replaying 门禁）。纯展示增强：异常只留痕，
+       绝不阻断 resetStreamState 与按钮复位。 */
+    if (keepBatchIndex && !sess._replaying && !sess._skipScroll
+            && typeof isDetachedRenderTarget === 'function' && !isDetachedRenderTarget(sess)
+            && typeof settleSteerTurnBoundary === 'function') {
+        try { settleSteerTurnBoundary(sess, { status: 'suspended' }); }
+        catch (suspendBoundaryErr) { console.error('[finishStream] 挂起轮边界收口失败:', suspendBoundaryErr); }
     }
 
     // resetStreamState 会清空 buffer，所以必须在上面强刷完后再调
@@ -1210,6 +1424,60 @@ function finishStream(sess, opts) {
     var keptCompletedActionIds = keepBatchIndex ? sess.completedActionIds : null;
     resetStreamState(sess);
     if (keepBatchIndex) sess.completedActionIds = keptCompletedActionIds || {};
+
+    /* ===== 运行态 → 收口态切换（对标 dsh「turn/end 才折叠」/ Codex flush_active_cell） =====
+       运行中 agent-live 让过程行以扁平语义轨迹实时展开（活动行 accent、思考仍可点开）；
+       真收口时摘掉 agent-live 并把本轮过程区收成一行统计摘要，只留最终正文。
+
+        三条护栏，缺一不可：
+        ① 挂起 done（keepBatchIndex）：上面的【轮边界收口】已在清指针前把旧气泡
+           定格为终态（摘 agent-live / 收 running 盖子 / 按 ended:true 折整轮摘要）。
+           这里【不再】重复施加：旧气泡指针已被 resetStreamState 清空，liveFoldRow
+           为 null，且挂起段的摘要已由上面那一处按 status:'suspended' 落好文案。
+           会话级批次索引仍保留，供恢复段认领原卡片容器。
+        ② 回放路径（_replaying / _skipScroll）：replaySession 结束后已由 app-history.js
+           按轮统一折叠，这里再折会重复插按钮、并干扰滚动锚定。
+        ③ 渲染落点游离（isDetachedRenderTarget）：节点还没进文档，量不到 DOM、也不该动。 */
+    try {
+        if (!keepBatchIndex && !sess._replaying && !sess._skipScroll
+            && typeof isDetachedRenderTarget === 'function' && !isDetachedRenderTarget(sess)
+            && liveFoldRow && liveFoldRow.classList) {
+            liveFoldRow.classList.remove('agent-live');
+            var tcOff = false;
+            try { tcOff = (typeof localStorage !== 'undefined') && localStorage.getItem('gourd.turnCompact') === '0'; } catch (tcLsErr) { /* 隐私模式忽略 */ }
+            var tcApi = (typeof window !== 'undefined') ? window.GourdTurnCompact : null;
+            var tbApi = (typeof window !== 'undefined') ? window.GourdTurnBatch : null;
+            if (tcApi && tcOff && liveFoldRow.querySelector) {
+                /* 撤销本轮折叠标记与批次盖子（与 app-history.js 回放接线同一口径） */
+                var liveBubbleOff = liveFoldRow.querySelector('.msg-bubble');
+                if (liveBubbleOff && tcApi.clearTurnCompact) tcApi.clearTurnCompact(liveBubbleOff);
+                if (liveBubbleOff && tbApi && tbApi.clearBatch) tbApi.clearBatch(liveBubbleOff);
+            } else if (!tcOff && liveFoldRow.querySelector) {
+                var liveBubble = liveFoldRow.querySelector('.msg-bubble');
+                if (liveBubble) {
+                    /* 轮结束 = 全部运行批次收口（「已处理」+ 成员折叠）。
+                       必须在 turn-compact 之前：compact 的分类要看到已收口的盖子形态。
+                       【不挂在 tcApi 分支下】批次收口是运行态自身的语义，turn-compact
+                       模块缺失时批次也必须收口，否则盖子永远停在「正在执行中」。 */
+                    if (tbApi && tbApi.closeBatchFor) {
+                        try { tbApi.closeBatchFor(liveBubble); } catch (tbErr) { /* 展示增强 */ }
+                    }
+                    if (tcApi) tcApi.compactBubble(liveBubble, {
+                        /* 【2026-11 用户拍板】任务【真正结束】时与加载历史一致：
+                            即便有运行态批次组头也折成「一行摘要 + 最终正文」。
+                            回放 / prepend / 挂起 done 都被上面的护栏排除，只有真收口
+                            走到这里；组头 DOM 与批次成员的折叠类均不删，点开摘要
+                            后仍是运行态那套多折叠组形态。 */
+                        ended: true,
+                        translate: (typeof GourdI18n !== 'undefined' && GourdI18n.t) ? function (k) { return GourdI18n.t(k); } : null
+                    });
+                }
+            }
+        }
+    } catch (tcLiveErr) {
+        // 纯展示增强：任何异常都不许影响本轮消息本身的可用性
+        console.error('[finishStream] 运行态收口折叠失败:', tcLiveErr);
+    }
 
     /* DOM 收尾链异常防护：本段（purgeEmptyMdBlocks 起至函数末尾）任何一步抛异常，
      * 都不得再让全局按钮态与会话态背离——异常只留痕，尾部不再有必须执行的复位。 */
@@ -1674,11 +1942,24 @@ function recoverStreamingSession(sess) {
         var ackMatched = !!sess._sendAckConfirmed;
         for (var i = 0; i < events.length; i++) {
             var recovered = events[i];
-            if (recovered && recovered.type === 'user'
-                    && recovered.clientMessageId && recovered.clientMessageId === sess._pendingClientMessageId) {
-                ackMatched = true;
-                sess._sendAckConfirmed = true;
-                sess._awaitingSendAck = false;
+            /* 本端 echo 判定与实时分支同口径：集合优先（连发/补发在途时单槽位已被
+               覆盖），单槽位兜底。命中即销账，防止同帧稍后经 live 缓冲再到时重复渲染。
+               【槽位必须一并清】旧实现只删集合不清 _pendingClientMessageId：同帧经
+               live 缓冲二次到达时集合已空、槽位仍命中，若期间新发送已覆盖槽位则判不中
+               → 双气泡。【ack 只认本轮】历史 id 命中（集合残留/补发旧 id）不得把
+               _sendAckConfirmed 置真——那会误销新一轮在途发送的 ack 等待，让下方
+               「未受理→报错/队列回滚」被短路，新消息静默丢失。 */
+            if (recovered && recovered.type === 'user' && recovered.clientMessageId
+                    && ((sess._pendingEchoIds && sess._pendingEchoIds[recovered.clientMessageId])
+                        || recovered.clientMessageId === sess._pendingClientMessageId)) {
+                var isCurrentSend = recovered.clientMessageId === sess._pendingClientMessageId;
+                if (sess._pendingEchoIds) delete sess._pendingEchoIds[recovered.clientMessageId];
+                if (isCurrentSend) {
+                    sess._pendingClientMessageId = null;
+                    sess._sendAckConfirmed = true;
+                    sess._awaitingSendAck = false;
+                    ackMatched = true;
+                }
                 var userSeq = Number(recovered.eventSeq || 0);
                 if (userSeq) sess.lastEventSeq = Math.max(sess.lastEventSeq || 0, userSeq);
                 continue;
@@ -2105,10 +2386,26 @@ function dispatchGateChunk(chunk) {
             setTimeout(function() { reconcileSessionRunning(sess, { force: true }); }, 0);
             return;
         }
+        /* 【不能无条件清空待回显集合】done 收口后 300ms 内就会发起 busy 补发
+           （retryPendingSend 复用 pending.clientMessageId，且旧实现从不把它重新登记
+           进集合），队列派发也会立即登记新 id。无条件清空 + 单槽位兜底都覆盖不了
+           「补发已发出、回显尚未到达，期间又开了一轮并收到它的 done」的窗口：
+           补发回显认不出自己 → 重复渲染一条用户气泡。集合条目逐条销账 + 上限 32 条
+           淘汰，id 含时间戳与随机段不会跨轮巧合，保留未销账条目是安全的。
+           这里只销掉本轮收口的 id（须在置空槽位之前取）。 */
+        if (sess._pendingEchoIds && sess._pendingClientMessageId) {
+            delete sess._pendingEchoIds[sess._pendingClientMessageId];
+        }
         sess._pendingClientMessageId = null;
         sess._awaitingSendAck = false;
         sess._sendAckConfirmed = false;
         sess.activeRunId = null;
+        /* 实时 TPS/TTFT 兜底收口：provider 未返回 usage 时内核不发 context_size，
+           结算帧缺失会让最后一个 500ms 滑窗值永久留在卡面。非挂起 done 必须清态；
+           挂起（ask_user / HITL）只是暂停，恢复后带同一个 runId 继续跑，不能清。 */
+        if (!isSuspendedDone(sess, chunk) && typeof endContextLive === 'function') {
+            endContextLive(sess, chunk);
+        }
         /* 插话幂等集合只服务实时竞态（WS 的 steer_applied 早于 HTTP 200 到达），轮结束即过期。
            不清会在会话被 LRU 淘汰重建（evictInactiveSessions 清空容器）后继续拦住回放：
            旧 steerResolved 键仍在，重新进入会话时回放还原出的同一 steerId 会被当成已处理
@@ -2134,6 +2431,10 @@ function dispatchGateChunk(chunk) {
                     return;
                 }
                 s2._pendingClientMessageId = pending.clientMessageId || s2._pendingClientMessageId;
+                /* 补发复用原 id，必须重新登记进待回显集合：原条目可能已被 32 条上限
+                   淘汰或会话 LRU 重建抹掉，只靠单槽位兜底会在「补发在途期间又开新轮」
+                   时被覆盖 → 补发回显被当他端消息重复渲染。 */
+                registerPendingEchoId(s2, s2._pendingClientMessageId);
                 s2.projectRoot = pending.projectRoot || s2.projectRoot || '';
                 s2._requestStartSeq = s2.lastEventSeq || 0;
                 s2._awaitingSendAck = true;
@@ -2161,6 +2462,23 @@ function dispatchGateChunk(chunk) {
     if (chunk.type === 'file_changes') {
         var fileChangesSess = getOrCreateSession(sid);
         if (typeof window.onFileChangesChunk === 'function') window.onFileChangesChunk(fileChangesSess, chunk);
+        return;
+    }
+
+    /* tps_progress 是瞬态速率帧（不落盘、无配对 done）。必须在通用「自动进入 streaming」
+       分支之前消费：空闲窗口到达的尾帧若走下方，会无条件伪造一次流（isStreaming=true +
+       停止按钮 + showThinking），20s 后看门狗强制 finishStream 并弹「强制结束」toast。 */
+    if (chunk.type === 'tps_progress') {
+        // onWebChunk 入口的 gateFrameScopeMismatch 在这里不会执行（本分支直接 return），
+        // 故补一次 scope 检查，避免跨 scope 的瞬态帧写脏会话态。
+        if (gateFrameScopeMismatch(chunk)) return;
+        // 迟到/陌生会话的尾帧不值得为它新建 SessionState（LRU 噪声）。
+        var tpsSess = sessionMap[sid];
+        if (!tpsSess) {
+            if (sid !== activeSessionId) return;
+            tpsSess = getOrCreateSession(sid);
+        }
+        if (typeof window.updateContextTpsLive === 'function') window.updateContextTpsLive(tpsSess, chunk);
         return;
     }
 
@@ -2217,6 +2535,56 @@ function dispatchGateChunk(chunk) {
     if (chunk.type === 'user_input' || chunk.type === 'user') {
         if (!sid) return;
         var userSess = getOrCreateSession(sid);
+        /* 【跳过本端自己的回显】内核会把 user 帧广播给该设备的所有客户端
+           （否则从手机发出的提问在桌面端完全不可见：只看到回答、看不到问题）。
+           发送端已经在 sendMessage 里乐观渲染了自己的气泡，再把广播帧渲染一遍
+           就是「每条消息显示两次」——这正是旧版用「内核不广播」压掉的那个缺陷。
+           改用身份判定而非屏蔽广播：本端发送时带了 clientMessageId，回显帧带回
+           同一个 id 即证明是自己发的。没有 id（旧客户端/微信/Loop 来源）时不做
+           此判断，退回原有渲染逻辑。
+
+           【为什么是集合而不是单个槽位】_pendingClientMessageId 只保存「最近一次」
+           发送的 id。连发两条（第一条还在途、第二条已发出）时前者被后者覆盖，
+           第一条的回显就再也匹配不上 → 被当成他端消息再渲染一遍，用户看到重复气泡。
+           _pendingEchoIds 记录全部「已发出、尚未收到回显」的 id，逐条销账。
+           _pendingClientMessageId 保留原语义（补发/busy 快照/replay 兜底用）。 */
+        var echoIds = userSess._pendingEchoIds;
+        var isOwnEcho = false;
+        if (chunk.clientMessageId) {
+            if (echoIds && echoIds[chunk.clientMessageId]) {
+                delete echoIds[chunk.clientMessageId];
+                isOwnEcho = true;
+            } else if (chunk.clientMessageId === userSess._pendingClientMessageId) {
+                // 兜底：会话对象没经过 sendMessage 注册（LRU 重建等）
+                isOwnEcho = true;
+            }
+        } else if (userSess._pendingClientMessageId && chunk.type === 'user'
+                && userSess._lastSentWireText && chunk.text === userSess._lastSentWireText) {
+            /* 【无 id 帧尾文本兜底】旧 bundled UI（不生成 clientMessageId）连新内核：
+               user 帧广播回发送端时没有身份可比，纯 id 判定会把本端回显当他端消息
+               再渲染一遍 → 每条消息双气泡。仅限「本端有登记在途 + 帧文本与本轮
+               wire 原文全等」才认亲；带 id 的帧一律走上面的身份判定，不受影响。
+               他端恰好同文的场景与移动端文本兜底同风险口径（登记一轮即销）。 */
+            isOwnEcho = true;
+            userSess._lastSentWireText = null;
+            // 无 id 帧没有可比身份：认亲即视为本轮槽位命中，显式清槽（下方按 id 比对清不到）
+            userSess._pendingClientMessageId = null;
+        }
+        if (isOwnEcho) {
+            if (userSess._pendingClientMessageId === chunk.clientMessageId) {
+                userSess._pendingClientMessageId = null;
+            }
+            /* 【code review 修复 2026-11 · ack 只认本轮】与 recoverStreamingSession
+               同口径：集合残留 / busy 补发旧 id 的回显命中时，槽位可能已被【新一轮
+               发送】覆盖 —— 无条件置 _sendAckConfirmed=true 会误销新轮的 ack 等待，
+               「未受理→报错/队列回滚」被短路，新消息静默丢失。只有回显确属当前
+               槽位（id 全等，或无 id 文本兜底已显式清槽）才确认 ack；旧 id 只销账。 */
+            if (!chunk.clientMessageId || userSess._pendingClientMessageId === null) {
+                userSess._sendAckConfirmed = true;
+                userSess._awaitingSendAck = false;
+            }
+            return;
+        }
         if (typeof ensureChatInHistory === 'function') {
             // Loop 定时任务执行记录：按任务归属工作空间（chunk.root）静默登记，
             // 不切换 tab / 不抢焦点，避免打扰用户当前视图；其它来源（微信等）保持原联动语义
@@ -2226,7 +2594,16 @@ function dispatchGateChunk(chunk) {
                 ensureChatInHistory(sid, chunk.text, true);
             }
         }
-        appendUserMessage(userSess, chunk.text, null, null, chunk.createdAt);
+        /* 【附件路径必须透传】内核把 imagePaths / filePaths 随 user 帧下发，历史回放路径
+           （app-history.js 的 appendUserMessage 第 6 参）正是靠它把「图 N」徽标换成真实缩略图。
+           实时分支旧实现只传了 createdAt、把这第六个参数丢了 —— 于是从手机发来的带图消息
+           在桌面端只剩一行文字，附件看不到（同一帧刷新页面才出现），表现为「手机发的消息
+           在 PC 上不完整」。 */
+        var echoImages = chunk.imagePaths || [];
+        var echoFiles = chunk.filePaths || [];
+        appendUserMessage(userSess, chunk.text, null, null, chunk.createdAt,
+            (echoImages.length || echoFiles.length)
+                ? { imagePaths: echoImages, filePaths: echoFiles } : null);
         if (userSess.sessionId === activeSessionId) {
             if (!inChatMode) switchToChatMode();
             scrollToBottom(true);

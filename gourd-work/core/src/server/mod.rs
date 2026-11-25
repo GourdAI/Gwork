@@ -412,7 +412,12 @@ pub async fn serve_with_static(
         .route("/web/chat/mcp/select", post(chat_mcp_select))
         .route("/web/chat/messages", get(chat_messages))
         .route("/web/chat/replay", get(chat_replay))
-        .route("/web/chat/input", post(chat_input))
+        // v1.1 inline attachments: JSON body up to ~12MB base64 (9MB decoded)
+        // plus text. axum's 2MB default body limit would reject it outright.
+        .route(
+            "/web/chat/input",
+            post(chat_input).layer(axum::extract::DefaultBodyLimit::max(16 * 1024 * 1024)),
+        )
         .route("/web/chat/interrupt", post(chat_interrupt))
         .route("/web/chat/todos", get(chat_todos))
         .route("/web/chat/pendingQuestion", get(chat_pending_question))
@@ -1875,6 +1880,79 @@ struct InputFields {
     /// Declared attachment types for uploaded files (same order).
     #[serde(skip)]
     uploaded_types: Vec<String>,
+    /// Inline base64 attachments (mobile-link v1.1, PROTOCOL.md §4). The string
+    /// WS envelope cannot carry multipart, so the mobile client inlines bytes
+    /// here; they are decoded and persisted through the exact same
+    /// `save_attachment` path as multipart uploads before the run starts.
+    #[serde(default)]
+    attachments: Vec<InlineAttachment>,
+    /// Sender-generated id for this submission (Java `clientMessageId`).
+    ///
+    /// The desktop client already sends it (`app-streaming.js:693`) and its
+    /// recovery path matches replays against it (`:1927`), but this kernel had
+    /// no field for it, so the value was silently dropped. It is the only
+    /// reliable way for the *sending* client to recognise its own `user` frame
+    /// when that frame is broadcast to every client of the device — without it
+    /// the sender renders its own message twice.
+    #[serde(rename = "clientMessageId", default)]
+    client_message_id: String,
+}
+
+/// One inline attachment from a JSON `/web/chat/input` body (mobile-link v1.1).
+#[derive(Debug, Clone, serde::Deserialize)]
+struct InlineAttachment {
+    #[serde(default)]
+    name: String,
+    /// Declared type: "image" | "file" (same vocabulary as multipart).
+    #[serde(rename = "type", default)]
+    attach_type: String,
+    /// Standard base64, no `data:` prefix.
+    #[serde(rename = "dataBase64", default)]
+    data_base64: String,
+}
+
+/// Contract limits (PROTOCOL.md §4): ≤10 items, ≤4MB decoded per item,
+/// ≤9MB decoded in total. Enforced before anything touches the disk.
+const INLINE_ATTACH_MAX_COUNT: usize = 10;
+const INLINE_ATTACH_MAX_ITEM_BYTES: usize = 4 * 1024 * 1024;
+const INLINE_ATTACH_MAX_TOTAL_BYTES: usize = 9 * 1024 * 1024;
+
+/// Decode + validate inline attachments into the same `(name, type, bytes)`
+/// shape the multipart path produces. Any violation is an explicit 400 —
+/// never a silent drop (the user's file would vanish without a trace).
+fn decode_inline_attachments(
+    items: &[InlineAttachment],
+) -> Result<Vec<(String, String, Vec<u8>)>, String> {
+    if items.is_empty() {
+        return Ok(Vec::new());
+    }
+    if items.len() > INLINE_ATTACH_MAX_COUNT {
+        return Err(format!("too many attachments (max {})", INLINE_ATTACH_MAX_COUNT));
+    }
+    use base64::Engine as _;
+    let mut out = Vec::with_capacity(items.len());
+    let mut total: usize = 0;
+    for (i, item) in items.iter().enumerate() {
+        if item.name.trim().is_empty() {
+            return Err(format!("attachment #{} has no name", i + 1));
+        }
+        if item.data_base64.is_empty() {
+            return Err(format!("attachment #{} has no data", i + 1));
+        }
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(item.data_base64.as_bytes())
+            .map_err(|_| format!("attachment #{} is not valid base64", i + 1))?;
+        if bytes.len() > INLINE_ATTACH_MAX_ITEM_BYTES {
+            return Err(format!("attachment #{} exceeds 4MB", i + 1));
+        }
+        total += bytes.len();
+        if total > INLINE_ATTACH_MAX_TOTAL_BYTES {
+            return Err("attachments exceed 9MB in total".to_string());
+        }
+        let declared = if item.attach_type == "image" { "image" } else { "file" };
+        out.push((item.name.clone(), declared.to_string(), bytes));
+    }
+    Ok(out)
 }
 
 async fn chat_input(
@@ -1882,7 +1960,23 @@ async fn chat_input(
     headers: axum::http::HeaderMap,
     payload: InputPayload,
 ) -> Json<serde_json::Value> {
-    let fields = payload.into_fields();
+    let mut fields = payload.into_fields();
+    // Inline base64 attachments join the multipart upload list so the single
+    // persistence + classification + injection path below serves both shapes.
+    if !fields.attachments.is_empty() {
+        match decode_inline_attachments(&fields.attachments) {
+            Ok(mut decoded) => {
+                for (_, ty, _) in decoded.iter() {
+                    fields.uploaded_types.push(ty.clone());
+                }
+                fields.uploaded_files.append(&mut decoded);
+            }
+            Err(msg) => {
+                return Json(serde_json::json!({"code": 400, "description": msg}));
+            }
+        }
+        fields.attachments.clear();
+    }
     let session_id = if fields.session_id.is_empty() {
         SessionStore::new_session_id()
     } else {
@@ -2083,37 +2177,79 @@ async fn chat_input(
         },
     );
 
-    // Record user frame in stream.
+    // Record user frame in stream, then broadcast it to the other clients.
     //
-    // Persist-only, deliberately NOT broadcast: the sending client already
-    // rendered its own bubble optimistically (app-streaming.js sendMessage),
-    // and the gate handler renders a second bubble for every `user` frame it
-    // receives — broadcasting here produced the exact "every message shows
-    // twice" defect. The Java kernel has the same split (WebGate.recordUser
-    // persists; no user frame is emitted to the client). Loop prompts keep
-    // their `user_input` broadcast because no client rendered those.
+    // Persist-only was wrong for a multi-client device. Every client of this
+    // DEVICE shares one session stream — the desktop page and the gateway's
+    // gate subscriptions alike — and only the *sending* client rendered a
+    // bubble optimistically. With a persist-only frame the other clients
+    // received the assistant's reply but never the question that produced it:
+    // sending from the mobile app left the desktop window showing an orphan
+    // answer (reported as "messages sent from mobile are invisible on PC").
+    // The Java kernel broadcasts (`WebGate.java:780` emitToClient(ofUser)).
+    //
+    // The sender is kept single-bubble by identity, not by withholding the
+    // frame: `clientMessageId` rides along and the sender skips its own echo
+    // (desktop `app-streaming.js` and the mobile link both match on it). A
+    // client that does not send the id still dedupes by tail-text, which is
+    // how the previous "every message shows twice" defect was worked around.
     let seq_counter = state.seq_for(&session_id).await;
-    // Attachment paths ride along on the frame (Java `WebChunk.imagePaths` /
-    // `filePaths`, filled only on `user` frames). History replay reads exactly
-    // these two keys — `app-history.js:2151` — and turns them back into real
-    // thumbnails via `/attachment/meta`. Without them a reopened session showed
-    // the text of an attachment message but none of its images or file chips,
-    // even though the bytes were still on disk.
-    let mut user_frame = Frame::new("user")
-        .session(&session_id)
-        .text(&effective_input)
-        .seq(seq_counter.fetch_add(1, Ordering::SeqCst));
-    if !image_paths.is_empty() {
-        user_frame = user_frame.extra("imagePaths", serde_json::json!(image_paths));
-    }
-    if !file_refs.is_empty() {
-        user_frame = user_frame.extra("filePaths", serde_json::json!(file_refs));
-    }
+    let user_frame = user_input_frame(
+        &session_id,
+        &effective_input,
+        seq_counter.fetch_add(1, Ordering::SeqCst),
+        &image_paths,
+        &file_refs,
+        &fields.client_message_id,
+    );
     persist_frame(&state, &session_id, &user_frame).await;
+    // Persist first, broadcast second: the replay window and the live frame
+    // must agree, otherwise a client that reconnects between the two sees the
+    // frame at a seq the stream does not yet carry.
+    broadcast_frame(&state, &session_id, user_frame).await;
 
-    spawn_run(state, session_id.clone(), effective_input, fields.model, fields.access_mode, false, image_urls);
+    spawn_run(state, session_id.clone(), effective_input, fields.model, fields.access_mode, false, image_urls).await;
 
     Json(serde_json::json!({"code": 200, "data": {"sessionId": session_id}}))
+}
+
+/// Build the `user` frame for one accepted submission.
+///
+/// Extracted from `chat_input` so the wire shape can be asserted without
+/// standing up the whole router (`AppState` is only constructible from
+/// `serve_with_static`, and the entry point also spawns a model run).
+///
+/// Three things ride on this frame and each has a distinct consumer:
+/// * `text` — the effective input, including the `[附件: …]` prefix;
+/// * `imagePaths` / `filePaths` — session-relative attachment paths, read by
+///   history replay (`app-history.js:2151`) to rebuild thumbnails and chips.
+///   Java fills them only on `user` frames; without them a reopened session
+///   showed the text of an attachment message but none of its media.
+/// * `clientMessageId` — the sender's id, when supplied. The frame is now
+///   broadcast to every client of the device, so this is what lets the sender
+///   skip its own echo instead of rendering the bubble twice.
+fn user_input_frame(
+    session_id: &str,
+    text: &str,
+    seq: i64,
+    image_paths: &[String],
+    file_refs: &[String],
+    client_message_id: &str,
+) -> Frame {
+    let mut frame = Frame::new("user")
+        .session(session_id)
+        .text(text)
+        .seq(seq);
+    if !image_paths.is_empty() {
+        frame = frame.extra("imagePaths", serde_json::json!(image_paths));
+    }
+    if !file_refs.is_empty() {
+        frame = frame.extra("filePaths", serde_json::json!(file_refs));
+    }
+    if !client_message_id.is_empty() {
+        frame = frame.extra("clientMessageId", serde_json::json!(client_message_id));
+    }
+    frame
 }
 
 /// Execute a slash command posted to `/web/chat/input`.
@@ -2275,7 +2411,7 @@ async fn handle_slash_command(
                 fields.access_mode.clone(),
                 false,
                 Vec::new(),
-            );
+            ).await;
             return Json(serde_json::json!({"code": 200, "data": {"sessionId": session_id}}));
         }
 
@@ -2293,7 +2429,7 @@ async fn handle_slash_command(
                 fields.access_mode.clone(),
                 false,
                 Vec::new(),
-            );
+            ).await;
             return Json(serde_json::json!({"code": 200, "data": {"sessionId": session_id}}));
         }
 
@@ -2460,7 +2596,7 @@ async fn handle_question_answer(
         sp,
         messages,
         answer_text,
-    );
+    ).await;
 
     Json(serde_json::json!({"code": 200}))
 }
@@ -2517,7 +2653,7 @@ async fn handle_hitl_action(
             sp,
             messages,
             "The user denied approval for this command. Do not retry it.".to_string(),
-        );
+        ).await;
     }
 
     Json(serde_json::json!({"code": 200}))
@@ -2557,7 +2693,7 @@ async fn auto_approve_and_resume(state: &Arc<AppState>, session_id: &str, sp: Su
         sp,
         messages,
         output,
-    );
+    ).await;
 }
 
 /// 把用户答案格式化成回填给模型的 tool result 文本。
@@ -2671,7 +2807,12 @@ async fn execute_approved_command(
 }
 
 /// Spawn a new ReAct run.
-fn spawn_run(
+///
+/// `async` because the running-handle registration must complete **before the
+/// caller returns the HTTP response** (see `register_running`): a replay that
+/// lands in the accept→register window would answer `running:false` and the
+/// frontend watchdog would force-finish the just-started run.
+async fn spawn_run(
     state: Arc<AppState>,
     session_id: String,
     input: String,
@@ -2688,16 +2829,34 @@ fn spawn_run(
     let run_id = new_run_id();
     let run_id_reg = run_id.clone();
 
-    tokio::spawn(async move {
-        // Register running task
-        state
-            .running
-            .lock()
-            .await
-            .insert(session_id.clone(), RunningTask { cancel: cancel_clone, run_id: run_id_reg });
+    // 【注册必须先于 HTTP 响应返回 —— 在调用方（请求上下文）里 await 上锁，
+    // 绝不放进 spawn】旧实现把 insert 放进 tokio::spawn 的异步体里：
+    // chat_input 返回 200 时 running 表可能还没有本会话。这个窗口里任何
+    // /web/chat/replay 都答 running:false，而前端看门狗/恢复路径把
+    // 「服务端空闲」当权威真值 → 刚发起的 run 被强制 finishStream
+    // （用户报障「任务没完成，执行就结束」「本地没办法执行任务」）。
+    // 模型首响应慢（>20s 停摆阈值）或 WS 重连触发恢复时必踩。
+    register_running(&state, &session_id, cancel_clone, run_id_reg).await;
 
+    tokio::spawn(async move {
         run_react_session(state, session_id, input, model_name, access_mode, hitl_approved, cancel, None, Vec::new(), image_urls, run_id).await;
     });
+}
+
+/// Register the running-task handle **synchronously with the caller** (before
+/// the HTTP response is produced). Shared by `spawn_run` / `spawn_resume` so
+/// the "accepted ⇒ running:true" invariant has exactly one implementation.
+async fn register_running(
+    state: &Arc<AppState>,
+    session_id: &str,
+    cancel: CancellationToken,
+    run_id: String,
+) {
+    state
+        .running
+        .lock()
+        .await
+        .insert(session_id.to_string(), RunningTask { cancel, run_id });
 }
 
 /// Mint a run id (one input → one run).
@@ -2740,7 +2899,11 @@ fn inject_resume_result(
 }
 
 /// Spawn a resumed run from a suspension point.
-fn spawn_resume(
+///
+/// `async` for the same reason as `spawn_run`: the running handle must be
+/// registered before the HTTP response returns, or a replay in the window
+/// answers `running:false` and the frontend force-finishes the resumed run.
+async fn spawn_resume(
     state: Arc<AppState>,
     session_id: String,
     sp: SuspensionPoint,
@@ -2796,13 +2959,11 @@ fn spawn_resume(
         );
     }
 
-    tokio::spawn(async move {
-        state
-            .running
-            .lock()
-            .await
-            .insert(session_id.clone(), RunningTask { cancel: cancel_clone, run_id: run_id_reg });
+    // 与 spawn_run 同口径：注册必须先于 HTTP 响应返回，否则恢复窗口内
+    // replay 答 running:false，前端对账把刚续跑的 run 误砍。
+    register_running(&state, &session_id, cancel_clone, run_id_reg).await;
 
+    tokio::spawn(async move {
         run_react_session(
             state,
             session_id,
@@ -5492,6 +5653,74 @@ async fn handle_ws_terminal(socket: WebSocket, session_id: String, state: Arc<Ap
 mod tests {
     use super::*;
 
+    // ── inline base64 attachments (mobile-link v1.1) ─────────────────────────
+
+    fn inline(name: &str, ty: &str, bytes: &[u8]) -> InlineAttachment {
+        use base64::Engine as _;
+        InlineAttachment {
+            name: name.into(),
+            attach_type: ty.into(),
+            data_base64: base64::engine::general_purpose::STANDARD.encode(bytes),
+        }
+    }
+
+    #[test]
+    fn inline_attachments_decode_into_multipart_shape() {
+        let items = vec![inline("a.png", "image", b"\x89PNG"), inline("b.txt", "file", b"hi")];
+        let out = decode_inline_attachments(&items).unwrap();
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0], ("a.png".to_string(), "image".to_string(), b"\x89PNG".to_vec()));
+        assert_eq!(out[1].1, "file");
+        // Unknown declared types fall back to "file", same as multipart.
+        let odd = decode_inline_attachments(&[inline("c.bin", "video", b"x")]).unwrap();
+        assert_eq!(odd[0].1, "file");
+    }
+
+    #[test]
+    fn inline_attachments_empty_is_noop() {
+        assert!(decode_inline_attachments(&[]).unwrap().is_empty());
+    }
+
+    #[test]
+    fn inline_attachments_reject_bad_input_explicitly() {
+        // Invalid base64 must 400, never silently drop the user's file.
+        let bad = InlineAttachment { name: "a.png".into(), attach_type: "image".into(), data_base64: "!!!".into() };
+        assert!(decode_inline_attachments(&[bad]).is_err());
+        // Missing name / missing data.
+        assert!(decode_inline_attachments(&[inline("", "file", b"x")]).is_err());
+        let no_data = InlineAttachment { name: "a".into(), attach_type: "file".into(), data_base64: String::new() };
+        assert!(decode_inline_attachments(&[no_data]).is_err());
+        // Count cap.
+        let many: Vec<_> = (0..11).map(|i| inline(&format!("f{}", i), "file", b"x")).collect();
+        assert!(decode_inline_attachments(&many).is_err());
+    }
+
+    #[test]
+    fn inline_attachments_enforce_size_budgets() {
+        // Single item over 4MB.
+        let big = inline("big.bin", "file", &vec![0u8; INLINE_ATTACH_MAX_ITEM_BYTES + 1]);
+        assert!(decode_inline_attachments(&[big]).is_err());
+        // Total over 9MB across three individually-legal items.
+        let chunk = vec![0u8; 4 * 1024 * 1024];
+        let three = vec![inline("a", "file", &chunk), inline("b", "file", &chunk), inline("c", "file", &chunk)];
+        assert!(decode_inline_attachments(&three).is_err());
+        // Exactly at the per-item cap is legal.
+        let ok = inline("ok.bin", "file", &vec![0u8; INLINE_ATTACH_MAX_ITEM_BYTES]);
+        assert!(decode_inline_attachments(&[ok]).is_ok());
+    }
+
+    #[test]
+    fn input_fields_json_carries_inline_attachments() {
+        let body = r#"{"sessionId":"work-1","input":"看图","attachments":[{"name":"p.jpg","type":"image","dataBase64":"aGk="}]}"#;
+        let f: InputFields = serde_json::from_str(body).unwrap();
+        assert_eq!(f.attachments.len(), 1);
+        let decoded = decode_inline_attachments(&f.attachments).unwrap();
+        assert_eq!(decoded[0].2, b"hi".to_vec());
+        // Bodies without the field keep working (old clients).
+        let plain: InputFields = serde_json::from_str(r#"{"input":"hi"}"#).unwrap();
+        assert!(plain.attachments.is_empty());
+    }
+
     // ── access-mode precedence (picker and run path must agree) ─────────────
 
     #[test]
@@ -5928,6 +6157,105 @@ mod tests {
             "the suspended segment already finished the manifest; reopen it or the \
              resumed files never reach the final snapshot"
         );
+    }
+
+    // ── accepted ⇒ running:true（注册先于响应，消灭看门狗误砍窗口）──────────
+    //
+    // Wiring guard（2026-11-24 用户报障「任务没完成，执行就结束」「本地没办法
+    // 执行任务」的内核侧根因）：旧实现把 running.insert 放进 tokio::spawn 的
+    // 异步体，chat_input 返回 200 时表里可能还没有本会话；窗口内任何
+    // /web/chat/replay 答 running:false，前端看门狗/恢复把「服务端空闲」当
+    // 权威真值 → 刚发起的 run 被强制 finishStream。修复 = 注册在调用方
+    // （请求上下文）await 完成后才 spawn。下面两条契约缺一不可：
+    //   1) spawn_run / spawn_resume 必须经 register_running 在 spawn 之前注册；
+    //   2) 全部调用点必须 .await（漏一个就回到旧竞态）。
+    #[test]
+    fn spawn_registers_running_before_returning_the_response() {
+        let src = include_str!("mod.rs");
+        let prod = src.split_once("#[cfg(test)]").map(|(p, _)| p).unwrap_or(src);
+
+        for (fname, next_boundary) in [
+            // 边界取「函数闭合 + 下一个条目文档注释起点」：register_running
+            // 辅助函数定义紧跟 spawn_run 之后，若把它圈进 body 会把辅助函数
+            // 自己的 .running.insert 误判成「spawn 体内注册」。
+            ("async fn spawn_run(", "/// Register the running-task handle"),
+            ("async fn spawn_resume(", "/// Execute a full ReAct session run."),
+        ] {
+            let start = prod.find(fname).unwrap_or_else(|| panic!("{} missing", fname));
+            let end = prod[start..].find(next_boundary).expect("fn boundary missing");
+            let body = &prod[start..start + end];
+            // 跳过注释：文档/行注释里提到 register_running / tokio::spawn 不算数，
+            // 只认代码行（与既有 wiring-guard 同口径，防注释自满足断言）。
+            let code: String = body
+                .lines()
+                .filter(|l| {
+                    let t = l.trim_start();
+                    !t.starts_with("//") && !t.starts_with("*") && !t.starts_with("/*")
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            let reg = code.find("register_running(").unwrap_or_else(|| {
+                panic!("{} must register via register_running before spawning", fname)
+            });
+            let spawn = code.find("tokio::spawn").expect("tokio::spawn missing");
+            assert!(reg < spawn, "{}: registration must precede tokio::spawn", fname);
+            assert!(
+                code[reg..spawn].contains(".await"),
+                "{}: register_running must be awaited in the caller context", fname
+            );
+            // 旧缺陷形态：running 表 insert 出现在 spawn 的异步体里（注册晚于
+            // 响应）。只查 spawn 之后的片段，且只认「.running」链式访问——
+            // register_running 辅助函数本体在边界之外，不会误伤。
+            let after_spawn = &code[spawn..];
+            assert!(
+                !after_spawn.contains(".running"),
+                "{}: running-table insert must not live inside the spawned task", fname
+            );
+            // spawn_run 边界止于 "/// Mint a run id"，register_running 定义在
+            // 其后属正常；但 spawn_resume 边界内不得再出现第二处 insert。
+            assert!(
+                !code[spawn..].contains(".insert("),
+                "{}: no running-table insert may follow tokio::spawn", fname
+            );
+        }
+
+        // 调用点契约：每个 spawn_run( / spawn_resume( 调用都必须以 .await 收尾。
+        // 逐调用扫描配对括号，检查闭括号后紧跟 `.await`。
+        for name in ["spawn_run(", "spawn_resume("] {
+            let mut cursor = 0usize;
+            let mut calls = 0usize;
+            while let Some(rel) = prod[cursor..].find(name) {
+                let open = cursor + rel + name.len() - 1; // '(' 的位置
+                // 跳过函数定义本身（前面是 `fn `）。
+                let prefix = &prod[..cursor + rel];
+                if prefix.trim_end().ends_with("fn") || prefix.trim_end().ends_with("async fn") {
+                    cursor = open + 1;
+                    continue;
+                }
+                let mut depth = 0usize;
+                let mut close = None;
+                for (i, ch) in prod[open..].char_indices() {
+                    match ch {
+                        '(' => depth += 1,
+                        ')' => {
+                            depth -= 1;
+                            if depth == 0 { close = Some(open + i); break; }
+                        }
+                        _ => {}
+                    }
+                }
+                let close = close.expect("unbalanced call parens");
+                let tail = prod[close + 1..].trim_start();
+                assert!(
+                    tail.starts_with(".await"),
+                    "call to {} at byte {} must be .await-ed (registration-before-response contract)",
+                    name, open
+                );
+                calls += 1;
+                cursor = close + 1;
+            }
+            assert!(calls >= 1, "expected at least one call to {}", name);
+        }
     }
 
     // ── suspension TTL ──────────────────────────────────────────────────────
@@ -7611,5 +7939,107 @@ mod tests {
     fn format_question_answer_skipped() {
         let answers = serde_json::json!([{ "question": "q", "skipped": true }]);
         assert_eq!(format_answers_for_llm(&answers), "Q1: (skipped)");
+    }
+
+    /// The `user` frame carries the sender's id, so the sender can recognise
+    /// its own broadcast echo.
+    ///
+    /// Regression pin for "questions sent from the mobile app are invisible on
+    /// the desktop". `chat_input` used to persist this frame and deliberately
+    /// not broadcast it (`broadcast` would duplicate the sender's own bubble,
+    /// which was the earlier defect). The fix is identity, not withholding:
+    /// broadcast the frame and let the sender match `clientMessageId`. Both
+    /// halves must therefore hold — the frame is broadcast by `chat_input`
+    /// (pinned below) *and* it carries the id (pinned here).
+    #[test]
+    fn user_input_frame_carries_the_client_message_id() {
+        let f = user_input_frame("work-1", "你好啊", 7, &[], &[], "m-abc123");
+        let wire: serde_json::Value =
+            serde_json::from_str(&f.to_json()).expect("frame must serialise to JSON");
+        assert_eq!(wire["type"], "user");
+        assert_eq!(wire["sessionId"], "work-1");
+        assert_eq!(wire["text"], "你好啊");
+        assert_eq!(wire["eventSeq"], 7);
+        assert_eq!(
+            wire["clientMessageId"], "m-abc123",
+            "without the id the sender cannot tell its own echo from another client's message"
+        );
+    }
+
+    /// No id supplied (older clients, IM/Loop sources) → the key is absent
+    /// rather than empty, and every client renders the bubble. The sender then
+    /// falls back to its tail-text guard.
+    #[test]
+    fn user_input_frame_omits_an_absent_client_message_id() {
+        let f = user_input_frame("work-1", "hi", 1, &[], &[], "");
+        let wire: serde_json::Value =
+            serde_json::from_str(&f.to_json()).expect("frame must serialise to JSON");
+        assert!(
+            wire.get("clientMessageId").is_none(),
+            "an absent id must not be serialised as an empty string"
+        );
+    }
+
+    /// Attachment paths stay on the frame: history replay turns them back into
+    /// real thumbnails via `/attachment/meta`.
+    #[test]
+    fn user_input_frame_keeps_attachment_paths() {
+        let images = vec!["uploads/a.png".to_string()];
+        let files = vec!["uploads/b.pdf".to_string()];
+        let f = user_input_frame("work-1", "see attached", 2, &images, &files, "");
+        let wire: serde_json::Value =
+            serde_json::from_str(&f.to_json()).expect("frame must serialise to JSON");
+        assert_eq!(wire["imagePaths"][0], "uploads/a.png");
+        assert_eq!(wire["filePaths"][0], "uploads/b.pdf");
+    }
+
+    /// `chat_input` must broadcast the user frame, not merely persist it.
+    ///
+    /// Asserted by shape because the alternative — driving the HTTP entry point
+    /// — needs a configured model provider and would spawn a real run. The
+    /// needle is the `broadcast_frame` call in the same function body that
+    /// persists the frame; a future edit that reverts to persist-only (the
+    /// state this bug was reported from) fails here.
+    #[test]
+    fn chat_input_broadcasts_the_user_frame() {
+        let src = include_str!("mod.rs");
+        let start: usize = src
+            .find("async fn chat_input(")
+            .expect("chat_input missing");
+        let end: usize = src[start..]
+            .find("fn user_input_frame(")
+            .expect("boundary after chat_input missing");
+        let body: &str = &src[start..start + end];
+        assert!(
+            body.contains("broadcast_frame(&state, &session_id, user_frame)"),
+            "chat_input must broadcast the user frame: a persist-only frame leaves \
+             every other client of the device showing an answer with no question"
+        );
+        // Persist before broadcast: a client reconnecting between the two would
+        // otherwise see a seq the stream file does not carry yet.
+        let persist_at = body.find("persist_frame(&state, &session_id, &user_frame)").unwrap();
+        let broadcast_at = body.find("broadcast_frame(&state, &session_id, user_frame)").unwrap();
+        assert!(
+            persist_at < broadcast_at,
+            "the frame must be persisted before it is broadcast"
+        );
+    }
+
+    /// `InputFields` must deserialize `clientMessageId` instead of dropping it.
+    ///
+    /// The desktop client has always sent this field (`app-streaming.js:693`)
+    /// and its recovery path matches replays against it (`:1927`); the kernel
+    /// simply had no field for it, so serde discarded it silently.
+    #[test]
+    fn input_fields_keeps_the_client_message_id() {
+        let f: InputFields = serde_json::from_str(
+            r#"{"sessionId":"work-1","input":"hi","clientMessageId":"m-xyz"}"#,
+        )
+        .expect("clientMessageId must deserialize");
+        assert_eq!(f.client_message_id, "m-xyz");
+        // Absent → empty string, never a parse error (older clients omit it).
+        let g: InputFields =
+            serde_json::from_str(r#"{"sessionId":"work-1","input":"hi"}"#).unwrap();
+        assert!(g.client_message_id.is_empty());
     }
 }

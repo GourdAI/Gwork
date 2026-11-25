@@ -1,0 +1,394 @@
+<template>
+	<!-- 交互卡：内核挂起（question / hitl）时手机上的可操作形态。
+		 桌面端对照 app-message.js 的 .question-card / .hitl-card。 -->
+	<!-- uvue 的 class 属性不支持 {{ }} 文本插值（会原样落进 class 串，修饰类永不命中）：
+		 动态类必须走 :class 绑定，与全仓其它组件同口径。 -->
+	<view class="app-interact-card" :class="'app-interact-card--' + interact">
+		<!-- 待处理：题面/命令正文 + 操作区 -->
+		<block v-if="interact === 'question'">
+			<view v-for="(q, qi) in questions" :key="qi" class="app-interact-card__q">
+				<text v-if="q.header.length > 0" class="app-interact-card__q-title">{{ q.header }}</text>
+				<text v-if="q.detail.length > 0" class="app-interact-card__q-detail">{{ q.detail }}</text>
+				<view v-for="(o, oi) in q.options" :key="oi" class="app-interact-card__opt"
+					:class="isOptionOn(qi, o.label) ? 'app-interact-card__opt--on' : ''"
+					@click="onPickOption(qi, o.label)">
+					<view class="app-interact-card__opt-mark"
+						:class="isOptionOn(qi, o.label) ? 'app-interact-card__opt-mark--on' : ''"></view>
+					<view class="app-interact-card__opt-text">
+						<text class="app-interact-card__opt-label">{{ o.label }}</text>
+						<text v-if="o.description.length > 0" class="app-interact-card__opt-desc">{{ o.description }}</text>
+					</view>
+					<text v-if="o.recommended" class="app-interact-card__opt-rec">{{ t('chat.interact.recommended') }}</text>
+				</view>
+				<!-- 自由输入：始终可见（不折叠），对应「其他/自定义」这类没有选项也要能答的场景。
+				     保留系统 adjust-position（默认 true）：它只把页面推起到「输入框露出键盘」的最小距离，
+				     卡片在消息流中部时通常是列表内滚动而非整屏顶起；cursor-spacing 追加 16px 余量。
+				     不能学 composer 关 adjust-position——卡片无键盘高度占位机制，关了输入框会被键盘盖住 -->
+				<input class="app-interact-card__input" :value="answerOf(qi).supplement"
+					:placeholder="t('chat.interact.placeholder')" :placeholder-style="placeholderStyle"
+					:confirm-type="'done'" :cursor-spacing="16"
+					@input="onSupplementInput(qi, $event)" />
+			</view>
+			<view class="app-interact-card__acts">
+				<view class="app-interact-card__btn app-interact-card__btn--primary"
+					:class="canSubmit ? '' : 'app-interact-card__btn--disabled'" @click="onSubmitAsk">
+					<text class="app-interact-card__btn-text app-interact-card__btn-text--primary">{{ submitting ? t('chat.interact.submitting') : t('chat.interact.submit') }}</text>
+				</view>
+			</view>
+		</block>
+
+		<!-- 待审批：命令原文 + 同意/拒绝 -->
+		<block v-else-if="interact === 'hitl'">
+			<text class="app-interact-card__cmd">{{ command.length > 0 ? command : t('chat.interact.hitlUnknown') }}</text>
+			<view class="app-interact-card__acts">
+				<view class="app-interact-card__btn app-interact-card__btn--danger"
+					:class="submitting ? 'app-interact-card__btn--disabled' : ''" @click="onApprove(false)">
+					<text class="app-interact-card__btn-text app-interact-card__btn-text--danger">{{ t('chat.interact.reject') }}</text>
+				</view>
+				<view class="app-interact-card__btn app-interact-card__btn--primary"
+					:class="submitting ? 'app-interact-card__btn--disabled' : ''" @click="onApprove(true)">
+					<text class="app-interact-card__btn-text app-interact-card__btn-text--primary">{{ submitting ? t('chat.interact.submitting') : t('chat.interact.approve') }}</text>
+				</view>
+			</view>
+		</block>
+
+		<!-- 已闭环：只读回显（答案原文 / 已处理），不再给任何按钮 -->
+		<block v-else>
+			<text class="app-interact-card__resolved">{{ resolvedText.length > 0 ? resolvedText : t('chat.interact.resolved') }}</text>
+		</block>
+
+		<text v-if="submitError.length > 0" class="app-interact-card__error">{{ submitError }}</text>
+	</view>
+</template>
+
+<script setup lang="ts">
+	import type { ComputedRef } from 'vue'
+	import { computed } from 'vue'
+	import type { AskAnswer, AskQuestion, ChatBlock } from '@/data/app-data'
+	import { i18n } from '@/locale/i18n.ts'
+
+	defineOptions({
+		name: 'app-interact-card',
+		styleIsolation: 'app-and-page'
+	})
+
+	const props = withDefaults(defineProps<{
+		block: ChatBlock
+	}>(), {
+		block: null as unknown as ChatBlock
+	})
+
+	const emit = defineEmits<{
+		(e: 'approve', actionId: string, approved: boolean): void
+		(e: 'answer', actionId: string): void
+		(e: 'edit', actionId: string, index: number, patch: AskAnswer): void
+	}>()
+
+	function t(key: string): string {
+		return i18n.global.t(key)
+	}
+
+	const placeholderStyle: ComputedRef<string> = computed<string>((): string => 'color:var(--color-text-tertiary);font-size:13px')
+
+	const interact: ComputedRef<string> = computed<string>((): string => props.block.interact)
+	const questions: ComputedRef<AskQuestion[]> = computed<AskQuestion[]>((): AskQuestion[] => props.block.questions)
+	const command: ComputedRef<string> = computed<string>((): string => props.block.command)
+	const submitting: ComputedRef<boolean> = computed<boolean>((): boolean => props.block.submitting)
+	const submitError: ComputedRef<string> = computed<string>((): string => props.block.submitError)
+	const resolvedText: ComputedRef<string> = computed<string>((): string => props.block.resolvedText)
+
+	const actionId: ComputedRef<string> = computed<string>((): string => props.block.actionId)
+
+	/** 至少一题有内容才允许提交：全空提交会被内核 409（No pending question），
+	 *  界面上却只是「点了没反应」——准入校验放在按钮态上更诚实。 */
+	const canSubmit: ComputedRef<boolean> = computed<boolean>((): boolean => {
+		if (props.block.submitting) return false
+		for (let i = 0; i < props.block.answers.length; i++) {
+			if (props.block.answers[i].text.trim().length > 0) return true
+		}
+		return false
+	})
+
+	function emptyAnswer(index: number): AskAnswer {
+		return {
+			index: index, text: '', selectedLabel: '', selectedLabels: [],
+			supplement: '', skipped: false, custom: false, answered: false
+		}
+	}
+
+	function answerOf(index: number): AskAnswer {
+		const list: AskAnswer[] = props.block.answers
+		if (index < 0 || index >= list.length) return emptyAnswer(index)
+		return list[index]
+	}
+
+	function isOptionOn(index: number, label: string): boolean {
+		const a: AskAnswer = answerOf(index)
+		if (a.selectedLabels.indexOf(label) >= 0) return true
+		return a.selectedLabel === label
+	}
+
+	/** 单选：点已选项=取消；取消后若还有补充文字，答案降级为纯自定义（不丢用户已写的字）。
+	 *  多选：累加/移出，补充文字始终作为附加项保留。 */
+	function onPickOption(index: number, label: string): void {
+		if (props.block.submitting) return
+		const a: AskAnswer = answerOf(index)
+		const multi: boolean = index < props.block.questions.length && props.block.questions[index].multiSelect
+		if (multi) {
+			const labels: string[] = []
+			for (let i = 0; i < a.selectedLabels.length; i++) {
+				if (a.selectedLabels[i] !== label) labels.push(a.selectedLabels[i])
+			}
+			const wasOn: boolean = a.selectedLabels.indexOf(label) >= 0
+			if (!wasOn) labels.push(label)
+			const text: string = joinMulti(labels, a.supplement)
+			emit('edit', actionId.value, index, {
+				index: index, text: text, selectedLabel: '', selectedLabels: labels,
+				supplement: a.supplement, skipped: false, custom: text.trim().length > 0 && labels.length === 0,
+				answered: text.trim().length > 0
+			})
+			return
+		}
+		const wasOn: boolean = a.selectedLabel === label
+		const sel: string = wasOn ? '' : label
+		const text: string = compose(sel, a.supplement)
+		emit('edit', actionId.value, index, {
+			index: index, text: text, selectedLabel: sel, selectedLabels: [],
+			supplement: a.supplement, skipped: false, custom: sel.length === 0 && text.trim().length > 0,
+			answered: text.trim().length > 0
+		})
+	}
+
+	function onSupplementInput(index: number, event: any): void {
+		if (props.block.submitting) return
+		const detail: any = event != null ? event.detail : null
+		const value: string = detail != null && typeof detail.value === 'string' ? detail.value : ''
+		const a: AskAnswer = answerOf(index)
+		const multi: boolean = index < props.block.questions.length && props.block.questions[index].multiSelect
+		const text: string = multi ? joinMulti(a.selectedLabels, value) : compose(a.selectedLabel, value)
+		emit('edit', actionId.value, index, {
+			index: index, text: text, selectedLabel: a.selectedLabel, selectedLabels: a.selectedLabels,
+			supplement: value, skipped: false,
+			custom: a.selectedLabel.length === 0 && a.selectedLabels.length === 0 && value.trim().length > 0,
+			answered: text.trim().length > 0
+		})
+	}
+
+	/** 单选出站文本：选项与补充并存时拼「选项（补充：…）」，与后端 formatAnswerText 括号风格一致 */
+	function compose(selectedLabel: string, supplement: string): string {
+		const sel: string = selectedLabel.trim()
+		const sup: string = supplement.trim()
+		if (sel.length === 0) return sup
+		if (sup.length === 0) return sel
+		return sel + '（补充：' + sup + '）'
+	}
+
+	/** 多选出站文本：选中项以「、」连接，自由输入追加在尾部 */
+	function joinMulti(labels: string[], supplement: string): string {
+		const parts: string[] = []
+		for (let i = 0; i < labels.length; i++) {
+			if (labels[i].length > 0) parts.push(labels[i])
+		}
+		const sup: string = supplement.trim()
+		if (sup.length > 0) parts.push(sup)
+		return parts.join('、')
+	}
+
+	function onApprove(approved: boolean): void {
+		if (props.block.submitting) return
+		emit('approve', actionId.value, approved)
+	}
+
+	function onSubmitAsk(): void {
+		if (!canSubmit.value) return
+		emit('answer', actionId.value)
+	}
+</script>
+
+<style lang="scss">
+	.app-interact-card {
+		/* 卡片与桌面 .question-card/.hitl-card 同构：浅底 + 1px 边框 + 圆角，与过程行区分开 */
+		margin-top: 8px;
+		padding: 12px;
+		border-radius: 12px;
+		border-width: 1px;
+		border-style: solid;
+		border-color: var(--color-border);
+		background-color: var(--color-bg-card);
+		flex-direction: column;
+
+		&--hitl {
+			border-color: var(--color-warning);
+		}
+
+		&--resolved {
+			background-color: transparent;
+			border-color: var(--color-border-light);
+		}
+
+		&__q {
+			flex-direction: column;
+			margin-bottom: 12px;
+		}
+
+		&__q-title {
+			font-size: 14px;
+			font-weight: 600;
+			color: var(--color-text);
+			line-height: 20px;
+			margin-bottom: 4px;
+		}
+
+		&__q-detail {
+			font-size: 13px;
+			color: var(--color-text-secondary);
+			line-height: 19px;
+			margin-bottom: 8px;
+		}
+
+		&__opt {
+			flex-direction: row;
+			align-items: flex-start;
+			padding: 9px 10px;
+			margin-bottom: 6px;
+			border-radius: 9px;
+			border-width: 1px;
+			border-style: solid;
+			border-color: var(--color-border);
+			background-color: var(--color-bg);
+
+			&--on {
+				border-color: var(--color-primary);
+				background-color: var(--color-primary-alpha);
+			}
+		}
+
+		/* 选中标记手写 view 而非 rice-icon：未选中要一个空圈，图标库里没有该形态，
+		   且这里只需要 6px 实心点 + 1px 描边，走原生节点最可控 */
+		&__opt-mark {
+			width: 14px;
+			height: 14px;
+			border-radius: 7px;
+			border-width: 1px;
+			border-style: solid;
+			border-color: var(--color-text-tertiary);
+			margin-top: 2px;
+			margin-right: 9px;
+			flex-shrink: 0;
+
+			&--on {
+				border-color: var(--color-primary);
+				background-color: var(--color-primary);
+			}
+		}
+
+		&__opt-text {
+			flex: 1;
+			flex-direction: column;
+		}
+
+		&__opt-label {
+			font-size: 13px;
+			font-weight: 500;
+			color: var(--color-text);
+			line-height: 19px;
+		}
+
+		&__opt-desc {
+			font-size: 12px;
+			color: var(--color-text-secondary);
+			line-height: 17px;
+			margin-top: 2px;
+		}
+
+		&__opt-rec {
+			font-size: 11px;
+			color: var(--color-text-secondary);
+			background-color: var(--color-brand-soft);
+			padding: 1px 6px;
+			border-radius: 5px;
+			margin-left: 6px;
+			flex-shrink: 0;
+		}
+
+		&__input {
+			height: 38px;
+			padding: 0 10px;
+			margin-top: 2px;
+			border-radius: 9px;
+			border-width: 1px;
+			border-style: solid;
+			border-color: var(--color-border);
+			background-color: var(--color-bg);
+			font-size: 13px;
+			color: var(--color-text);
+		}
+
+		&__cmd {
+			font-size: 13px;
+			line-height: 20px;
+			color: var(--color-text);
+			font-family: monospace;
+			padding: 9px 10px;
+			border-radius: 9px;
+			background-color: var(--color-bg);
+			margin-bottom: 10px;
+		}
+
+		&__acts {
+			flex-direction: row;
+			justify-content: flex-end;
+		}
+
+		&__btn {
+			height: 34px;
+			padding: 0 16px;
+			border-radius: 9px;
+			align-items: center;
+			justify-content: center;
+			margin-left: 8px;
+			border-width: 1px;
+			border-style: solid;
+
+			&--primary {
+				background-color: var(--color-primary);
+				border-color: var(--color-primary);
+			}
+
+			&--danger {
+				background-color: transparent;
+				border-color: var(--color-error);
+			}
+
+			&--disabled {
+				opacity: 0.45;
+			}
+		}
+
+		&__btn-text {
+			font-size: 13px;
+			font-weight: 500;
+
+			&--primary {
+				color: var(--color-text-inverse);
+			}
+
+			&--danger {
+				color: var(--color-error);
+			}
+		}
+
+		&__resolved {
+			font-size: 13px;
+			color: var(--color-text-secondary);
+			line-height: 19px;
+		}
+
+		&__error {
+			font-size: 12px;
+			color: var(--color-error);
+			line-height: 17px;
+			margin-top: 8px;
+		}
+	}
+</style>

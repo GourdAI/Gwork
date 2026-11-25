@@ -1,9 +1,14 @@
 <template>
 	<view class="app-conv-row" @click="emit('open')" @longpress="onLongpress">
-		<view v-if="pinned" class="app-conv-row__pin">
-			<!-- 图标待字体图标补全 -->
+		<!-- 置顶标记：旧版这里是个空 view（注释「图标待字体图标补全」），于是置顶行
+			 只多出 7px 左边距、什么也看不见，而「置顶」的唯一线索被压到了 font-weight
+			 上——同一列表里出现 650/400 两种字重，读起来就是字号不齐。
+			 改用纯 CSS 圆点：不依赖字体图标（APP 端 rice-icon 的 font-family 实测不渲染），
+			 字重回归统一，置顶仍可一眼识别。 -->
+		<view class="app-conv-row__pin-slot">
+			<view v-if="pinned" class="app-conv-row__pin"></view>
 		</view>
-		<text class="app-conv-row__name" :class="pinned ? 'app-conv-row__name--pin' : ''">{{ title }}</text>
+		<text class="app-conv-row__name">{{ title }}</text>
 		<text class="app-conv-row__time">{{ time }}</text>
 	</view>
 </template>
@@ -31,32 +36,41 @@
 </script>
 
 <style lang="scss">
+	/* 字号三档（全列表统一，别再引入 15.5/14.5/13.5 之类的中间档）：
+	   标题 15px / 次要 13px / 时间 12px。同一语义层级必须同字号，
+	   否则相邻两行看起来「一样重要却大小不同」。 */
 	.app-conv-row {
 		flex-direction: row;
 		align-items: center;
 		height: 44px;
 
+		/* 固定槽位：有无置顶标记时标题左边缘不跳动 */
+		&__pin-slot {
+			width: 14px;
+			align-items: flex-start;
+			justify-content: center;
+		}
+
 		&__pin {
-			margin-right: 7px;
+			width: 6px;
+			height: 6px;
+			border-radius: 3px;
+			background-color: var(--color-primary);
 		}
 
 		&__name {
 			flex: 1;
 			min-width: 0;
-			font-size: 15.5px;
+			font-size: 15px;
 			color: var(--color-text);
 			overflow: hidden;
 			text-overflow: ellipsis;
 			white-space: nowrap;
-
-			&--pin {
-				font-weight: 650;
-			}
 		}
 
 		&__time {
 			margin-left: 10px;
-			font-size: 12.5px;
+			font-size: 12px;
 			color: var(--color-text-tertiary);
 		}
 	}

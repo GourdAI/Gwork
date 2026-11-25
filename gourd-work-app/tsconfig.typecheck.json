@@ -1,0 +1,27 @@
+{
+  // `npm run type-check` 专用配置（HBuilderX 不读这个文件，只读 tsconfig.json）。
+  //
+  // 与 tsconfig.json 的差别只有两点，都是为了「让 tsc 能当门禁用」：
+  //   1. 显式纳入 types/uni-app-x.d.ts —— tsc 看不到 HBuilderX 编译器注入的 uni 全局对象，
+  //      不补声明时每一处 uni.xxx 都会报 TS2304（历史 254 条基线的主要来源）。
+  //      该垫片故意**不**进 tsconfig.json 的 include：它是 tsc 专属的，
+  //      若被 HBuilderX 的类型服务同时载入，会与编译器自带的 uni 声明重复。
+  //   2. 排除 build/ 下的 node 脚本（.cjs 不参与，只为少扫一遍目录）。
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true
+  },
+  "include": [
+    "**/*.uts",
+    "**/*.uvue",
+    "**/*.ts",
+    "**/*.d.ts",
+    "types/**/*.d.ts"
+  ],
+  "exclude": [
+    "node_modules",
+    "unpackage",
+    "uni_modules/*/uniCloud-aliyun/cloudfunctions",
+    "build/**"
+  ]
+}

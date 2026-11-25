@@ -248,9 +248,29 @@ export async function telegramLogin(
 
 // User registration
 export async function register(payload: RegisterPayload): Promise<ApiResponse> {
-  const res = await api.post(`/api/user/register`, payload, {
+  // Same transport encryption as login: with PASSWORD_LOGIN_ENCRYPTION on, the
+  // plaintext must not leave the browser here either. The backend Register
+  // handler decrypts `password_encrypted` + `encryption_key_id` with the same
+  // v2 envelope logic.
+  const { password, passwordEncryptionEnabled, ...rest } = payload
+  let passwordFields: { password: string } | { password_encrypted: string; encryption_key_id: string }
+  if (passwordEncryptionEnabled) {
+    const encrypted = await encryptPassword(password)
+    passwordFields = {
+      password_encrypted: encrypted.password_encrypted,
+      encryption_key_id: encrypted.encryption_key_id,
+    }
+  } else {
+    passwordFields = { password }
+  }
+  const res = await api.post(`/api/user/register`, { ...rest, ...passwordFields }, {
     params: { turnstile: payload.turnstile ?? '' },
   })
+  // A stale/rotated key makes the envelope undecryptable (server answers
+  // "Invalid parameters"); drop the cache so the next attempt re-fetches it.
+  if (passwordEncryptionEnabled && !res.data?.success) {
+    clearPasswordEncryptionCache()
+  }
   return res.data
 }
 

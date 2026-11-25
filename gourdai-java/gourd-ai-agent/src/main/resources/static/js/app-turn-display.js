@@ -233,11 +233,587 @@
         return hs.length ? hs[hs.length - 1] : null;
     }
 
+    /* ====================================================================
+     * 批次成员限高滚动窗（2026-11 用户拍板：运行中/历史展开一律限高约 8 行，
+     * 超出内部滚动；新步骤自动跟随到底，用户上滑查看时暂停跟随，回到底部恢复）。
+     *
+     * 【绝不插包装层/垫片】app.css:825 相邻兄弟选择器、membersOf 兄弟区间、
+     * noteProcessInsert 邻接校验、compact 分类全都假定「盖子之后是连续的成员
+     * 直接子级」——历史上插包装节点出过分组折叠静默失效事故，插占位垫片同样
+     * 会切断邻接判定（prev !== expected ⇒ 每个新成员切一个新批次）。
+     * 因此滚动完全用【合成器绘制】实现，DOM 一根手指不动：
+     *   · 每个可见成员 transform: translateY(-pos)（视觉位移，点击命中随视觉走，
+     *     不影响布局）；
+     *   · 每个可见成员 clip-path: inset(...)（按成员与固定视窗的相交区间裁剪，
+     *     clip 在 transform 之前的本地坐标系计算）；
+     *   · 批次总占位恒定：末成员 margin-bottom = 基值 - overflow（与 pos 无关；
+     *     成员自身 margin 基值记在 _winMt/_winMb）。margin 只写在成员自身上，
+     *     不新增节点，邻接/兄弟区间全部不受影响。
+     *     【code review 修复 2026-11】写入必须带 !important：运行态
+     *     `.agent-live .msg-bubble > .tool-card { margin:0 !important }`（app.css:4333）
+     *     与展开态 `margin:2px 0 !important`（app.css:4296）会压死普通 inline margin，
+     *     补偿失效 ⇒ 批次下方留出 overflow 高的空洞。inline !important 压过样式表 !important。
+     * 滚轮：wheel 绑在容器（气泡/卡体）上按 ev.target 归属换算 pos；到边界放行
+     * 给页面滚动。跟随策略：pos 距底部 ≤ FOLLOW_SLACK_PX 视为贴底，新成员到达
+     * 时贴底自动跟到最新；用户上滑离开底部即停，滑回底部恢复。
+     * 所有几何读取都有守卫：Node 契约测试的极简假 DOM 无布局 → 全链 no-op，
+     * 测试看到的仍是原平铺 DOM 形态（零感知）。 */
+    var WINDOW_MAX_PX = 232;      /* ≈ 8 行过程行（13px/1.6 + 上下 padding ≈ 29px/行） */
+    var FOLLOW_SLACK_PX = 24;     /* 距底部小于该值视为贴底（跟随态） */
+
+    /* 布局是否可测（浏览器真 DOM）；假 DOM / 游离节点一律不可测 → 全链 no-op。 */
+    function measurable(el) {
+        return !!(el && typeof el.getBoundingClientRect === 'function'
+            && el.ownerDocument && el.ownerDocument.defaultView);
+    }
+
+    function px(n) { return (Math.round(Math.max(0, n) * 100) / 100) + 'px'; }
+
+    /* 成员几何：rect.height 与 transform/clip 无关，可直接量；margin 用
+       getComputedStyle 拿【基值】（首次量测记在 el._winMt/_winMb，之后复用，
+       避免把自己写上去的补偿 margin 再量进来）。
+       【布局顶必须用 offsetTop，绝不能用 rect.top（2026-11 真机探针实锤）】
+       Chromium 对 transform 走合成器线程：getBoundingClientRect 返回的是
+       【合成器位】= 布局位 + translateY，且清掉 inline transform 后合成器
+       提交有延迟 —— 同一 JS 任务内 rect.top 仍带旧 -pos 偏移（探针：清样式后
+       rect.top=-497 而 offsetTop=63）。offsetTop 是纯布局属性，不受 transform
+       影响、读它必触发同步布局 flush，量到的才是未补偿布局位。
+       rect.height 不受 transform 影响，继续用 rect。
+       桩 DOM 无 offsetTop（undefined）→ 回落 rect.top（契约测试零布局兼容）。 */
+    function memberMetrics(el) {
+        var r = el.getBoundingClientRect();
+        if (typeof el._winMt !== 'number') {
+            var st = el.ownerDocument.defaultView.getComputedStyle
+                ? el.ownerDocument.defaultView.getComputedStyle(el) : null;
+            el._winMt = st ? parseFloat(st.marginTop) || 0 : 0;
+            el._winMb = st ? parseFloat(st.marginBottom) || 0 : 0;
+        }
+        /* offsetTop 相对 offsetParent（最近 positioned 祖先）的 padding 边。
+           同一批成员都是宿主容器直接子级、自身 static ⇒ 共享同一 offsetParent，
+           坐标系一致；windowGeometry 全程差分（origin=首成员顶），常量偏移抵消。
+           用 offsetParent.rect.top + border-top + padding-top 把 offsetTop 换算回
+           视口坐标，与 rect 模型完全同纲（paintWindowScrollbar 拿 metrics[0].top
+           与盖子 rect.top 直接差分也成立）。offsetParent 的 rect 不受成员 transform
+           影响（成员位移不改容器布局），换算式干净。
+           【必须减 offsetParent.scrollTop —— 2026-11-24 真机实锤的页面错乱根因】
+           offsetTop 是【内容坐标】（不随容器滚动变），rect.top 是【视口坐标】
+           （随滚动变）。offsetParent 恰是滚动容器（.messages-wrap，position:absolute
+           + overflow 滚动）时，旧换算式漏减 scrollTop：滚过 N px 后量出的 top 全体
+           虚高 N，而盖子 rect.top 是视口坐标 → trackTop = 成员顶 - 盖子顶 混纲，
+           实测 scrollTop=670 时滚动条轨道被画到盖子下方 8358px（用户截图「右侧
+           一大条空白沟 + 滚动条漂在远处」）；overflow/补偿同被污染，末成员负
+           margin 多扣 ⇒ 后续正文整体上提、行与行互相叠压（「页面错乱」）。
+           减掉 scrollTop 后两坐标同纲，滚动到任何位置量测都稳定。
+           桩 DOM 无 offsetTop/offsetParent → 回落 rect.top（零布局兼容）。 */
+        var top = r.top;
+        if (typeof el.offsetTop === 'number' && el.offsetParent
+                && typeof el.offsetParent.getBoundingClientRect === 'function') {
+            var op = el.offsetParent;
+            var opr = op.getBoundingClientRect();
+            var ost = el.ownerDocument.defaultView.getComputedStyle
+                ? el.ownerDocument.defaultView.getComputedStyle(op) : null;
+            var inset = ost ? (parseFloat(ost.borderTopWidth) || 0) + (parseFloat(ost.paddingTop) || 0) : 0;
+            top = el.offsetTop + opr.top + inset - (op.scrollTop || 0);
+        }
+        return { h: r.height, mt: el._winMt, mb: el._winMb, top: top };
+    }
+
+    /* 【code review 修复 2026-11 · margin 折叠】行位置绝不按 Σ(mt+h+mb) 加法推算：
+       成员是普通块级兄弟，相邻 margin 会折叠（实际间距 = max(mb_i, mt_i+1)），
+       加法模型每接缝多算 margin（卡体内 8px/缝，20 行偏差 ~150px，clip 逐行错位）。
+       一律用 rect.top 差分实测。前提：refreshWindow 量测前已清掉全部补偿 margin
+       （负 mb 会经折叠把末行布局位上提，污染 rect.top），此处量到的即未补偿布局。
+       所有可见成员被同一 translateY(-pos) 位移，rect 差值与 pos 无关，天然免疫
+       transform。origin = 首成员 top - mt0（成员区布局顶）。
+       桩 DOM 所有 rect.top 恒 0（差分不可用）时回落加法模型（契约测试兼容）。 */
+    function windowGeometry(visible, metrics) {
+        var rows = [];
+        /* 单成员没有差分对，rect 模型同样精确；≥2 成员全 top=0 视为零布局桩 → 加法回落 */
+        var additive = visible.length > 1;
+        for (var i = 1; i < visible.length; i++) {
+            if (metrics[i].top !== metrics[0].top) { additive = false; break; }
+        }
+        var acc = 0;
+        /* origin = 首成员 mt 上缘（含首 mt）：与加法模型 acc 同口径，
+           保证 total 含首尾全部基值 margin，补偿后占位恒 = WIN。 */
+        var origin = additive ? 0 : metrics[0].top - metrics[0].mt;
+        for (var j = 0; j < visible.length; j++) {
+            var m = metrics[j];
+            var rowTop = additive ? acc + m.mt : m.top - origin;
+            rows.push(rowTop);
+            acc = rowTop + m.h + m.mb;
+        }
+        var last = metrics[metrics.length - 1];
+        var total = additive ? acc : (last.top + last.h + last.mb) - origin;
+        /* additive 标志必须随几何下发：paintWindow 的补偿口径要按【同一判定】分叉。
+           旧实现用「首末 top 不等」二次推断 rect 模式 —— 单成员窗（一张展开的长思考卡
+           就超 232px）首末是同一节点恒等，被误判 additive ⇒ comp 多扣 mt0（2px），
+           后续内容整体上提 2px。单一事实来源，杜绝两处判定分叉。 */
+        return { rows: rows, total: total, additive: additive };
+    }
+
+    /* inline 样式写入助手：margin-bottom 补偿必须带 !important（压过 app.css
+       运行态/展开态的 margin !important，见文件头注释）；其余属性普通写入。
+       桩 DOM 的 style 是裸对象（无 setProperty）→ 回落属性赋值，契约测试可量。 */
+    function setStyle(el, prop, val, important) {
+        if (!el.style) return;
+        if (important && typeof el.style.setProperty === 'function') {
+            if (val === '') el.style.removeProperty(prop);
+            else el.style.setProperty(prop, val, 'important');
+            return;
+        }
+        if (prop === 'margin-bottom') el.style.marginBottom = val;
+        else if (prop === 'margin-top') el.style.marginTop = val;
+        else if (prop === 'transform') el.style.transform = val;
+        else if (prop === 'clip-path') el.style.clipPath = val;
+    }
+
+    /* 把滚动位置应用到 DOM：成员 translateY(-pos) + clip-path 裁窗 +
+       末成员 margin-bottom = 基值 - overflow（把溢出高度从布局占位里吃掉）。
+       行位置来自 windowGeometry 的 rect 差分实测（免疫兄弟 margin 折叠）：
+         clip = inset( max(0, pos - rowTop_i) 0 max(0, rowBottom_i - (pos + WIN)) 0 )
+       占位恒等式（total = 成员区实测总高含基值 margin，overflow = total - WIN）：
+         成员布局位置完全不动（translate 是纯视觉位移，不改布局），
+         末成员 margin-bottom = mbLast - overflow ⇒ 批次总占位恒 = WIN，
+         后续内容（正文/页脚）位置与 pos 无关、绝不随滚动漂移。
+       负 margin 合法：mbLast < overflow 时把后续内容上提，正是「吃掉溢出」语义。
+       clip 在 transform 之前的本地坐标系计算，与 translateY 天然配套。
+       【写放大抑制】值未变的成员跳过写入（几百成员 × 秒级 ticker × 滚轮 60Hz）。 */
+    function paintWindow(header, visible, metrics, pos, overflow, geom) {
+        var g = geom || windowGeometry(visible, metrics);
+        for (var i = 0; i < visible.length; i++) {
+            var el = visible[i];
+            var m = metrics[i];
+            var rowTop = g.rows[i];
+            var rowBottom = rowTop + m.h;
+            var clipTop = Math.max(0, pos - rowTop);
+            var clipBottom = Math.max(0, rowBottom - (pos + WINDOW_MAX_PX));
+            var tf = pos > 0 ? 'translateY(' + (-pos) + 'px)' : '';
+            var cp = (clipTop > 0 || clipBottom > 0)
+                ? 'inset(' + px(clipTop) + ' 0 ' + px(clipBottom) + ' 0)' : '';
+            var isLast = i === visible.length - 1;
+            /* 【rect 模式补偿口径】total 量的是「首成员 mt 上缘 → 末成员 mb 下缘」，
+               但首成员 mt 与盖子的 mb 折叠后被盖子「吃掉」（不占成员区布局），
+               末成员 mb 同理与后续兄弟折叠。真正可压缩的占位 = total - mt0 - mbLast
+               + max(mbLast, mtNext) …… 精确建模折叠链成本过高。
+               工程口径：补偿量 = overflow - mt0（首 mt 已被盖子折叠吸收，
+               不该再压一次），末行 mb 写 mbLast - (overflow - mt0)。
+               additive 桩无折叠，mt0 不吸收，保持原式。 */
+            var comp = g.additive ? overflow : Math.max(0, overflow - metrics[0].mt);
+            var mb = isLast
+                ? (Math.round((m.mb - comp) * 100) / 100) + 'px'
+                : px(m.mb);
+            var cache = el._winPaint || (el._winPaint = {});
+            if (cache.tf !== tf) { setStyle(el, 'transform', tf, false); cache.tf = tf; }
+            if (cache.cp !== cp) { setStyle(el, 'clip-path', cp, false); cache.cp = cp; }
+            if (cache.mb !== mb) { setStyle(el, 'margin-bottom', mb, true); cache.mb = mb; }
+            /* 补偿量游标：下一轮量测前清 margin 用（记录上轮写入的偏移） */
+            el._winCompMb = isLast ? -comp : 0;
+        }
+    }
+
+    function clearWindowPaint(ms) {
+        for (var i = 0; i < ms.length; i++) {
+            var el = ms[i];
+            if (el.style) {
+                /* margin 一律清空交还样式表：写死基值会把样式表后续变更
+                   （主题/紧凑层）钉死；清 inline 才是真还原。 */
+                setStyle(el, 'transform', '', false);
+                setStyle(el, 'clip-path', '', false);
+                setStyle(el, 'margin-top', '', true);
+                setStyle(el, 'margin-bottom', '', true);
+            }
+            el._winMt = undefined;
+            el._winMb = undefined;
+            el._winPaint = undefined;
+            el._winCompMb = undefined;
+        }
+    }
+
+    /* 刷新滚动窗：量总高 → 算 overflow → 应用 pos。
+       follow=true（新成员到达/展开）时若原 pos 贴底则跟到最新。幂等可高频调。 */
+    function refreshWindow(header, follow) {
+        if (!header || !header.parentNode || !measurable(header)) return;
+        var open = header.getAttribute('data-batch-open') === 'true';
+        var ms = membersOf(header);
+        var visible = [];
+        for (var i = 0; i < ms.length; i++) {
+            /* 交互卡（HITL 接管后仍带标记的残留/恢复路径）不进窗：常驻可见，
+               与 applyMembers 的豁免同口径。 */
+            if (isInteractiveCard(ms[i])) continue;
+            if (!(ms[i].classList && ms[i].classList.contains('turn-batch-collapsed'))) visible.push(ms[i]);
+        }
+        if (!open || visible.length === 0) {
+            teardownWindow(header);
+            if (!open) clearBatchGuide(header);
+            return;
+        }
+        /* 【量测前必须先清补偿 + 强制重排】负 margin-bottom 会经兄弟 margin 折叠
+           把后续行布局位整体上提（rect.top 被污染）；上一轮补偿可能写在【旧末行】
+           （新成员到达后它已不是末行，但补偿还挂在它身上）。按 _winVisible 旧缓存
+           清全部曾入窗成员的 inline margin 与补偿游标，再【读一次布局强制同步
+           重排】，之后量到的 rect 才是未补偿位。transform/clip 不动（rect 与它们
+           无关）。读-写-读三段，每秒一次可接受。 */
+        var toClear = header._winVisible || visible;
+        for (var c = 0; c < toClear.length; c++) {
+            setStyle(toClear[c], 'margin-top', '', true);
+            setStyle(toClear[c], 'margin-bottom', '', true);
+            /* 【必须同步清 transform】translateY(-pos) 是视觉位移，rect.top
+               含它；只清 margin 不清 transform，量到的 top 仍带 -pos 偏移，
+               origin 虽差分抵消，但末行 total 与 clip 行位全部错位 pos。
+               清 transform 后 rect 即纯布局位（clip 不影响 rect）。 */
+            setStyle(toClear[c], 'transform', '', false);
+            if (toClear[c]._winPaint) { toClear[c]._winPaint.mb = undefined; toClear[c]._winPaint.tf = undefined; }
+            toClear[c]._winCompMb = undefined;
+        }
+        for (var c2 = 0; c2 < visible.length; c2++) {
+            if (toClear.indexOf(visible[c2]) >= 0) continue;
+            setStyle(visible[c2], 'margin-top', '', true);
+            setStyle(visible[c2], 'margin-bottom', '', true);
+            setStyle(visible[c2], 'transform', '', false);
+            if (visible[c2]._winPaint) { visible[c2]._winPaint.mb = undefined; visible[c2]._winPaint.tf = undefined; }
+            visible[c2]._winCompMb = undefined;
+        }
+        void visible[0].getBoundingClientRect();   /* 强制 flush 布局 */
+        var metrics = [];
+        for (var v = 0; v < visible.length; v++) metrics.push(memberMetrics(visible[v]));
+        var geom = windowGeometry(visible, metrics);
+        var overflow = Math.max(0, geom.total - WINDOW_MAX_PX);
+        /* 层级引导线：平铺态（未建窗）也要画。此刻补偿已清、布局已 flush，
+           metrics 是纯布局位 —— 用几何差分（末行底 - 首行顶），与窗几何同源。 */
+        if (overflow <= 0.5) {
+            teardownWindow(header);
+            var lastM = metrics[metrics.length - 1];
+            var guideH = (lastM.top + lastM.h) - metrics[0].top;
+            if (guideH > 0 && header.style && header.style.setProperty) {
+                var gv = px(guideH);
+                if (header._guideH !== gv) { header.style.setProperty('--batch-guide-h', gv); header._guideH = gv; }
+            } else {
+                clearBatchGuide(header);
+            }
+            return;
+        }
+        /* 【滚动条可见性 2026-11 用户报「固定高度，滚动条没显示」】clip+translate 是
+           合成器绘制，浏览器不产原生滚动条 —— 必须自绘 thumb（绝对定位浮层，
+           不参与布局，成员兄弟区间/邻接判定零影响）。 */
+        /* pos 恢复/跟随：_winPos 是运行时游标（不落 DOM 属性，回放不会误读）。
+           首窗：running 态贴底看最新；closed 态（历史/收口后点开）从头看更自然。 */
+        var prevPos = header._winPos;
+        var prevOverflow = header._winOverflow;
+        var pos;
+        if (typeof prevPos !== 'number') {
+            pos = header.getAttribute('data-batch-state') === 'running' ? overflow : 0;
+        } else {
+            var pinned = (prevOverflow - prevPos) <= FOLLOW_SLACK_PX;
+            pos = (follow && pinned) ? overflow : prevPos;
+        }
+        pos = Math.max(0, Math.min(overflow, pos));
+        /* 离开窗口的旧成员（被折叠/删除）残留的位移与 margin 必须清掉 */
+        if (header._winVisible) {
+            var gone = [];
+            for (var g = 0; g < header._winVisible.length; g++) {
+                if (visible.indexOf(header._winVisible[g]) < 0) gone.push(header._winVisible[g]);
+            }
+            if (gone.length) clearWindowPaint(gone);
+        }
+        header._winPos = pos;
+        header._winOverflow = overflow;
+        header._winVisible = visible;
+        header._winMetrics = metrics;
+        header._winGeom = geom;
+        header.classList.add('turn-batch-windowed');
+        /* 滚动条几何必须在 paintWindow 之前量：metrics 是清补偿后的纯布局位，
+           paint 之后 rect.top 含 translateY(-pos)，反解易错。 */
+        paintWindowScrollbar(header, pos, overflow);
+        paintWindow(header, visible, metrics, pos, overflow, geom);
+        paintBatchGuide(header);
+        bindWindowWheel(header);
+        bindScrollbarDrag(header);
+    }
+
+    /* ===== 自绘滚动条（2026-11 用户报「收缩折叠固定高度，滚动条没显示」）=====
+       合成滚动没有原生滚动条，用户无从感知「还有更多行」也无法拖动定位。
+       【零 DOM 插入】滚动条画在【盖子自身的 ::after】上（button 可渲染伪元素）：
+         · 盖子 position:relative（CSS），::after absolute 贴盖子右缘，
+           top = 盖子高 + 盖子 mb 与首成员 mt 折叠后的间隙（成员区真实顶），
+           height = WINDOW_MAX_PX；thumb 高按视窗/总高比例、位置按 pos/overflow
+           比例，全部经 CSS 变量（--win-sb-top/-h/-thumb-h/-thumb-y）下发。
+         · 兄弟区间/邻接校验/compact 分类零影响（没有新节点）；折叠时盖子
+           display:none，滚动条随盖子一起消失，无残留清扫负担。
+         · 拖动：pointerdown 命中盖子右缘 SB_HIT 区（thumb 轨道）时接管，
+           pointermove 换算 pos 写游标 + paintWindow（与 wheel 同一绘制管线），
+           并 stopPropagation 防止冒泡触发盖子的展开/收起 click。
+         · wheel 高频路径只写 CSS 变量（纯算术），不读布局。 */
+    var SB_W = 6;              /* 轨道视觉宽度 */
+    var SB_HIT = 16;           /* 盖子右缘拖动命中区宽度（视觉 6px，命中 16px） */
+    var SB_MIN_THUMB = 28;     /* thumb 最小高度：内容极长时仍可抓握 */
+
+    /* 量测/重绘滚动条几何。metrics 是 refreshWindow 清补偿后、paintWindow 之前
+       量的纯布局位（top 不含 translateY），首成员 mt 上缘即成员区顶。 */
+    function paintWindowScrollbar(header, pos, overflow) {
+        if (!header || !header.style || !header.style.setProperty || !measurable(header)) return;
+        var ms = header._winVisible, metrics = header._winMetrics;
+        if (!ms || !ms.length || !metrics || !metrics.length) return;
+        var hr = header.getBoundingClientRect();
+        if (!(hr.height > 0)) return;   /* 零布局桩：不写滚动条变量 */
+        /* 成员区顶相对盖子顶 = 首成员布局顶 - 盖子布局顶。
+           metrics[0].top 是 offsetTop 换算的【纯布局位】（不含 translateY），
+           盖子自身无 transform，rect.top 即布局位 —— 直接差分，不再建模
+           margin 折叠间隙（探针实测 gap 模型与真实布局差 2px）。 */
+        var trackTop = metrics[0].top - hr.top;
+        if (!(trackTop >= 0)) trackTop = hr.height;   /* 防御：异常几何回落盖子高 */
+        var total = overflow + WINDOW_MAX_PX;
+        var thumbH = Math.max(SB_MIN_THUMB, Math.round(WINDOW_MAX_PX * WINDOW_MAX_PX / total));
+        var thumbTop = overflow > 0 ? Math.round((WINDOW_MAX_PX - thumbH) * pos / overflow) : 0;
+        header.style.setProperty('--win-sb-top', px(trackTop));
+        header.style.setProperty('--win-sb-h', px(WINDOW_MAX_PX));
+        header.style.setProperty('--win-sb-thumb-h', px(thumbH));
+        header.style.setProperty('--win-sb-thumb-y', px(thumbTop));
+        header._winSbGeom = { trackTop: trackTop, thumbH: thumbH, headH: hr.height };
+    }
+
+    /* wheel / 拖动共用：只更新 thumb 位移变量（纯算术，不读布局）。 */
+    function moveWindowScrollbar(header, pos, overflow) {
+        var g = header._winSbGeom;
+        if (!g || !header.style || !header.style.setProperty) return;
+        var thumbTop = overflow > 0 ? Math.round((WINDOW_MAX_PX - g.thumbH) * pos / overflow) : 0;
+        header.style.setProperty('--win-sb-thumb-y', px(thumbTop));
+    }
+
+    /* 拖动命中：盖子右缘 SB_HIT 宽、纵向落在轨道区间内。
+       clientX/Y 与盖子 rect 差分；rect 每次 down 读一次（低频）。 */
+    function scrollbarHit(header, ev) {
+        var g = header._winSbGeom;
+        if (!g || typeof ev.clientX !== 'number' || typeof ev.clientY !== 'number') return false;
+        var hr = header.getBoundingClientRect();
+        var x = ev.clientX - hr.left, y = ev.clientY - hr.top;
+        return x >= hr.width - SB_HIT && x <= hr.width
+            && y >= g.trackTop && y <= g.trackTop + WINDOW_MAX_PX;
+    }
+
+    /* 拖动绑在【宿主容器】上（与 wheel 同策略）：::after 伪元素 pointer-events:none，
+       轨道区的 pointerdown 实际命中的是【成员行】而不是盖子 —— 绑盖子收不到事件。
+       按 clientX/Y 几何判定落在哪个 windowed 盖子的轨道区（scrollbarHit），
+       命中才接管；其余落点零干预（成员卡自己的展开 click 不受影响）。
+       接管后 document 级 pointermove/up + header.setPointerCapture 双保险，
+       拖动越出轨道也不丢手；click 吞掉用「容器 capture + 近期拖动标记」，
+       防止松手时误触成员卡/盖子的 click。 */
+    function bindScrollbarDrag(header) {
+        var bubble = header.parentNode;
+        if (!bubble || bubble._winSbDragBound || typeof bubble.addEventListener !== 'function') return;
+        bubble._winSbDragBound = true;
+        bubble.addEventListener('pointerdown', function (ev) {
+            if (!ev) return;
+            var hs = childHeadersOf(bubble);
+            var h = null;
+            for (var i = 0; i < hs.length; i++) {
+                if (hs[i].classList && hs[i].classList.contains('turn-batch-windowed')
+                        && scrollbarHit(hs[i], ev)) { h = hs[i]; break; }
+            }
+            if (!h) return;
+            if (ev.stopPropagation) ev.stopPropagation();
+            if (ev.preventDefault) ev.preventDefault();
+            var overflow = h._winOverflow;
+            var g = h._winSbGeom;
+            if (!(overflow > 0) || !g) return;
+            var startY = ev.clientY;
+            var startPos = h._winPos || 0;
+            var travel = WINDOW_MAX_PX - g.thumbH;
+            var doc = h.ownerDocument;
+            function onMove(e) {
+                if (travel > 0) {
+                    var dy = (e.clientY - startY);
+                    var next = Math.max(0, Math.min(overflow, startPos + dy * overflow / travel));
+                    h._winPos = next;
+                    paintWindow(h, h._winVisible || [], h._winMetrics || [], next, overflow, h._winGeom);
+                    moveWindowScrollbar(h, next, overflow);
+                }
+                bubble._winSbDragUntil = Date.now() + 250;
+                if (e.preventDefault) e.preventDefault();
+            }
+            function onUp() {
+                bubble._winSbDragUntil = Date.now() + 250;
+                if (doc && doc.removeEventListener) {
+                    doc.removeEventListener('pointermove', onMove, true);
+                    doc.removeEventListener('pointerup', onUp, true);
+                    /* 【code review 修复 2026-11】pointercancel 必须同路拆除：
+                       触屏滚动接管 / 系统手势 / 设备拔除时浏览器只发 cancel 不发 up，
+                       旧实现漏挂 ⇒ document 级 capture move 监听永久残留，
+                       之后每次移动鼠标都按旧几何改 pos + 吞 click（整卡点不动）。 */
+                    doc.removeEventListener('pointercancel', onUp, true);
+                }
+            }
+            bubble._winSbDragUntil = Date.now() + 250;
+            if (doc && doc.addEventListener) {
+                doc.addEventListener('pointermove', onMove, true);
+                doc.addEventListener('pointerup', onUp, true);
+                doc.addEventListener('pointercancel', onUp, true);
+            }
+            if (h.setPointerCapture && ev.pointerId !== undefined) {
+                try { h.setPointerCapture(ev.pointerId); } catch (e) { /* 桩 DOM */ }
+            }
+        }, true);
+        /* 拖动刚结束的一瞬松手 click 不得触发盖子收起/成员卡展开。 */
+        bubble.addEventListener('click', function (ev) {
+            if (bubble._winSbDragUntil && Date.now() < bubble._winSbDragUntil) {
+                if (ev.stopImmediatePropagation) ev.stopImmediatePropagation();
+                else if (ev.stopPropagation) ev.stopPropagation();
+                if (ev.preventDefault) ev.preventDefault();
+            }
+        }, true);
+    }
+
+    /* ===== 层级引导线（⑳ Qoder 缩进对齐，2026-11 用户「每个层级缩进一目了然」）=====
+       盖子 ::before 画一条 1px 竖线贯穿成员区左列（CSS 见 app.css ⑳ 块），
+       高度经 --batch-guide-h 下发。量测口径与滚动条同源：
+         · 建窗态：恒 = WINDOW_MAX_PX（窗占位恒定，与 pos 无关）；
+         · 平铺态：末成员布局底 - 首成员布局顶（memberMetrics 纯布局位差分，
+           须在清补偿后的量测段调用；本函数自身只读 rect，不写布局）。
+       零布局桩（Node 契约测试）measurable=false 直接 no-op，测试零感知。 */
+    function paintBatchGuide(header) {
+        if (!header || !header.style || !header.style.setProperty) return;
+        if (header.getAttribute('data-batch-open') !== 'true') { clearBatchGuide(header); return; }
+        /* 建窗态：窗占位恒 = WINDOW_MAX_PX，纯常量无需布局（桩 DOM 也可断言）。
+           平铺态的高度在 refreshWindow 清补偿量测段内联下发（那里才有纯布局位），
+           本函数不做第二次量测（paint 后 rect 含 translateY，量了就是错的）。 */
+        if (!(header.classList && header.classList.contains('turn-batch-windowed'))) return;
+        var v = px(WINDOW_MAX_PX);
+        if (header._guideH !== v) {
+            header.style.setProperty('--batch-guide-h', v);
+            header._guideH = v;
+        }
+    }
+
+    function clearBatchGuide(header) {
+        if (!header || !header.style || !header.style.removeProperty) return;
+        if (header._guideH !== undefined) {
+            header.style.removeProperty('--batch-guide-h');
+            header._guideH = undefined;
+        }
+    }
+
+    /* 拆窗：位移/裁剪/margin 全部还原，类与游标清除（成员回原平铺位）。 */
+    function teardownWindow(header) {
+        if (!header) return;
+        var had = header.classList && header.classList.contains('turn-batch-windowed');
+        clearWindowPaint(header._winVisible || membersOf(header));
+        if (header.classList) header.classList.remove('turn-batch-windowed');
+        /* 拆窗不清引导线：平铺展开态仍需要它（refreshWindow 的平铺分支会重量下发）；
+           收起态由 applyMembers / refreshWindow 的 !open 分支显式 clearBatchGuide。 */
+        if (header.style && header.style.removeProperty) {
+            header.style.removeProperty('--win-sb-top');
+            header.style.removeProperty('--win-sb-h');
+            header.style.removeProperty('--win-sb-thumb-h');
+            header.style.removeProperty('--win-sb-thumb-y');
+        }
+        header._winPos = undefined;
+        header._winOverflow = undefined;
+        header._winVisible = undefined;
+        header._winMetrics = undefined;
+        header._winGeom = undefined;
+        header._winSbGeom = undefined;
+        return had;
+    }
+
+    /* 滚轮接管：wheel 绑在【气泡/卡体容器】上（成员不是盖子子节点，事件不经过
+       盖子），按 ev.target 的 DOM 归属找到窗口批次。一容器一监听防重复。
+       到边界放行（不 preventDefault）：页面继续滚，不吃掉整页滚动。 */
+    function bindWindowWheel(header) {
+        var bubble = header.parentNode;
+        if (!bubble || bubble._winWheelBound || typeof bubble.addEventListener !== 'function') return;
+        bubble._winWheelBound = true;
+        bubble.addEventListener('wheel', function (ev) {
+            if (!ev || typeof ev.deltaY !== 'number') return;
+            var h = windowHeaderForEvent(bubble, ev);
+            if (!h) return;
+            var overflow = typeof h._winOverflow === 'number' ? h._winOverflow : 0;
+            if (overflow <= 0) return;
+            /* deltaMode 归一化：Firefox 滚轮默认 DOM_DELTA_LINE（deltaY≈±3），
+               直接当 px 用每格只滚 3px，窗内滚动近乎不可用。 */
+            var dy = ev.deltaY;
+            if (ev.deltaMode === 1) dy *= 29;               /* 行 → 过程行高 */
+            else if (ev.deltaMode === 2) dy *= WINDOW_MAX_PX; /* 页 → 视窗高 */
+            var pos = typeof h._winPos === 'number' ? h._winPos : 0;
+            var next = Math.max(0, Math.min(overflow, pos + dy));
+            if (next === pos) return;   /* 已在边界：放行给页面 */
+            h._winPos = next;
+            paintWindow(h, h._winVisible || [], h._winMetrics || [], next, overflow, h._winGeom);
+            moveWindowScrollbar(h, next, overflow);
+            if (ev.preventDefault) ev.preventDefault();
+        }, { passive: false });
+    }
+
+    function windowHeaderForEvent(bubble, ev) {
+        var target = ev.target;
+        if (!target) return null;
+        var hs = childHeadersOf(bubble);
+        for (var i = 0; i < hs.length; i++) {
+            var h = hs[i];
+            if (!h.classList || !h.classList.contains('turn-batch-windowed')) continue;
+            if (h === target || (h.contains && h.contains(target))) return h;
+            var ms = membersOf(h);
+            for (var j = 0; j < ms.length; j++) {
+                if (ms[j] === target || (ms[j].contains && ms[j].contains(target))) return h;
+            }
+        }
+        return null;
+    }
+
+    /* 容器内全部滚动窗重算（流式正文/思考长高、窗口 resize 后调用；
+       只动 open 的盖子，follow 语义与 noteProcessInsert 一致）。 */
+    function refreshWindowsIn(container) {
+        if (!container || !container.querySelectorAll || !measurable(container)) return;
+        var hs = container.querySelectorAll('.turn-batch-header');
+        for (var i = 0; i < hs.length; i++) {
+            if (hs[i].getAttribute('data-batch-open') === 'true') refreshWindow(hs[i], true);
+        }
+    }
+
+    /* 成员被回滚/purge 删除后的残窗清扫：refreshWindow 只认识还挂在 DOM 上的
+       成员，被删节点的 inline transform/margin 随节点消失无所谓，但盖子的
+       _winVisible 缓存可能指向游离节点、overflow 已失真 —— 对容器内全部
+       windowed 盖子强制重量（sweepOrphanBatchHeaders 的调用方顺带受益）。 */
+    function sweepWindows(container) {
+        if (!container || !container.querySelectorAll || !measurable(container)) return;
+        var hs = container.querySelectorAll('.turn-batch-header.turn-batch-windowed');
+        for (var i = 0; i < hs.length; i++) refreshWindow(hs[i], false);
+    }
+
+    /* 【code review 修复 2026-11 · HITL 接管吞卡】骨架卡（action_draft）先入批，
+       hitl 帧原地接管同一节点加 .hitl-pending —— 若不摘成员标记，收口时
+       applyMembers(false) 给这张【待审批卡】加 .turn-batch-collapsed ⇒
+       display:none!important，批准/拒绝按钮消失、任务表面卡死。
+       交互卡转态时必须：摘 data-turn-batch + 摘折叠类 + 清残留窗绘制，
+       再重算所属盖子的窗（成员少了一个，overflow/占位都要更新）。 */
+    function detachInteractiveMember(el) {
+        if (!el || !el.getAttribute || el.getAttribute('data-turn-batch') !== '1') return;
+        var bubble = el.parentNode;
+        var header = null;
+        if (bubble && bubble.children) {
+            var kids = bubble.children;
+            var idx = Array.prototype.indexOf.call(kids, el);
+            for (var i = idx - 1; i >= 0; i--) {
+                var k = kids[i];
+                if (k.classList && k.classList.contains('turn-batch-header')) { header = k; break; }
+            }
+        }
+        el.removeAttribute('data-turn-batch');
+        if (el.classList) el.classList.remove('turn-batch-collapsed');
+        clearWindowPaint([el]);
+        if (header) refreshWindow(header, false);
+    }
+
     /* 成员可见性单一入口：open=true 移除折叠类，false 加上；盖子 aria / chevron 类同步。 */
     function applyMembers(header, open) {
         if (!header) return;
         var ms = membersOf(header);
         for (var i = 0; i < ms.length; i++) {
+            /* 防御性豁免：入批后转交互态的成员（HITL 接管/恢复）绝不折叠——
+               等用户拍板的卡必须常驻可见（与 detachInteractiveMember 双保险）。 */
+            if (isInteractiveCard(ms[i])) {
+                ms[i].classList.remove('turn-batch-collapsed');
+                continue;
+            }
             if (open) ms[i].classList.remove('turn-batch-collapsed');
             else ms[i].classList.add('turn-batch-collapsed');
         }
@@ -245,6 +821,10 @@
         else header.classList.remove('turn-batch-open');
         header.setAttribute('aria-expanded', open ? 'true' : 'false');
         header.setAttribute('data-batch-open', open ? 'true' : 'false');
+        /* 展开/收起都重算滚动窗：展开限高，收起拆窗（假 DOM no-op）。
+           收起时 refreshWindow 可能因桩 DOM 提前返回，引导线在此兜底清除。 */
+        refreshWindow(header, true);
+        if (!open) clearBatchGuide(header);
     }
 
     /* 新建盖子必须紧贴【首个成员】上方：插 firstChild 会越过已存在的正文/旧盖子，
@@ -282,6 +862,10 @@
         if (!container || !container.querySelectorAll) return;
         var hs = container.querySelectorAll('.turn-batch-header');
         for (var i = hs.length - 1; i >= 0; i--) {
+            /* 拆窗必须在摘盖子之前：位移/裁剪/margin 补偿都挂在成员上，
+               盖子没了就再也找不到归属，残留 transform 会让成员视觉错位。 */
+            teardownWindow(hs[i]);
+            clearBatchGuide(hs[i]);
             if (hs[i].parentNode) hs[i].parentNode.removeChild(hs[i]);
         }
         var ms = container.querySelectorAll('[data-turn-batch]');
@@ -324,6 +908,9 @@
            问答记录随成员一起隐藏（HITL 卡带 .tool-card 类，旧实现必吞）。
            必须在 isProcessRow 门禁【之前】判定：hitl-pending 卡同时带 tool-card 类。 */
         if (isInteractiveCard(el)) {
+            /* 接管路径：骨架卡可能已带 data-turn-batch 入批 —— 先摘标记再收口，
+               否则收口把待审批卡一并折叠隐藏（审批按钮消失，任务卡死）。 */
+            detachInteractiveMember(el);
             closeBatchFor(bubble);
             return null;
         }
@@ -361,6 +948,10 @@
            否则新成员视觉上「逃逸」到折叠区之外。 */
         if (header.getAttribute('data-batch-open') === 'false') {
             el.classList.add('turn-batch-collapsed');
+        } else {
+            /* 新成员入窗：限高 + 贴底跟随（用户上滑离开底部后 refreshWindow 不跟）。
+               假 DOM / 游离节点 measurable=false 全链 no-op。 */
+            refreshWindow(header, true);
         }
         return header;
     }
@@ -407,9 +998,12 @@
         return closeBatchFor(bubble, nowMs);
     }
 
-    /* 孤儿清扫：成员被回滚 / purge 删光的盖子移除（流中断重传后必调）。 */
+    /* 孤儿清扫：成员被回滚 / purge 删光的盖子移除（流中断重传后必调）。
+       【code review 修复 2026-11】顺带对存活 windowed 盖子强制重量：
+       被删成员的 rect 已失真，_winVisible 缓存可能指向游离节点。 */
     function sweepOrphanBatchHeaders(container) {
         if (!container || !container.querySelectorAll) return 0;
+        sweepWindows(container);
         var hs = container.querySelectorAll('.turn-batch-header');
         var removed = 0;
         for (var i = hs.length - 1; i >= 0; i--) {
@@ -554,9 +1148,12 @@
        的 agentFolds 分叉归入 process；未结束态它是常驻锚点，不折叠）。 */
     var PROCESS_SELECTOR = '.thinking-block, .tool-card, .tool-batch-group, .turn-batch-header';
 
-    /* 【自己保留可见】的元素：错误、max-token、系统提示、HITL / 问答交互卡、文件变更卡。 */
+    /* 【自己保留可见】的元素：错误、max-token、系统提示、HITL / 问答交互卡、文件变更卡、
+       上下文压缩分隔线（轮次边界标记，折叠后仍可见；且必须锚点化保位——它标的是
+       「压缩前/后」的时序分界，被重排到正文上方就成了无归属的孤行，
+       2026-11 用户截图报障「已压缩上下文夹在折叠盖子与正文之间，很明显有问题」）。 */
     var KEEP_VISIBLE_SELECTOR = '.err-bubble, .chunk-error, .hitl-card, .question-card, '
-        + '.system-notice-bubble, .msg-run-changes-card';
+        + '.system-notice-bubble, .msg-run-changes-card, .fch-host, .context-compacted-divider';
 
     /* 【底部元信息】轮结束后的耗时徽标 / 时间 / 操作栏：必须常驻可见，且排在最终正文之后。 */
     var FOOTER_SELECTOR = '.msg-meta-row, .msg-actions, .msg-time, .msg-trace';
@@ -690,11 +1287,17 @@
             if (el === finalNode) { keep.push(el); continue; }   // 唯一最终正文
             if (isAlwaysVisible(el)) {
                 keep.push(el);
-                /* 【agent / 交互卡锚点化】智能体卡与交互卡（待审批 HITL 卡 / 问答记录）
-                   都不进 tail（不重排到 final 之后）：它们是时序不动点；
-                   其余白名单（HITL 旧卡 / 错误 / 页脚）仍由 compactBubble 统一搬到 final 之后。 */
+                /* 【agent / 交互卡 / 压缩分隔线锚点化】智能体卡、交互卡（待审批 HITL 卡 /
+                   问答记录）与上下文压缩分隔线都不进 tail（不重排到 final 之后）：
+                   它们是时序不动点 —— 分隔线标「压缩前/后」分界，搬走即失去归属语义；
+                   其余白名单（HITL 旧卡 / 错误 / 页脚）仍由 compactBubble 统一搬到 final 之后。
+                   【变更卡钉底 · 2026-11 用户报障「文件变更卡怎么跑到思考上面了」】
+                   .fch-host / .msg-run-changes-card 进 tail 但【恒排页脚之前、其余 tail
+                   之后】：卡片是整轮的收尾性总结，必须出现在全部正文/错误/交互记录之后
+                   （compactBubble 的分区键给它们单独一档，见 isChangesCardAt）。 */
                 if (!(el.classList && el.classList.contains('turn-compact-toggle'))
                         && !el.classList.contains('agent-card')
+                        && !el.classList.contains('context-compacted-divider')
                         && !isInteractiveCard(el)) tail.push(el);
                 continue;
             }
@@ -968,14 +1571,32 @@
             var n = kidsAll[i];
             return !!(n.classList && n.classList.contains('turn-compact-toggle'));
         }
-        /* 不动点锚 = 智能体卡 + 交互卡（待审批 HITL 卡 / 问答记录）：保持原始时序位置，
-           过程行在锚之间分段收拢。交互卡与 agent 卡同权（2026-11 用户报障：
-           展示 HITL / 问答记录时页面错乱 = 被重排搬离原位 + 被折叠隐藏）。 */
+        /* 不动点锚 = 智能体卡 + 交互卡（待审批 HITL 卡 / 问答记录）+ 上下文压缩分隔线：
+           保持原始时序位置，过程行在锚之间分段收拢。交互卡与 agent 卡同权（2026-11
+           用户报障：展示 HITL / 问答记录时页面错乱 = 被重排搬离原位 + 被折叠隐藏）；
+           分隔线同权（2026-11 用户截图：压缩提示被搬到折叠盖子与正文之间成孤行 ——
+           它必须钉在「压缩前过程 / 压缩后内容」的原时序分界上）。 */
         function isAgentAt(i) {
             var n = kidsAll[i];
             if (!n || !n.classList) return false;
             if (n.classList.contains('agent-card')) return true;
+            if (n.classList.contains('context-compacted-divider')) return true;
             return isInteractiveCard(n);
+        }
+        /* 【变更卡钉底】宿主/卡片是整轮收尾性总结：tail 区内单独一档（2m+3.5），
+           恒排其余 tail（错误/HITL 旧卡/未知块）之后、页脚（2m+3 中的 meta/actions
+           原序）之前？——不：页脚必须仍是最后。页脚 meta/actions 用 2m+3.9 兜底档，
+           变更卡 2m+3.5，其余 tail 2m+3。三档同侧保序：正文 → 错误/交互 → 变更卡 → 页脚。 */
+        function isChangesCardAt(i) {
+            var n = kidsAll[i];
+            if (!n || !n.classList) return false;
+            return n.classList.contains('fch-host') || n.classList.contains('msg-run-changes-card');
+        }
+        function isFooterAt(i) {
+            var n = kidsAll[i];
+            if (!n || !n.classList) return false;
+            return n.classList.contains('msg-meta-row') || n.classList.contains('msg-actions')
+                || n.classList.contains('msg-time') || n.classList.contains('msg-trace');
         }
         var finalIdx0 = finalNode0 ? kidsAll.indexOf(finalNode0) : -1;
         if (finalIdx0 < 0) finalIdx0 = len;
@@ -1006,7 +1627,14 @@
             if (anchorNo[c2] !== undefined) { keys[c2] = 2 * anchorNo[c2] + 2; seg = anchorNo[c2] + 1; continue; }
             if (isAgentAt(c2)) { keys[c2] = 2 * m + 4 + c2; continue; }   // final 之后的 agent：tail 区之后按原序
             if (c2 === finalIdx0) { keys[c2] = 2 * m + 2; continue; }
-            if (isTail[c2]) { keys[c2] = 2 * m + 3; continue; }
+            /* tail 区三档保序：其余白名单 2m+3 → 变更卡 2m+3.5 → 页脚 2m+3.9。
+               变更卡恒钉在正文/错误/交互记录之后、时长徽章与操作按钮之前
+               （2026-11 用户报障「文件变更卡怎么跑到思考上面了，之前不是在正文最后嘛」）。 */
+            if (isTail[c2]) {
+                if (isChangesCardAt(c2)) { keys[c2] = 2 * m + 3.5; continue; }
+                if (isFooterAt(c2)) { keys[c2] = 2 * m + 3.9; continue; }
+                keys[c2] = 2 * m + 3; continue;
+            }
             /* 其余未分类节点：跟随当前段（段内 process 之后），避免被越过分区边界 */
             keys[c2] = 2 * seg + 1.5;
         }
@@ -1117,6 +1745,121 @@
         return compactBubble(bubble, opts);
     }
 
+    /* 【变更卡落位兜底 · 2026-11 用户连环报障「卡片还是插在中间 / 折叠都不对 /
+       任务都执行结束了还显示正在执行中」】
+       真因（真实帧日志 work-cec8d486 每轮 trace → done → file_changes(ready:true)）：
+       dispatchGateChunk 对 file_changes 直接 return，卡片由 app-file-changes.js 的
+       placeHostInBubble 裸插「页脚之前」；这一路径既不调 closeBatchFor，也不重跑
+       compactBubble。于是只要 done 的收口链被任一守卫跳过（stale-run / 恢复缓冲 /
+       liveFoldRow 为空 / 挂起边界），DOM 就永远停在：
+         running 盖子（ticker 每秒累加「正在执行中 · Ns」）
+         → 变更卡（钉在页脚前，压在思考/正文之间）
+         → 未折叠的过程行（compact 从未跑或被后到的卡片搬运覆盖）。
+       上版只改了「插入漏斗 + compact tail 三档」，恰恰没管这最后一帧，故「还是不对」。
+
+       file_changes 是【轮级收尾快照】：runSettled 判定该轮已收口后才落卡。因此
+       「卡片已落 DOM」本身就是权威终态信号，用它兜底收口链，不依赖 done 是否送达：
+         ① closeBatchFor：把残留 running 盖子定格为「执行工具 N 次」（幂等，只动 running）；
+         ② compactBubble(ended:true)：重跑 tail 三档，把卡片重排到最终正文之后、
+            页脚之前，并生成整轮摘要（自身对失败轮/焦点/未 ended 有完备护栏）。
+       两道护栏防误伤：① 已折过整轮（有 .turn-compact-toggle）一律不重跑，避免
+       切会话/对账/i18n 反复改写用户手动展开态；② 回放的游离 tempDiv（未挂进
+       document）只收 running 盖子，不抢在 app-history.js 的 applyTurnCompact
+       之前凭空生成折叠。纯展示增强：异常一律吞掉。 */
+    /* 【Rust 版真机实证修复 · 2026-11-25】判定「变更卡已落位」后是否仍需重跑整轮折叠。
+       Rust 内核 forwarder 在 run 结束后仍继续推后台帧（core/src/server/mod.rs 的
+       post_run_tx 保活 / drop(fwd_handle) 后继续 drain），done 的 compact 早已生成
+       toggle，迟到的思考/工具/正文再插入时没有 data-turn-process 标记 → 平铺可见；
+       卡片又由 placeHostInBubble 钉在页脚前，于是形成截图里的
+       「摘要(1 段思考) → 变更卡 → 4 段可见思考 → 正文」坏形态。
+       旧护栏「已有 toggle 一律不重跑」把这条自愈路径焊死；compactBubble 重跑时
+       created=false 会保留 turn-compact-open 展开态，故重跑安全。
+       本函数只做脏检查：正常轮零改动，切会话/对账/i18n 不反复改写已完成轮。 */
+    function needsSettleAfterCard(bubble, host) {
+        var kids = bubble.children ? Array.prototype.slice.call(bubble.children) : [];
+        var i, n, lastTextIdx = -1;
+        for (i = 0; i < kids.length; i++) {
+            if (isMdContent(kids[i]) && hasVisibleText(kids[i])) lastTextIdx = i;
+        }
+        for (i = 0; i < kids.length; i++) {
+            n = kids[i];
+            if (!n || !n.classList || i === lastTextIdx) continue;   // 唯一最终正文
+            if (n.getAttribute && n.getAttribute('data-turn-process') !== null) continue;
+            if (n.classList.contains('turn-compact-toggle')) continue;
+            if (n.classList.contains('fch-host') || n.classList.contains('msg-run-changes-card')) continue;
+            if (n.matches && n.matches(FOOTER_SELECTOR)) continue;
+            if (n.matches && n.matches(KEEP_VISIBLE_SELECTOR)) continue;
+            if (isInteractiveCard(n)) continue;
+            if (n.matches && n.matches(AGENT_SELECTOR) && hasInteractiveCardInside(n)) continue;
+            /* 空正文壳是流式指针（rAF 尚未落盘），不算迟到内容：给它标 process
+               会让随后写入的正文被隐藏。有可见文本的额外 md-content 才算迟到。 */
+            if (isMdContent(n) && !hasVisibleText(n)) continue;
+            return true;   // 任何未收编的内容 = compact 之后才到的帧
+        }
+        /* 卡片必须落在最终正文之后；历史脏 DOM（卡片压在正文之前）也要收敛。 */
+        if (lastTextIdx >= 0) {
+            for (i = 0; i < kids.length; i++) {
+                n = kids[i];
+                if (n === host || (n.classList && (n.classList.contains('fch-host')
+                        || n.classList.contains('msg-run-changes-card')))) {
+                    if (i < lastTextIdx) return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    function settleChangesCard(bubble, options) {
+        if (!bubble || !bubble.querySelectorAll) return false;
+        var opts = options || {};
+        var host = bubble.querySelector('.fch-host, .msg-run-changes-card');
+        /* 【同 run 多气泡补洞】挂起恢复时卡片只在一条气泡上，另一条同样可能
+           收到 Rust 后台迟到帧。旧实现「无卡直接 return」让逐气泡兜底静默失效，
+           故改为：无卡时仍允许脏检查重算（host 可为 null）。 */
+        var changed = false;
+        try {
+            if (closeBatchFor(bubble)) changed = true;
+        } catch (e) { /* 展示增强 */ }
+        /* 回放/游离容器由 app-history.js 统一收口，这里只收 running 盖子。 */
+        if (typeof document !== 'undefined' && opts.allowDetached !== true
+                && bubble.isConnected === false) return changed;
+        /* 【Rust 版真机实证修复 · 2026-11-25】不再「有 toggle 一律不重跑」：
+           Rust forwarder 在 run 结束后仍推后台子代理帧（post_run_tx 保活），
+           compact 之后插入的思考/正文没有 data-turn-process 标记 → 平铺可见，
+           卡片夹在摘要与过程区之间。compactBubble 重跑时 created=false 会
+           【保留】turn-compact-open 展开态（见其尾部 isOpen 分支），旧护栏
+           基于错误假设把自愈路径焊死了。脏检查命中才重跑：正常轮零改动。 */
+        if (!needsSettleAfterCard(bubble, host)) return changed;
+        /* 【失败轮护栏】compactBubble 在 classifyChildren 返回 null（错误证据轮 /
+           无正文且非 done 终态）时会【撤销已有折叠】（删 toggle + 清标记），
+           与本兜底「只收敛、绝不摊开」的语义冲突。重跑前先判定：失败轮一律
+           不重跑；否则一次 file_changes 迟到帧就会把已折好的错误轮摊平。 */
+        var kids0 = bubble.children ? Array.prototype.slice.call(bubble.children) : [];
+        var fatal = false, textIdx = -1;
+        for (var ki = 0; ki < kids0.length; ki++) {
+            var kn = kids0[ki];
+            if (!kn || !kn.classList) continue;
+            if (kn.matches && kn.matches(FATAL_SELECTOR)) { fatal = true; break; }
+            if (kn.querySelector && kn.querySelector(FATAL_SELECTOR)) { fatal = true; break; }
+            if (isMdContent(kn) && hasVisibleText(kn)) textIdx = ki;
+        }
+        if (fatal) return changed;
+        if (textIdx < 0) {
+            var endBadge = bubble.querySelector ? bubble.querySelector('.msg-trace') : null;
+            var endStatus = (endBadge && endBadge.getAttribute) ? endBadge.getAttribute('data-turn-status') : null;
+            if (endStatus && endStatus !== 'done') return changed;
+        }
+        var compactOpts = {
+            ended: true,
+            translate: (typeof window !== 'undefined' && window.GourdI18n
+                && window.GourdI18n.t) ? function (k) { return window.GourdI18n.t(k); } : null
+        };
+        try {
+            if (compactBubble(bubble, compactOpts)) changed = true;
+        } catch (e) { /* 展示增强 */ }
+        return changed;
+    }
+
     /* 撤销：用于用户关掉偏好 / 回放重跑前，保证可完全回退。 */
     function clearTurnCompact(container) {
         if (!container || !container.querySelectorAll) return;
@@ -1176,8 +1919,34 @@
         tickerStarted = true;
         setInterval(function () {
             var hs = document.querySelectorAll('.turn-batch-header[data-batch-state="running"]');
-            for (var i = 0; i < hs.length; i++) setLabel(hs[i], windowTranslate());
+            for (var i = 0; i < hs.length; i++) {
+                setLabel(hs[i], windowTranslate());
+                /* 运行窗随内容长高：思考/工具正文流式增长不触发 noteProcessInsert
+                   （同一节点内追加），只有周期重量才能把新高度算进 overflow。
+                   贴底跟随/上滑暂停语义由 refreshWindow 内部维护。 */
+                if (hs[i].classList && hs[i].classList.contains('turn-batch-windowed')) {
+                    refreshWindow(hs[i], true);
+                }
+            }
+            /* 【code review 修复 2026-11】历史（closed）展开窗也要周期重量：
+               用户点开窗内工具卡/思考卡看结果（+320px 卡体）不经过任何批次入口，
+               旧实现 metrics/overflow 一次定格 → 展开内容被裁/后续内容重叠且永不自愈。
+               follow=false：历史回顾不强制贴底，只更新几何。 */
+            var cs = document.querySelectorAll('.turn-batch-header.turn-batch-windowed[data-batch-state="closed"]');
+            for (var j = 0; j < cs.length; j++) refreshWindow(cs[j], false);
         }, 1000);
+        /* 窗口 resize：宽度变化改换行高度，所有 open 窗强制重量（防抖 200ms）。 */
+        if (typeof window !== 'undefined' && window.addEventListener) {
+            var rzTimer = null;
+            window.addEventListener('resize', function () {
+                if (rzTimer) clearTimeout(rzTimer);
+                rzTimer = setTimeout(function () {
+                    rzTimer = null;
+                    var ws = document.querySelectorAll('.turn-batch-header.turn-batch-windowed');
+                    for (var k = 0; k < ws.length; k++) refreshWindow(ws[k], false);
+                }, 200);
+            });
+        }
     }
 
     if (typeof document !== 'undefined') {
@@ -1202,6 +1971,11 @@
         revealAll: revealAll,
         sweepOrphanBatchHeaders: sweepOrphanBatchHeaders,
         refreshBatchLabels: refreshBatchLabels,
+        /* 限高滚动窗（2026-11 用户拍板：约 8 行视窗 + 内部滚动 + 贴底跟随） */
+        WINDOW_MAX_PX: WINDOW_MAX_PX,
+        refreshWindow: refreshWindow,
+        refreshWindowsIn: refreshWindowsIn,
+        detachInteractiveMember: detachInteractiveMember,
         /* 历史重建（新增） */
         rebuildBatches: rebuildBatches,
         rebuildBatchesIn: rebuildBatchesIn,
@@ -1215,6 +1989,7 @@
         markTurnStatus: markTurnStatus,
         formatElapsed: formatElapsed,
         compactBubble: compactBubble,
+        settleChangesCard: settleChangesCard,
         applyTurnCompact: applyTurnCompact,
         clearTurnCompact: clearTurnCompact,
         refreshInteractiveBoundary: refreshInteractiveBoundary,

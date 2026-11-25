@@ -240,7 +240,7 @@
 
 		&__hint {
 			margin-top: 12px;
-			font-size: 12.5px;
+			font-size: 13px;
 			line-height: 18px;
 			color: var(--color-error);
 		}

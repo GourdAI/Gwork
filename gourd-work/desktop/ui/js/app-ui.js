@@ -686,6 +686,123 @@ if (typeof marked !== 'undefined') { marked.use(gourdAutoLinkExtension()); }
     }, true);
 })();
 /*EXTERNAL-LINK-GUARD-END*/
+/*SANITIZE-START*/
+/* ===== Markdown 输出净化 =====
+ * marked 默认**不转义 raw HTML**（消息正文、工具输出、网页抓取内容里都可能带
+ * `<img onerror=…>` / `<iframe>` / `javascript:` 链接），而本文件到处把这些
+ * 字符串写进 `innerHTML`。桌面壳的 tauri.conf.json 又长期是 `csp: null`
+ * （见该文件 security 段），等于「可控 HTML + 无 CSP + 全功能 IPC 桥
+ * （authLogin/remoteConnect/updaterInstall）」串成一条注入链。
+ *
+ * 这里在**唯一出口**上做白名单净化：只保留 Markdown 结构需要的标签/属性，
+ * 其余（script/iframe/object/embed/form/…、全部 on* 事件属性、javascript:/vbscript:
+ * /data:text/html 的 URL）一律剔除。放在渲染出口而不是各调用点，是因为调用点
+ * 有几十处（流式 tail、stable 段、历史消息、mermaid、工具输出回显）。
+ *
+ * 用 <template> 解析：模板内容的脚本不会执行、资源不会加载，比临时 div 安全。 */
+var _SANITIZE_ALLOWED_TAGS = {
+    A: 1, P: 1, BR: 1, HR: 1, SPAN: 1, DIV: 1, STRONG: 1, B: 1, EM: 1, I: 1, U: 1, S: 1,
+    DEL: 1, INS: 1, MARK: 1, SUB: 1, SUP: 1, SMALL: 1, KBD: 1, ABBR: 1, CITE: 1, Q: 1,
+    H1: 1, H2: 1, H3: 1, H4: 1, H5: 1, H6: 1,
+    UL: 1, OL: 1, LI: 1, DL: 1, DT: 1, DD: 1,
+    BLOCKQUOTE: 1, PRE: 1, CODE: 1, TABLE: 1, THEAD: 1, TBODY: 1, TFOOT: 1, TR: 1, TH: 1, TD: 1,
+    IMG: 1, FIGURE: 1, FIGCAPTION: 1, DETAILS: 1, SUMMARY: 1,
+    /* GFM 任务列表 `- [ ]` 渲染成 <input type="checkbox" disabled>；只放行这一种
+     * input（见下方 tag === 'INPUT' 分支），其余 type 一律剔除，避免消息正文里
+     * 塞一个可输入的假登录表单。 */
+    INPUT: 1
+};
+var _SANITIZE_ALLOWED_ATTRS = {
+    href: 1, title: 1, src: 1, alt: 1, 'class': 1, id: 1, lang: 1, start: 1, align: 1,
+    colspan: 1, rowspan: 1, scope: 1, width: 1, height: 1, open: 1, type: 1, checked: 1, disabled: 1, value: 1,
+    /* 外链 guard（EXTERNAL-LINK-GUARD）依赖 `target=_blank` 与 `download` 判断
+     * 是否接管点击；`rel=noopener noreferrer` 是既有外链语义。删掉它们会让
+     * 下载链接被误当成普通外链打开、外链判定分支静默改变，属功能回归。 */
+    target: 1, download: 1, rel: 1, style: 1
+};
+/* 这几个属性放行但值必须受控，避免白名单变成注入面。 */
+function _sanitizeAttrAllowed(name, value) {
+    var v = String(value == null ? '' : value).toLowerCase();
+    if (name === 'target') {
+        return v === '_blank' || v === '_self' || v === '_top' || v === '_parent';
+    }
+    if (name === 'rel') {
+        // 仅允许空白分隔的安全 token，出现其它字符一律剔除
+        return /^[\s]*(noopener|noreferrer|nofollow|noopener\s+noreferrer|noreferrer\s+noopener|external|tag|help|license|prev|next|author|bookmark|search)[\s]*$/.test(v)
+            || /^(\s*(noopener|noreferrer|nofollow|external|tag|help|license|prev|next|author|bookmark|search)\s*)+$/.test(v);
+    }
+    if (name === 'download') return true; // 值只是建议文件名，浏览器不执行它
+    if (name === 'style') {
+        // CSS 里的 url()/expression/@import/behavior 可加载外部资源或执行脚本
+        return v.indexOf('url(') === -1 && v.indexOf('expression') === -1 &&
+               v.indexOf('@import') === -1 && v.indexOf('behavior:') === -1 &&
+               v.indexOf('javascript:') === -1 && v.indexOf('vbscript:') === -1;
+    }
+    return true;
+}
+/* URL 属性只放行这三类协议；`javascript:`/`vbscript:`/`data:text/html` 全部拦掉
+ * （`data:image/*` 例外：附件缩略图走内联 dataUrl）。 */
+function _sanitizeUrlAllowed(value, isImageSrc) {
+    var v = String(value == null ? '' : value);
+    // 去掉前导空白与控制字符后再判定，防 `java\tscript:` 这类绕过
+    var probe = v.replace(/[\u0000-\u0020\u00a0]+/g, '').toLowerCase();
+    if (probe.indexOf('javascript:') === 0 || probe.indexOf('vbscript:') === 0) return false;
+    if (probe.indexOf('data:') === 0) return isImageSrc === true && probe.indexOf('data:image/') === 0;
+    return true;
+}
+function gourdSanitizeHtml(html) {
+    if (typeof html !== 'string' || html.length === 0) return html;
+    // 快速路径：文本里没有任何标签就不必进 DOM 解析（流式 tail 每帧都走这里）
+    if (html.indexOf('<') < 0) return html;
+    var tpl;
+    try { tpl = document.createElement('template'); } catch (e) { tpl = null; }
+    if (!tpl || !('content' in tpl)) {
+        // 极端兜底：无法解析就整段转义，宁可丢格式也不执行
+        return html.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    }
+    tpl.innerHTML = html;
+    var root = tpl.content;
+    var walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT, null);
+    var doomed = [];
+    var node = walker.nextNode();
+    while (node) {
+        var tag = String(node.tagName || '').toUpperCase();
+        if (_SANITIZE_ALLOWED_TAGS[tag] !== 1) {
+            // 未白名单标签整棵丢弃（script/iframe/svg/math/form 等）
+            doomed.push(node);
+        } else if (tag === 'INPUT' && String(node.getAttribute('type') || '').toLowerCase() !== 'checkbox') {
+            // 只保留任务列表的复选框；其它 input 视同危险标签
+            doomed.push(node);
+        } else {
+            var attrs = Array.prototype.slice.call(node.attributes || []);
+            for (var i = 0; i < attrs.length; i++) {
+                var name = String(attrs[i].name || '').toLowerCase();
+                var value = attrs[i].value;
+                if (name.indexOf('on') === 0 || !_SANITIZE_ALLOWED_ATTRS[name]) {
+                    node.removeAttribute(attrs[i].name);
+                    continue;
+                }
+                if (!_sanitizeAttrAllowed(name, value)) {
+                    node.removeAttribute(attrs[i].name);
+                    continue;
+                }
+                if (name === 'href' || name === 'src') {
+                    if (!_sanitizeUrlAllowed(value, tag === 'IMG' && name === 'src')) {
+                        node.removeAttribute(attrs[i].name);
+                    }
+                }
+            }
+        }
+        node = walker.nextNode();
+    }
+    for (var k = 0; k < doomed.length; k++) {
+        var el = doomed[k];
+        if (el.parentNode) el.parentNode.removeChild(el);
+    }
+    return tpl.innerHTML;
+}
+window.gourdSanitizeHtml = gourdSanitizeHtml;
+/*SANITIZE-END*/
 var _mdCache = new Map();
 var _MD_CACHE_MAX = 100;
 var _MD_CACHE_MAX_LENGTH = 5000; // 超过此长度的文本不缓存（避免大字符串 Key 占用过多内存）
@@ -695,7 +812,7 @@ function renderMd(text) {
         if (text.length < _MD_CACHE_MAX_LENGTH) {
             var cached = _mdCache.get(text);
             if (cached) return cached;
-            var html = marked.parse(text);
+            var html = gourdSanitizeHtml(marked.parse(text));
             _mdCache.set(text, html);
             if (_mdCache.size > _MD_CACHE_MAX) {
                 var firstKey = _mdCache.keys().next().value;
@@ -703,7 +820,7 @@ function renderMd(text) {
             }
             return html;
         }
-        return marked.parse(text);
+        return gourdSanitizeHtml(marked.parse(text));
     }
     return text.replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\n/g,'<br>');
 }
@@ -763,7 +880,8 @@ function createStreamMd(hostEl) {
         }
     }
     function mdParse(t) {
-        if (typeof marked !== 'undefined') return marked.parse(t);
+        // 流式路径同样必须净化：tail/stable 段都是直接 insertAdjacentHTML 进 DOM 的
+        if (typeof marked !== 'undefined') return gourdSanitizeHtml(marked.parse(t));
         return String(t).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\n/g, '<br>');
     }
     function mdEscape(t) {
@@ -2035,6 +2153,9 @@ async function processNextQueuedMessage(sessionId) {
     appendUserMessage(guardSess, displayText, null, null, null,
         { imagePaths: imagePaths, filePaths: filePaths });
     guardSess._pendingClientMessageId = 'msg-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10);
+    // 与 sendMessage 同口径登记待回显集合：队列连发时单槽位会被下一条覆盖，
+    // 前一条的回显认不出自己 → 重复渲染用户气泡（registerPendingEchoId 见 app-streaming.js）。
+    if (typeof registerPendingEchoId === 'function') registerPendingEchoId(guardSess, guardSess._pendingClientMessageId);
     guardSess._requestStartSeq = guardSess.lastEventSeq || 0;
     guardSess._awaitingSendAck = true;
     guardSess._sendAckConfirmed = false;

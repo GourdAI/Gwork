@@ -388,12 +388,26 @@ fn load_replay_window_at(path: &PathBuf, mode: ReplayMode) -> ReplayWindow {
                 .collect();
             out.total_rounds = starts.len();
             if starts.is_empty() {
-                return out;
+                // 【无 user 帧 ≠ 无历史】续跑段/被截断的流/纯附件轮可能一条 user
+                // 帧都没有（真实流实锤）。旧实现直接回空窗口 → handler 回
+                // empty_envelope(events:[]) → 移动端把「空窗口」当「加载失败」
+                // 降级 /messages 纯文本快照，过程轨迹全丢（用户三轮报障
+                // 「历史只剩最终正文」）。回落为全窗投影：把全部合格帧当作
+                // 一个无头轮返回（total_rounds=1 供 hasMore/remaining 契约自洽，
+                // remaining=0 不再有可翻的更早页）。before_seq 过滤在 pass 2
+                // 逐帧复核，语义与有 user 帧时完全一致。
+                if eligible_end == 0 {
+                    return out;
+                }
+                out.total_rounds = 1;
+                out.remaining_rounds = 0;
+                (0, eligible_end)
+            } else {
+                let want = if rounds > 0 { rounds } else { starts.len() };
+                let take_from = starts.len().saturating_sub(want);
+                out.remaining_rounds = take_from;
+                (starts[take_from], eligible_end)
             }
-            let want = if rounds > 0 { rounds } else { starts.len() };
-            let take_from = starts.len().saturating_sub(want);
-            out.remaining_rounds = take_from;
-            (starts[take_from], eligible_end)
         }
         ReplayMode::Tail { cap } => (probes.len().saturating_sub(cap), probes.len()),
         ReplayMode::After { .. } => unreachable!("handled above"),
@@ -2829,6 +2843,41 @@ mod tests {
         assert_eq!(older.remaining_rounds, 0);
         assert_eq!(older.events[0]["eventSeq"], 1);
         assert_eq!(older.latest_seq, 9, "latestSeq spans the whole file");
+    }
+
+    /// 【无 user 帧 ≠ 无历史】续跑段/截断流：Rounds 必须回落全窗投影而不是
+    /// 空信封——移动端把空信封当「加载失败」降级纯文本快照，过程轨迹全丢
+    /// （用户三轮报障「历史只剩最终正文」的内核侧根因）。
+    #[test]
+    fn replay_window_rounds_without_user_frames_falls_back_to_full_window() {
+        let lines = vec![
+            frame("reason", "思", 2),
+            frame("reason", "考", 3),
+            frame("action_start", "read", 4),
+            frame("text", "答", 5),
+            frame("text", "案", 6),
+            frame("done", "", 7),
+        ];
+        let f = StreamScratch::new("no-user", &lines);
+        let w = load_replay_window_at(&f.0, ReplayMode::Rounds { before_seq: None, rounds: 10 });
+        assert_eq!(w.total_rounds, 1, "headless stream counts as one round");
+        assert_eq!(w.remaining_rounds, 0);
+        assert_eq!(w.latest_seq, 7);
+        assert_eq!(w.events.len(), 4, "coalesced full window: {:?}", w.events);
+        assert_eq!(w.events[0]["type"], "reason");
+        assert_eq!(w.events[0]["text"], "思考");
+        assert_eq!(w.events[1]["type"], "action_start");
+        assert_eq!(w.events[2]["text"], "答案");
+        assert_eq!(w.events[3]["type"], "done");
+        // before_seq 过滤语义保持一致：只取 < before 的帧，仍是一个无头轮
+        let older = load_replay_window_at(&f.0, ReplayMode::Rounds { before_seq: Some(5), rounds: 10 });
+        assert_eq!(older.total_rounds, 1);
+        assert_eq!(older.events.len(), 2, "reason run + action_start: {:?}", older.events);
+        assert_eq!(older.latest_seq, 7, "latestSeq still spans the whole file");
+        // before_seq 早于全部帧：真正无可展示内容，保持空窗
+        let none = load_replay_window_at(&f.0, ReplayMode::Rounds { before_seq: Some(1), rounds: 10 });
+        assert_eq!(none.total_rounds, 0);
+        assert!(none.events.is_empty());
     }
 
     #[test]

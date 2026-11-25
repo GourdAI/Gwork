@@ -23,7 +23,10 @@ const (
 	gworkReadTimeout  = 60 * time.Second // §2.4: no frame for 60s means dead
 	gworkPingInterval = 25 * time.Second // §2.4: protocol-level ping every 25s
 	gworkWriteTimeout = 10 * time.Second
-	gworkMaxFrameSize = 4 << 20
+	// v1.1: /web/chat/input carries inline base64 attachments (<=12MB encoded),
+	// so the frame cap moved from 4MB to 16MB. Keep in sync with the desktop
+	// device_link read limit and PROTOCOL.md §2.1.
+	gworkMaxFrameSize = 16 << 20
 )
 
 // gworkPathWhitelist is the exact-match kernel path allowlist of protocol
@@ -45,6 +48,24 @@ var gworkPathWhitelist = []string{
 	"/web/chat/sessions/delete",
 	"/web/chat/sessions/rename",
 	"/web/chat/projects",
+	// v1.1: skills / connectors pickers and attachment thumbnail echo.
+	// attachment/upload is deliberately absent: multipart cannot cross the
+	// string envelope; mobile attachments ride inline in /web/chat/input.
+	"/web/chat/mcp/select",
+	"/web/chat/attachment/meta",
+	// v1.2: 会话产物流（对话「全部产物」弹层 = 桌面任务监控「产出」区同源）。
+	// changes/session 跨该会话全部 run 合并出「至今改过哪些文件」，是只读查询；
+	// 移动端不再使用演示数据，必须能真取到 PC 端的产物账本。
+	// 刻意不含 changes/undo/* 与 changes/reapply/*（写操作，移动端不提供入口）。
+	// 也刻意不含 filer/raw：字节流端点过不了字符串信封，且上限 50MB，放行只有风险；
+	// 移动端详情对图片走「请在桌面端查看」。
+	// 注意：filer/read 与 changes/session 的 `root` 参数在**设备侧**另有一道注册校验
+	// （device_link.rs 的 ROOT_SCOPED_PATHS），后台看不到 PC 的 projects.json，
+	// 无法在此判断，故这里是「放行 + 设备侧收口」而非唯一防线。
+	"/web/chat/changes/session",
+	"/web/chat/filer/read",
+	"/web/settings/skills/installed",
+	"/web/settings/mcp/servers",
 }
 
 var gworkUpgrader = websocket.Upgrader{

@@ -23,6 +23,39 @@ let stopTimer = 0
 /** 会话代号：异步链（权限→建引擎→建采集器）落地时校验，过期链静默放弃 */
 let sessionToken = 0
 
+/** writeAudio 单次仅接受 640/1280 字节（华为录音全链路方案硬约束）：
+ *  readData 回调块长不定，残余字节进缓冲，攒满 640 才喂引擎 */
+const PCM_CHUNK_BYTES = 640
+let pendingPcm: Uint8Array = new Uint8Array(0)
+
+/** 把任意长度 PCM 切成 640 字节块喂入引擎；不足一块的尾巴留到下次回调 */
+function feedPcm(data: Uint8Array): void {
+	const e = engine
+	if (e == null) return
+	let buf: Uint8Array
+	if (pendingPcm.length == 0) {
+		buf = data
+	} else {
+		buf = new Uint8Array(pendingPcm.length + data.length)
+		buf.set(pendingPcm, 0)
+		buf.set(data, pendingPcm.length)
+	}
+	let offset = 0
+	while (buf.length - offset >= PCM_CHUNK_BYTES) {
+		try {
+			e.writeAudio(sessionId, buf.slice(offset, offset + PCM_CHUNK_BYTES))
+		} catch (err) {
+			console.error('gwork-speech writeAudio', err)
+		}
+		offset += PCM_CHUNK_BYTES
+	}
+	pendingPcm = buf.slice(offset)
+}
+
+function resetPcm(): void {
+	pendingPcm = new Uint8Array(0)
+}
+
 function clearTimers(): void {
 	if (maxTimer != 0) {
 		clearTimeout(maxTimer)
@@ -62,6 +95,7 @@ function emitError(code: SpeechErrorCode, detail: string): void {
 	starting = false
 	sessionToken++
 	clearTimers()
+	resetPcm()
 	releaseCapturer()
 	releaseEngine()
 	const cb = options
@@ -76,6 +110,7 @@ function emitResult(text: string): void {
 	starting = false
 	sessionToken++
 	clearTimers()
+	resetPcm()
 	releaseCapturer()
 	releaseEngine()
 	const cb = options
@@ -114,22 +149,44 @@ export function startListening(opts: StartListeningOptions): void {
 	// 官方统一权限入口（uni-app x 4.61+）：内部处理弹窗与「不再询问」，替代已废弃的全局 getContext() 链路。
 	// 部分授权时 success/fail 可能都回调，dispatched 保证终态只派发一次
 	let dispatched = false
-	const failOnce = (detail: string): void => {
+	const failOnce = (detail: string, doNotAskAgain: boolean): void => {
 		if (dispatched || token != sessionToken) return
 		dispatched = true
-		failStarting(opts, 'permission', detail)
+		starting = false
+		sessionToken++
+		opts.onError({ code: 'permission', detail: detail, doNotAskAgain: doNotAskAgain } as SpeechError)
 	}
 	UTSHarmony.requestSystemPermission(['ohos.permission.MICROPHONE'], (allRight: boolean, _: string[]) => {
 		if (dispatched || token != sessionToken) return
 		if (!allRight) {
-			failOnce('MICROPHONE denied')
+			failOnce('MICROPHONE denied', false)
 			return
 		}
 		dispatched = true
 		createAsrEngine(opts, token)
-	}, (_: boolean, _2: string[]) => {
-		failOnce('MICROPHONE denied')
+	}, (doNotAskAgain: boolean, _2: string[]) => {
+		// doNotAskAgain=true：用户勾了「不再询问」，系统不再弹框，业务层据此引导去系统设置
+		failOnce('MICROPHONE denied', doNotAskAgain)
 	})
+}
+
+/**
+ * 跳转本应用的系统权限设置页（用户勾「不再询问」后唯一恢复路径）。
+ * 鸿蒙官方链路：startAbility 拉起 com.huawei.hmos.settings 的应用详情（携带本应用 bundleName）。
+ */
+export function openPermissionSettings(): void {
+	try {
+		const context = UTSHarmony.getUIAbilityContext()
+		const bundleName = context.abilityInfo.bundleName
+		context.startAbility({
+			bundleName: 'com.huawei.hmos.settings',
+			abilityName: 'com.huawei.hmos.settings.MainAbility',
+			uri: 'application_info_entry',
+			parameters: { 'pushParams': bundleName } as Record<string, Object>
+		})
+	} catch (e) {
+		console.error('gwork-speech openPermissionSettings', e)
+	}
 }
 
 function createAsrEngine(opts: StartListeningOptions, token: number): void {
@@ -151,7 +208,8 @@ function createAsrEngine(opts: StartListeningOptions, token: number): void {
 		if (err != null && err.code != 0) {
 			// 1002200006（引擎忙，多为其它应用占用）/1002200008（正在销毁）是瞬态错误，
 			// 归 busy 不落「设备不支持」缓存；1002200001 等才是设备级不支持（隐藏语音入口）
-			const transient = err.code == 1002200006 || err.code == 1002200008
+			// 1002200009（Internal Service Error，5.1.0(18)+）同为瞬态，可重试不隐藏入口
+			const transient = err.code == 1002200006 || err.code == 1002200008 || err.code == 1002200009
 			failStarting(opts, transient ? 'busy' : 'unsupported', 'createEngine ' + err.code.toString() + ' ' + err.message)
 			return
 		}
@@ -238,13 +296,9 @@ function startCapture(token: number): void {
 		}
 		capturer = c
 		c.on('readData', (buffer: ArrayBuffer): void => {
-			const e = engine
-			if (finished || stopping || e == null) return
-			try {
-				e.writeAudio(sessionId, new Uint8Array(buffer))
-			} catch (err) {
-				console.error('gwork-speech writeAudio', err)
-			}
+			if (finished || stopping || engine == null) return
+			// writeAudio 只接受 640/1280 字节定长块：任意长度直喂会被引擎拒收（识别永远空结果）
+			feedPcm(new Uint8Array(buffer))
 		})
 		c.start((_err: BusinessError) => {
 			if (_err != null && _err.code != 0 && token == sessionToken) {
@@ -275,6 +329,17 @@ export function stopListening(): void {
 		emitResult(lastPartial)
 		return
 	}
+	// 尾巴不足 640 字节：补静音凑整块喂入，最后一小段语音不丢
+	if (pendingPcm.length > 0) {
+		const pad = new Uint8Array(PCM_CHUNK_BYTES)
+		pad.set(pendingPcm, 0)
+		pendingPcm = new Uint8Array(0)
+		try {
+			e.writeAudio(sessionId, pad)
+		} catch (err) {
+			console.error('gwork-speech writeAudio tail', err)
+		}
+	}
 	try {
 		// finish 通知引擎音频结束，等最终结果（onResult isFinal / onComplete）
 		e.finish(sessionId)
@@ -299,6 +364,7 @@ export function cancelListening(): void {
 	starting = false
 	sessionToken++
 	clearTimers()
+	resetPcm()
 	const e = engine
 	const sid = sessionId
 	releaseCapturer()

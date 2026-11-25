@@ -282,13 +282,26 @@ async function buildLoginPayload(username: string, password: string): Promise<Re
 	// #endif
 }
 
+/** 服务端轮换/重载加密私钥后，旧 kid 会被 DecryptPassword 拒掉。信封类请求
+ *  失败时清掉 5 分钟公钥缓存，否则接下来 5 分钟内登录/注册会持续失败
+ *  （web 端已有 clearPasswordEncryptionCache，移动端此前缺失）。 */
+function invalidateEncKeyCache(): void {
+	if (encKeyCache != null && !encKeyCache.disabled) encKeyCache = null
+}
+
 /* ---------------- 登录 / 注册 / 验证码 ---------------- */
 
 export async function gworkLogin(username: string, password: string): Promise<GworkSession> {
 	return serialize<GworkSession>(async (): Promise<GworkSession> => {
 		await ensureGworkHost()
 		const payload = await buildLoginPayload(username, password)
-		const res = await gworkRequest.post<ApiBody>('/api/user/login', payload, { anon: true, toast: false, header: sessionHeader() })
+		let res: ApiResponse<ApiBody>
+		try {
+			res = await gworkRequest.post<ApiBody>('/api/user/login', payload, { anon: true, toast: false, header: sessionHeader() })
+		} catch (err: any) {
+			if (payload['password_encrypted'] != null) invalidateEncKeyCache()
+			throw err
+		}
 		const body = res.data as ApiBody
 		const data = gworkDataOf(body)
 		// 两阶段验证（2FA / 邮箱 challenge）：data 无 access_token，明确报错而非当成功
@@ -308,13 +321,24 @@ export async function gworkLogin(username: string, password: string): Promise<Gw
 	})
 }
 
-/** 注册成功后自动登录（后台注册接口只回 success:true 不发凭据） */
+/** 注册成功后自动登录（后台注册接口只回 success:true 不发凭据）
+ *
+ * 密码走与登录同一套加密判定：后台开启 password_login_encryption 时，
+ * 注册若仍发明文就是一条绕过登录侧加密的明文旁路（管理员以为「密码不再明文
+ * 传输」，实际上注册请求里还是明文）。因此这里复用 buildLoginPayload：
+ * 明确关闭/旧版后台 → 明文；开启 → v2 信封；无法判定 → 中止（绝不静默发明文）。 */
 export async function gworkRegister(username: string, password: string, email: string, code: string): Promise<GworkSession> {
 	await ensureGworkHost()
-	const payload: Record<string, any> = { username: username, password: password }
+	const payload: Record<string, any> = await buildLoginPayload(username, password)
 	if (email.trim().length > 0) payload['email'] = email.trim()
 	if (code.trim().length > 0) payload['verification_code'] = code.trim()
-	await gworkRequest.post<ApiBody>('/api/user/register', payload, { anon: true, toast: false, header: sessionHeader() })
+	try {
+		await gworkRequest.post<ApiBody>('/api/user/register', payload, { anon: true, toast: false, header: sessionHeader() })
+	} catch (err: any) {
+		// 注册也走信封：密钥轮换后旧 kid 会让本次及后续 5 分钟都失败，必须清缓存
+		if (payload['password_encrypted'] != null) invalidateEncKeyCache()
+		throw err
+	}
 	return gworkLogin(username, password)
 }
 

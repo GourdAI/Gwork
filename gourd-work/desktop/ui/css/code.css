@@ -875,7 +875,8 @@ body.code-mode #chatView .context-meter-pop { min-width: 0; width: max-content; 
    再写 6px 0 / 8px 覆盖会重新制造「同族两种间距两种圆角」的不一致。 */
 body.code-mode #chatView .thinking-block-header { padding: 6px 10px; font-size: 12px; }
 body.code-mode #chatView .thinking-block-label { font-size: 12px; }
-body.code-mode #chatView .thinking-block-body { padding: 0 10px 8px; font-size: 12px; line-height: 1.6; }
+/* 思考体全宽口径与工具卡体一致（灰底/内距由 .thinking-inner-out 承担，app.css 基线） */
+body.code-mode #chatView .thinking-block-body { padding: 0; font-size: 12px; line-height: 1.6; }
 body.code-mode #chatView .thinking-block-body .md-content { font-size: 12px; }
 
 body.code-mode #chatView .tool-card-header { padding: 6px 10px; gap: 6px; font-size: 12px; }

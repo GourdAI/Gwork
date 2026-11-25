@@ -29,7 +29,7 @@
 		"declaration": {
 			"ads": "无",
 			"data": "麦克风音频交由系统语音识别引擎处理：Android 取决于厂商引擎（可能联网）、iOS 默认识别请求走苹果服务器（支持端侧时优先端侧）、鸿蒙纯端侧离线不出设备。本插件自身不采集、不上传任何数据。",
-			"permissions": "Android: android.permission.RECORD_AUDIO（插件内动态申请）；iOS: NSMicrophoneUsageDescription / NSSpeechRecognitionUsageDescription（项目根 Info.plist）；鸿蒙: ohos.permission.MICROPHONE（插件内动态申请）"
+			"permissions": "Android: android.permission.RECORD_AUDIO（插件 AndroidManifest 自带 + 动态申请）；iOS: NSMicrophoneUsageDescription / NSSpeechRecognitionUsageDescription（插件 utssdk/app-ios/Info.plist，云打包自动合并）；鸿蒙: ohos.permission.MICROPHONE（插件 module.json5 自带 + 动态申请）"
 		},
 		"npmurl": "",
 		"darkmode": "√",

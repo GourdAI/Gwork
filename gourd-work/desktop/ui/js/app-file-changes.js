@@ -410,7 +410,15 @@
         }
         return null;
     }
-    /* 宿主入位：插到页脚之前；无页脚（异常结构）时退回气泡末尾。返回实际插入引用节点。 */
+    /* 宿主入位：恒钉【内容流末尾、页脚之前】——「正文/过程 → 变更卡 → 时长徽章 → 操作按钮」。
+       【2026-11 用户报障「文件变更卡怎么跑到思考上面了，之前不是在正文最后嘛」】
+       旧锚点只有「页脚之前」一个约束：变更卡常在 run 收口【前】就落宿主（挂起段收口 /
+       迟到帧），恢复段/后续正文与思考/工具经插入漏斗同样以页脚为锚，全部插到宿主
+       【后面】——DOM 序变成「变更卡 → 后到的思考/正文」，卡片压在过程区上方。
+       修复分两层：① 插入漏斗 insertBeforeActions 改为插到首个 .fch-host 之前
+       （新内容永远进不了卡片下方）；② 本函数保持「页脚之前」锚定，整轮 Compact 的
+       tail 三档分区（其余白名单 → 变更卡 → 页脚）保证折叠态卡片仍在正文之后。
+       幂等：位置已正确时零移动（insertBefore 对已挂载节点是移动，不重建不丢监听）。 */
     function placeHostInBubble(bubble, host) {
         var footer = bubbleFooterOf(bubble);
         if (footer) {
@@ -436,6 +444,64 @@
         }
         return host;
     }
+    /* 【轮级终态兜底 · 2026-11 用户「任务都执行结束了竟然还显示正在执行中」】
+       真实帧序是 trace → done → file_changes(ready:true)，且 dispatchGateChunk 对
+       file_changes 直接 return。卡片落位因此是【最后一个可见信号】：一旦 done 的
+       收口链被任一守卫跳过（stale-run done / 恢复缓冲 / liveFoldRow 为空 / 挂起轮
+       边界），就没有任何后续帧会再调 closeBatchFor 或 compactBubble —— 残留
+       running 盖子被全局 ticker 每秒刷成「正在执行中 · Ns」（截图 15min 5s），
+       卡片又被裸插到页脚前压住思考/正文，折叠态全错。
+
+       file_changes 只在 runSettled 为真时才渲染，故「这张卡已落 DOM」等价于
+       「该 run 已真收口」，是比 done 更靠后的权威信号：
+         · 对本 run 的全部助手气泡逐一 closeBatchFor（挂起恢复可能同 runId 两条行）；
+         · 对卡片所在气泡调 settleChangesCard 重跑 compact(ended:true)，把卡片
+           重排到最终正文之后、页脚之前，并恢复整轮折叠摘要。
+       回放 / 挂起 / 运行中一律跳过；纯展示增强，异常不得影响卡片本身。 */
+    function settleTurnAfterCard(sess, runKey, bubble) {
+        if (!sess || sess._replaying || sess._runSuspended || sess.isStreaming) return;
+        /* 【活跃轮隔离 · 2026-11-25 真帧日志实证】真实日志 work-mwur7bd8：
+           done(seq=103420, run-2dfe8c12) 之后 80396 帧全部属于【下一个 run】
+           （run-c927ad4e / run-943e673b / run-099f4b2f），旧 run 自己只剩 1 帧
+           file_changes。而 flushPendingRenders 对【所有历史 runKey】无条件调
+           positionCard（i18n / 会话切换 / 对账回填都会重跑）：旧卡重定位时
+           settleTurnAfterCard 只判「旧 run 已收口」就放行了，可此刻新 run 正在
+           同一会话里跑工具 —— closeBatchFor + compactBubble 把当前气泡的 running
+           批次收口、所有工具行打上 data-turn-process → CSS display:none，
+           用户看到的就是「这个（产物卡）出来后，后续工具执行啥的都不显示了，
+           就光显示思考等的了」（真浏览器 A/B：旧行为 closed+none，护栏后
+           running+block）。故本卡片所属 run 若不是会话当前活跃 run，一律不收口。 */
+        var currentRun = String(sess.currentRunId || sess.activeRunId || '');
+        if (currentRun && currentRun !== String(runKey)) return;
+        /* 【run 级终态门禁】sess.isStreaming 是会话级粗粒度旗标，单靠它不够：
+           必须用 runSettled 对【本卡片所属 run】逐轮判定终态。 */
+        if (!runSettled(sess, runKey)) return;
+        if (typeof window === 'undefined') return;
+        var api = window.GourdTurnDisplay || window.GourdTurnCompact || window.GourdTurnBatch;
+        if (!api) return;
+        var root = (typeof renderRoot === 'function') ? renderRoot(sess) : null;
+        var settled = {};
+        if (root && root.querySelectorAll) {
+            var rows = root.querySelectorAll('.msg-row.assistant[data-run-id="' + attrValueEscape(runKey) + '"]');
+            for (var ri = 0; ri < rows.length; ri++) {
+                var b = $(rows[ri]).find('.msg-bubble')[0];
+                if (!b) continue;
+                if (api.closeBatchFor) {
+                    try { api.closeBatchFor(b); } catch (e) { /* 展示增强 */ }
+                }
+                /* 【2026-11-25 补洞】同 runId 挂起恢复可能有两条助手气泡，旧实现
+                   只 compact 卡片所在气泡，另一条的 Rust 迟到帧不会自愈。逐条脏
+                   检查重算（settleChangesCard 仅在有卡片/迟到内容时命中，无副
+                   作用）；卡片所在气泡最后单独兜底一次，去重避免重复重排。 */
+                if (api.settleChangesCard) {
+                    try { api.settleChangesCard(b); } catch (e) { /* 展示增强 */ }
+                }
+                settled[b] = true;
+            }
+        }
+        if (!bubble || settled[bubble] || !api.settleChangesCard) return;
+        try { api.settleChangesCard(bubble); } catch (e) { /* 展示增强 */ }
+    }
     /* 定位：卡片入宿主；宿主恒在页脚（时长徽章/操作按钮）之前（收口后新节点可能晚于
        卡片插入，需重建「正文 → 卡片 → 页脚」序）。 */
     function positionCard(sess, runKey) {
@@ -445,7 +511,11 @@
         var host = runHostOf(sess, runKey);
         if (el.parentNode !== host) host.appendChild(el);
         var bubble = runBubbleOf(sess, runKey);
-        if (bubble) placeHostInBubble(bubble, host);
+        if (bubble) {
+            placeHostInBubble(bubble, host);
+            /* 卡片已落位 = 轮级收口快照已到达：兜底把批次/整轮折叠收敛到终态。 */
+            settleTurnAfterCard(sess, runKey, bubble);
+        }
     }
 
     window.repositionFileChangeCards = function (sess) {

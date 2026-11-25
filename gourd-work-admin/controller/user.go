@@ -211,6 +211,17 @@ func writeLoginResponse(c *gin.Context, user *model.User, bundle *service.AuthBu
 	})
 }
 
+// registerRequest carries the login-style password envelope on top of the
+// user model. Without it, `POST /api/user/register` only ever accepted a
+// plaintext `password`, so enabling PASSWORD_LOGIN_ENCRYPTION left a plaintext
+// bypass: the login form was encrypted while the register form still put the
+// password on the wire in the clear.
+type registerRequest struct {
+	model.User
+	PasswordEncrypted string `json:"password_encrypted"`
+	EncryptionKeyID   string `json:"encryption_key_id"`
+}
+
 func Register(c *gin.Context) {
 	if !common.RegisterEnabled {
 		common.ApiErrorT(c, "New user registration has been disabled by administrator")
@@ -220,11 +231,25 @@ func Register(c *gin.Context) {
 		common.ApiErrorT(c, "Password registration has been disabled by administrator, please use third-party account verification")
 		return
 	}
-	var user model.User
-	err := common.DecodeJson(c.Request.Body, &user)
+	var req registerRequest
+	err := common.DecodeJson(c.Request.Body, &req)
 	if err != nil {
 		common.ApiErrorT(c, "Invalid parameters")
 		return
+	}
+	user := req.User
+	// Password transport encryption must apply to registration too, otherwise the
+	// switch only protects one of the two endpoints that carry a password.
+	if common.PasswordLoginEncryptionEnabled {
+		if req.PasswordEncrypted == "" || req.EncryptionKeyID == "" {
+			common.ApiErrorT(c, "Invalid parameters")
+			return
+		}
+		user.Password, err = common.DecryptPassword(req.PasswordEncrypted, req.EncryptionKeyID)
+		if err != nil || user.Password == "" {
+			common.ApiErrorT(c, "Invalid parameters")
+			return
+		}
 	}
 	user.Username = strings.TrimSpace(user.Username)
 	user.Email = model.NormalizeEmail(user.Email)

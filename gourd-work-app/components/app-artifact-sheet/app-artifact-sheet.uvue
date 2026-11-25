@@ -1,40 +1,92 @@
-<template>
-	<!-- 产物弹层（设计稿 S3「产物」）：列出当前对话产出的文件，点击卡片进产物详情（待接口接入） -->
-	<app-sheet :visible="visible" :title="t('chat.artifacts.title')" @close="emit('close')">
-		<view v-if="artifacts.length > 0" class="app-artifact__list">
-			<view v-for="item in artifacts" :key="item.name" class="app-artifact__card" @click="emit('open', item)">
-				<view class="app-artifact__ic" :class="item.icon === 'image' ? 'app-artifact__ic--image' : ''">
-					<!-- 码点直写：e69f 文件 / e61e 图片；代码类文件无对应字体图标，按文档图标展示 -->
-					<text class="iconfont app-artifact__glyph">{{ item.icon === 'image' ? '' : '' }}</text>
-				</view>
-				<view class="app-artifact__tx">
-					<text class="app-artifact__name">{{ item.name }}</text>
-					<text class="app-artifact__meta">{{ fileMeta(item) }}</text>
+﻿<template>
+	<!-- 产物弹层（设计稿 S3「产物」）：列出当前对话产出的文件。
+		 数据源 = 内核 GET /web/chat/changes/session（与桌面任务监控「产出」区同源），
+		 见 hooks/useArtifacts.ts。点卡片进详情：文本走 markdown 渲染，图片/二进制
+		 只展示元信息（二进制过不了设备链路，见 openDetail 注释）。绝不展示演示数据。 -->
+	<app-sheet :visible="visible" :title="sheetTitle" @close="emit('close')">
+		<!-- 详情态：点卡片后原地切换，返回箭头回列表（不新开弹层，避免层叠吞点击） -->
+		<template v-if="detail != null">
+			<view class="app-artifact__detail-head" @click="closeDetail">
+				<rice-icon name="arrow-left" size="16px" color="var(--color-text-secondary)"></rice-icon>
+				<text class="app-artifact__detail-back">{{ t('chat.artifacts.back') }}</text>
+			</view>
+			<view class="app-artifact__detail-title">
+				<text class="app-artifact__name">{{ detail.name }}</text>
+				<text class="app-artifact__meta">{{ detailMeta(detail) }}</text>
+			</view>
+			<view class="app-artifact__md">
+				<app-md-text v-if="previewText.length > 0" :text="previewText" :complete="true"></app-md-text>
+				<text v-else class="app-artifact__empty">{{ detailLoading ? t('chat.artifacts.loading') : detailError }}</text>
+			</view>
+		</template>
+
+		<!-- 列表态 -->
+		<template v-else>
+			<!-- 会话级统计（跨 run 合并后的累计增删）：有产出才显示，空态不摆零值 -->
+			<text v-if="phase === 'ready' && files.length > 0" class="app-artifact__summary">{{ summaryText }}</text>
+			<view v-if="phase === 'ready' && files.length > 0" class="app-artifact__list">
+				<view v-for="item in files" :key="item.path" class="app-artifact__card" @click="openDetail(item)">
+					<view class="app-artifact__ic" :class="item.image ? 'app-artifact__ic--image' : ''">
+						<!-- 码点直写：e69f 文件 / e61e 图片；代码类文件无对应字体图标，按文档图标展示 -->
+						<text class="iconfont app-artifact__glyph" :class="item.image ? 'app-artifact__glyph--image' : ''">{{ item.image ? '' : '' }}</text>
+					</view>
+					<view class="app-artifact__tx">
+						<text class="app-artifact__name">{{ item.name }}</text>
+						<text class="app-artifact__meta">{{ fileMeta(item) }}</text>
+					</view>
+					<!-- 变更类型徽标 + 增删统计：与消息内文件变更卡同口径 -->
+					<view class="app-artifact__side">
+						<text class="app-artifact__badge" :class="badgeClass(item)">{{ item.kind }}</text>
+						<text v-if="item.additions > 0" class="app-artifact__add">+{{ item.additions }}</text>
+						<text v-if="item.deletions > 0" class="app-artifact__del">-{{ item.deletions }}</text>
+					</view>
 				</view>
 			</view>
-		</view>
-		<text v-else class="app-artifact__empty">{{ t('chat.artifacts.empty') }}</text>
+			<!-- 加载中：不摆「暂无产物」（拉取未完成的空态是误导） -->
+			<text v-else-if="phase !== 'error'" class="app-artifact__empty">{{ t('chat.artifacts.loading') }}</text>
+			<!-- 失败：明确告知并可重试，绝不伪装成空态 -->
+			<view v-else class="app-artifact__retry">
+				<text class="app-artifact__empty">{{ error.length > 0 ? error : t('chat.artifacts.loadFailed') }}</text>
+				<view class="app-artifact__retry-btn" @click="emit('retry')">
+					<text class="app-artifact__retry-tx">{{ t('chat.artifacts.retry') }}</text>
+				</view>
+			</view>
+		</template>
 	</app-sheet>
 </template>
 
 <script setup lang="ts">
+	import { computed, ref, watch } from 'vue'
+	import type { ComputedRef, Ref } from 'vue'
 	import { i18n } from '@/locale/i18n.ts'
 	import AppSheet from '@/components/app-sheet/app-sheet.uvue'
+	import AppMdText from '@/components/app-md-text/app-md-text.uvue'
+	import { ensureConnected, request, kernelOk } from '@/utils/gwork-link.ts'
+	import { useDevices } from '@/hooks/useDevices'
+	import { fieldString } from '@/utils/tools.ts'
+	import type { ApiBody } from '@/utils/request.ts'
 	import type { ArtifactFile } from '@/data/app-data'
+	import type { ArtifactPhase } from '@/hooks/useArtifacts'
 
 	defineOptions({
 		name: 'app-artifact-sheet',
 		styleIsolation: 'app-and-page'
 	})
 
-	defineProps<{
+	const props = defineProps<{
 		visible: boolean
-		artifacts: ArtifactFile[]
+		files: ArtifactFile[]
+		phase: ArtifactPhase
+		error: string
+		additions: number
+		deletions: number
+		/** 预览时必须透传的会话工作区根（产物 path 相对于它） */
+		root: string
 	}>()
 
 	const emit = defineEmits<{
 		(e: 'close'): void
-		(e: 'open', artifact: ArtifactFile): void
+		(e: 'retry'): void
 	}>()
 
 	function t(key: string, values?: Record<string, string>): string {
@@ -42,85 +94,306 @@
 		return i18n.global.t(key, values)
 	}
 
-	// 卡片副标题「{类型} 文件 · 大小」，模板里不直接调带插值的 t，收敛到方法
+	// 卡片副标题「{类型} 文件」：模板里不直接调带插值的 t，收敛到方法
 	function fileMeta(item: ArtifactFile): string {
-		return t('chat.artifacts.fileMeta', { kind: item.kind, size: item.size })
+		const kind: string = item.ext.length > 0 ? item.ext : t('chat.artifacts.unknownKind')
+		return t('chat.artifacts.fileMeta', { kind: kind })
 	}
+
+	/** 逐字段判型的数字读取：内核可能给 null / 字符串 / 缺失（Java 没有 totalLines）。 */
+	function numField(row: ApiBody, key: string): number {
+		const v = row[key]
+		if (typeof v === 'number') return Math.max(0, Math.round(v as number))
+		if (typeof v === 'string') {
+			const n: number = parseInt(v as string)
+			return isNaN(n) ? 0 : Math.max(0, n)
+		}
+		return 0
+	}
+
+	function detailMeta(item: ArtifactFile): string {
+		const parts: string[] = [fileMeta(item)]
+		if (item.additions > 0) parts.push('+' + item.additions.toString())
+		if (item.deletions > 0) parts.push('-' + item.deletions.toString())
+		return parts.join(' · ')
+	}
+
+	// 弹层标题：列表态用「产物」，详情态跟着文件名走，用户能确认在看哪个产物
+	const sheetTitle: ComputedRef<string> = computed<string>((): string => {
+		const cur = detail.value
+		return cur != null ? cur.name : t('chat.artifacts.title')
+	})
+
+	const summaryText: ComputedRef<string> = computed<string>((): string => {
+		const parts: string[] = [t('chat.artifacts.summaryFiles', { n: props.files.length.toString() })]
+		if (props.additions > 0) parts.push('+' + props.additions.toString())
+		if (props.deletions > 0) parts.push('-' + props.deletions.toString())
+		return parts.join(' · ')
+	})
+
+	function badgeClass(item: ArtifactFile): string {
+		if (item.kind === 'A') return 'app-artifact__badge--add'
+		if (item.kind === 'D') return 'app-artifact__badge--del'
+		return ''
+	}
+
+	/* ---------------- 详情预览 ---------------- */
+	/** 详情态当前文件；null = 列表态 */
+	const detail: Ref<ArtifactFile | null> = ref<ArtifactFile | null>(null)
+	const detailLoading: Ref<boolean> = ref<boolean>(false)
+	const detailError: Ref<string> = ref<string>('')
+	/** 文本预览内容（markdown 原文，交给 app-md-text 渲染） */
+	const previewText: Ref<string> = ref<string>('')
+	/** 在途预览代次：连点不同文件时，旧响应不得覆盖新文件 */
+	let detailGen: number = 0
+
+	/** 预览行数上限。**不是审美参数而是链路保护**：
+	 *  Rust 内核的 filer/read 在 limit=0 时会 read 整个文件再切行，返回的 JSON 又要
+	 *  塞进 16MB 的 WS 字符串帧（gworkMaxFrameSize/device_link 读限）；一个几 MB 的
+	 *  min.js 或日志就能把帧撑爆，表现为「详情一直转圈然后整个链路断」。
+	 *  2000 行足够看清一个产物，超出由下文的截断提示告知用户。 */
+	const PREVIEW_LINE_LIMIT: number = 2000
+
+	function closeDetail(): void {
+		detailGen += 1
+		detail.value = null
+		detailLoading.value = false
+		detailError.value = ''
+		previewText.value = ''
+	}
+
+	/** 点卡片进详情。文本走 filer/read（content）；图片/二进制不做内联预览。
+	 *
+	 *  【为什么图片不走 filer/raw】它是**流式二进制端点**：Java 侧直接
+	 *  `ctx.output(bytes)` 吐原始字节（WebController#fileRaw），而设备链路的响应
+	 *  信封 `ResEnvelope.body` 是 JSON **字符串**（device_link.rs），二进制过不了桥；
+	 *  Rust 侧虽把字节包成 JSON dataUrl，但两套内核契约不一致，依赖它必然在 Java
+	 *  内核上失败。因此图片只展示元信息 + 明确提示「到桌面端查看」，绝不假装能预览。
+	 *  （`attachment/meta` 也无法兜底：它只读会话 uploads 目录，与工作区产物无关。）
+	 *  该端点也已从两处中转白名单移除——前端不用就不放行（最小权限）。
+	 *
+	 *  root 必须透传：产物 path 相对会话工作区，不传会读到默认根下的错误文件。
+	 *  透传方式是 **query 参数**——两端内核只认 `root` 查询参数，X-Session-Cwd 头对它无效。 */
+	async function openDetail(item: ArtifactFile): Promise<void> {
+		detailGen += 1
+		const gen: number = detailGen
+		detail.value = item
+		detailError.value = ''
+		previewText.value = ''
+		if (item.image || item.binary) {
+			detailLoading.value = false
+			detailError.value = i18n.global.t('chat.artifacts.binaryHint')
+			return
+		}
+		detailLoading.value = true
+		const devices = useDevices()
+		try {
+			await ensureConnected(devices.activeDeviceId.value)
+			const query: string = 'path=' + encodeURIComponent(item.path)
+				+ '&limit=' + PREVIEW_LINE_LIMIT.toString()
+				+ '&offset=1'
+				+ (props.root.length > 0 ? '&root=' + encodeURIComponent(props.root) : '')
+			const body: ApiBody = await request('GET', '/web/chat/filer/read', query, '', props.root)
+			if (gen !== detailGen) return
+			if (!kernelOk(body)) {
+				// 内核的 413（Java 侧单文件上限 2MB）是「这个文件看不了」而非链路故障，
+				// 原样透出内核 description 比一句笼统的「预览失败」更有用。
+				const desc: string = fieldString(body, 'description')
+				detailError.value = desc.length > 0 ? desc : i18n.global.t('chat.artifacts.previewFailed')
+				return
+			}
+			const data = body['data']
+			if (data == null || typeof data !== 'object') {
+				detailError.value = i18n.global.t('chat.artifacts.previewFailed')
+				return
+			}
+			const payload: ApiBody = data as ApiBody
+			// 账本里的 binary 标记来自历史 run，可能与当前文件内容不符（后被改写成文本，
+			// 或反之）。内核自己判定的 binary 才是权威：此时它**不返回 content**，
+			// 若只看 content 为空就会误报「文件为空」。
+			if (payload['binary'] === true) {
+				detailError.value = i18n.global.t('chat.artifacts.binaryHint')
+				return
+			}
+			const content: string = fieldString(payload, 'content')
+			if (content.length === 0) {
+				// 空文件（ADDED 但 0 字节）不是错误：给「文件为空」文案而非失败
+				previewText.value = i18n.global.t('chat.artifacts.previewEmpty')
+				return
+			}
+			// Rust 内核回 totalLines/endLine；Java 内核没有这两个字段（它自己按 2MB 截断），
+			// 故只在字段存在且确实还有余量时提示截断，不猜。
+			const total: number = numField(payload, 'totalLines')
+			const shown: number = numField(payload, 'endLine')
+			const truncated: boolean = total > 0 && shown > 0 && shown < total
+			previewText.value = truncated
+				? content + '\n\n' + i18n.global.t('chat.artifacts.truncated', { shown: shown.toString(), total: total.toString() })
+				: content
+		} catch (err: any) {
+			if (gen !== detailGen) return
+			const msg: string = err instanceof Error ? err.message : ''
+			detailError.value = msg.length > 0 ? msg : i18n.global.t('chat.artifacts.previewFailed')
+		} finally {
+			if (gen === detailGen) detailLoading.value = false
+		}
+	}
+
+	// 弹层由开→关时清详情态：下次打开必须回到列表（残留详情会让人以为没有列表）
+	watch((): boolean => props.visible, (now: boolean, before: boolean): void => {
+		if (!now && before) closeDetail()
+	})
 </script>
 
 <style lang="scss">
-.app-artifact {
-	&__list {
-		padding-top: 2px;
-	}
+	.app-artifact {
+		&__summary {
+			margin-bottom: 10px;
+			font-size: 12px;
+			color: var(--color-text-tertiary);
+		}
 
-	&__card {
-		flex-direction: row;
-		align-items: center;
-		margin-bottom: 11px;
-		padding: 14px 15px;
-		border-width: 1px;
-		border-style: solid;
-		border-color: var(--color-border);
-		border-radius: 17px;
-		background-color: var(--color-bg-card);
-	}
+		&__list {
+			padding-top: 2px;
+		}
 
-	&__ic {
-		width: 44px;
-		height: 44px;
-		align-items: center;
-		justify-content: center;
-		margin-right: 13px;
-		border-radius: 13px;
-		background-color: var(--color-brand-soft);
+		&__card {
+			flex-direction: row;
+			align-items: center;
+			margin-bottom: 11px;
+			padding: 14px 15px;
+			border-width: 1px;
+			border-style: solid;
+			border-color: var(--color-border);
+			border-radius: 17px;
+			background-color: var(--color-bg-card);
+		}
 
-		&--image {
-			background-color: var(--color-file-image-bg);
+		&__ic {
+			width: 44px;
+			height: 44px;
+			align-items: center;
+			justify-content: center;
+			margin-right: 13px;
+			border-radius: 13px;
+			background-color: var(--color-brand-soft);
+
+			&--image {
+				background-color: var(--color-file-image-bg);
+			}
+		}
+
+		&__glyph {
+			font-size: 22px;
+			color: var(--color-primary);
+
+			&--image {
+				color: var(--color-file-image);
+			}
+		}
+
+		&__tx {
+			flex: 1;
+			min-width: 0;
+			flex-direction: column;
+		}
+
+		&__name {
+			font-size: 14px;
+			font-weight: 700;
+			color: var(--color-text);
+			overflow: hidden;
+			text-overflow: ellipsis;
+			white-space: nowrap;
+		}
+
+		&__meta {
+			margin-top: 5px;
+			font-size: 12px;
+			color: var(--color-text-tertiary);
+			overflow: hidden;
+			text-overflow: ellipsis;
+			white-space: nowrap;
+		}
+
+		&__side {
+			flex-direction: column;
+			align-items: flex-end;
+			margin-left: 8px;
+		}
+
+		&__badge {
+			font-size: 11px;
+			font-weight: 700;
+			color: var(--color-text-tertiary);
+			padding: 1px 6px;
+			border-radius: 6px;
+			background-color: var(--color-brand-soft);
+
+			&--add {
+				color: var(--color-success);
+			}
+
+			&--del {
+				color: var(--color-error);
+			}
+		}
+
+		&__add {
+			margin-top: 3px;
+			font-size: 11px;
+			color: var(--color-success);
+		}
+
+		&__del {
+			font-size: 11px;
+			color: var(--color-error);
+		}
+
+		&__empty {
+			padding: 26px 0;
+			font-size: 12px;
+			text-align: center;
+			color: var(--color-text-tertiary);
+		}
+
+		&__retry {
+			flex-direction: column;
+			align-items: center;
+		}
+
+		&__retry-btn {
+			padding: 8px 20px;
+			border-width: 1px;
+			border-style: solid;
+			border-color: var(--color-border);
+			border-radius: 12px;
+		}
+
+		&__retry-tx {
+			font-size: 13px;
+			font-weight: 600;
+			color: var(--color-primary);
+		}
+
+		&__detail-head {
+			flex-direction: row;
+			align-items: center;
+			margin-bottom: 10px;
+		}
+
+		&__detail-back {
+			margin-left: 6px;
+			font-size: 13px;
+			color: var(--color-text-secondary);
+		}
+
+		&__detail-title {
+			flex-direction: column;
+			margin-bottom: 12px;
+		}
+
+		&__md {
+			flex-direction: column;
 		}
 	}
-
-	&__glyph {
-		font-size: 22px;
-		color: var(--color-primary);
-
-		&--image {
-			color: var(--color-file-image);
-		}
-	}
-
-	&__tx {
-		flex: 1;
-		min-width: 0;
-		flex-direction: column;
-	}
-
-	&__name {
-		font-size: 14px;
-		font-weight: 700;
-		color: var(--color-text);
-		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
-	}
-
-	&__meta {
-		margin-top: 5px;
-		font-size: 11.5px;
-		color: var(--color-text-tertiary);
-		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
-	}
-
-	&__empty {
-		padding: 26px 0;
-		font-size: 12px;
-		text-align: center;
-		color: var(--color-text-tertiary);
-	}
-}
 </style>
-
-
-

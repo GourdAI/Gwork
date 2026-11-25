@@ -18,6 +18,9 @@ export const SHEET_MAX_WIDTH = 560
 /** 双栏侧栏宽度：随视口伸缩并封顶 */
 export const SIDEBAR_MIN_WIDTH = 280
 export const SIDEBAR_MAX_WIDTH = 360
+/** 窄屏浮层抽屉宽度：视口的 86%，右侧留缝露出主页面（对齐 workbuddy 抽屉形态） */
+export const DRAWER_WIDTH_RATIO = 0.86
+export const DRAWER_MAX_WIDTH = 420
 
 const windowWidth: Ref<number> = ref<number>(0)
 const windowHeight: Ref<number> = ref<number>(0)
@@ -65,6 +68,11 @@ export const sheetShellStyle = computed<UTSJSONObject>((): UTSJSONObject => {
 export const sidebarWidth = computed<number>((): number => {
 	const raw: number = Math.round(windowWidth.value * 0.3)
 	return Math.min(SIDEBAR_MAX_WIDTH, Math.max(SIDEBAR_MIN_WIDTH, raw))
+})
+
+/** 窄屏浮层抽屉宽度：86% 视口宽、封顶 420，右侧留缝可点遮罩关闭 */
+export const drawerWidth = computed<number>((): number => {
+	return Math.min(DRAWER_MAX_WIDTH, Math.round(windowWidth.value * DRAWER_WIDTH_RATIO))
 })
 
 /** 主区可用宽度：宽屏双栏下 = 视口 - 侧栏 - 分隔线；窄屏即整窗 */
@@ -129,6 +137,7 @@ export type ViewportApi = {
 	chatColumnStyle: ComputedRef<string>
 	sheetShellStyle: ComputedRef<UTSJSONObject>
 	sidebarWidth: ComputedRef<number>
+	drawerWidth: ComputedRef<number>
 	paneWidth: ComputedRef<number>
 }
 
@@ -153,6 +162,7 @@ export function useViewport(): ViewportApi {
 		chatColumnStyle,
 		sheetShellStyle,
 		sidebarWidth,
+		drawerWidth,
 		paneWidth
 	}
 }

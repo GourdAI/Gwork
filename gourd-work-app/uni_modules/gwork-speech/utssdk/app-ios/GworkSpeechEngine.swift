@@ -1,6 +1,7 @@
 import Foundation
 import Speech
 import AVFoundation
+import UIKit
 
 /// gwork-speech iOS 原生引擎（UTS 原生混编）。
 /// 闭包桥接：start 传入的 partial/result/error 三个回调由本类持有并派发，
@@ -53,18 +54,30 @@ public class GworkSpeechEngine {
 		}
 		sessionToken += 1
 		let token = sessionToken
+		// 已授权快路径（与 Android 端对齐）：两项权限都批过就不再走 requestAuthorization/
+		// requestRecordPermission 异步链——每次按住都过一遍框架授权在个别系统版本上会闪
+		// 系统 UI、打断按住手势。权限状态读取本身不弹框。
+		if SFSpeechRecognizer.authorizationStatus() == .authorized,
+		   AVAudioSession.sharedInstance().recordPermission == .granted {
+			beginSession(language: language, onPartial: onPartial, onResult: onResult, onError: onError)
+			return
+		}
 		SFSpeechRecognizer.requestAuthorization { [weak self] status in
 			DispatchQueue.main.async {
 				guard let self = self, token == self.sessionToken else { return }
 				guard status == .authorized else {
-					onError("permission", "speech authorization \(status.rawValue)")
+					// denied/restricted 系统不再弹框（doNotAskAgain）；notDetermined 理论走不到
+					// requestAuthorization 之后的非授权态，保守按 false
+					let permanent = status == .denied || status == .restricted
+					onError("permission", "speech authorization \(status.rawValue)\(permanent ? " doNotAskAgain" : "")")
 					return
 				}
 				AVAudioSession.sharedInstance().requestRecordPermission { granted in
 					DispatchQueue.main.async {
 						guard token == self.sessionToken else { return }
 						guard granted else {
-							onError("permission", "microphone denied")
+							// iOS 麦克风拒绝一次后系统就不再弹授权框，唯一恢复路径是设置
+							onError("permission", "microphone denied doNotAskAgain")
 							return
 						}
 						self.beginSession(language: language, onPartial: onPartial, onResult: onResult, onError: onError)
@@ -193,6 +206,22 @@ public class GworkSpeechEngine {
 		}
 		stopTimer = work
 		DispatchQueue.main.asyncAfter(deadline: .now() + 3.0, execute: work)
+	}
+
+	/// 打开本应用的系统设置页：iOS 权限拒绝一次后系统不再弹授权框，
+	/// 唯一恢复路径是设置里手动开启（业务层弹引导框确认后调用）
+	public func openSettings() {
+		DispatchQueue.main.async {
+			// App-Prefs: 直达本应用设置页（比通用入口少一步点击；私有 scheme 仅跳转不采集，
+			// 审核风险低于收益）；被系统拒绝打开时回退官方通用入口
+			if let url = URL(string: "App-Prefs:root=\(Bundle.main.bundleIdentifier ?? "")"),
+			   UIApplication.shared.canOpenURL(url) {
+				UIApplication.shared.open(url, options: [:], completionHandler: nil)
+				return
+			}
+			guard let url = URL(string: UIApplication.openSettingsURLString) else { return }
+			UIApplication.shared.open(url, options: [:], completionHandler: nil)
+		}
 	}
 
 	/// 静默放弃：不派发任何回调（权限弹窗期间的取消也令迟到的授权链失效）

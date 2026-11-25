@@ -315,8 +315,18 @@ const TITLEBAR_JS: &str = r#"
 
     /* hover/active 底色优先吃主题令牌 --bg-hover，与 .titlebar-action-btn 完全同源；
        令牌缺失（注入早于 theme.css 解析的极端时序）才退回 rgba 兜底值。 */
-    '#' + ROOT_ID + ' .__gourd_tb_btn:hover{background:var(--bg-hover,var(--gourd-tb-hover,rgba(0,0,0,.06)));color:var(--text-primary,var(--gourd-tb-fg,#1a1a2e));}',
-    '#' + ROOT_ID + ' .__gourd_tb_btn:active{background:var(--gourd-tb-active,rgba(0,0,0,.12));}',
+    /* hover 只换底色、【不换图标色】：旧实现 hover 切到 --text-primary（近黑），
+       与常态 --titlebar-icon-fg 的灰形成 12.6:1 vs 4.4:1 的对比度跳变，视觉上
+       「笔画变粗变黑」；无边框窗口 startDragging 拖拽时 WebView2 收不到 mouseleave，
+       :hover 粘滞 → 三钮常驻深色态（用户截图「窗口按钮发黑发方」）。
+       显式 color:inherit 保持与常态同色，hover 仅以圆角底色表达。 */
+    '#' + ROOT_ID + ' .__gourd_tb_btn:hover{background:var(--bg-hover,var(--gourd-tb-hover,rgba(0,0,0,.06)));color:inherit;}',
+    '#' + ROOT_ID + ' .__gourd_tb_btn:active{background:var(--gourd-tb-active,rgba(0,0,0,.12));color:inherit;}',
+    /* 窗控按钮不画 focus-visible 描边：theme.css 的全局 *:focus-visible 会给
+       点击后的按钮套 2px 方框（用户截图「按钮带方框」）。窗控是鼠标专属控件，
+       键盘可达性由 aria-label + 原生 button 语义保留，描边在此纯属视觉噪声。 */
+    '#' + ROOT_ID + ' .__gourd_tb_btn:focus-visible{outline:none;}',
+    '#' + ROOT_ID + ' .__gourd_tb_btn:focus:not(:focus-visible){outline:none;}',
     /* 关闭键：Win11 标准红 #c42b1c，图标转白 */
     '#' + ROOT_ID + ' .__gourd_tb_btn.__gourd_tb_close:hover{background:#c42b1c;color:#fff;opacity:1;}',
     '#' + ROOT_ID + ' .__gourd_tb_btn.__gourd_tb_close:active{background:#b1271b;color:#fff;opacity:1;}',

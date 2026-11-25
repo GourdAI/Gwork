@@ -2,8 +2,19 @@
 <template data-mount=".main-area">
     <!-- Welcome View -->
     <div class="welcome-view welcome-compact" id="welcomeView">
+        <!-- 品牌吉祥物「团子」动图（GIF 透明底，亮/暗主题通用，无需按主题换图）。
+             静态品牌标 /img/favicon.png、/img/logo.svg 仍用于侧栏、会话头像与 favicon，
+             此处只替换新建任务页的商标位置。
+
+             用 <picture> 而非裸 <img>：GIF 的循环是图片解码层自带的，CSS 的
+             @media (prefers-reduced-motion) / theme.css 里那条全局 animation-duration
+             都**管不到**它，只能靠 media 属性整张换成静态首帧 PNG 才真正停住。
+             这比用 JS 监听 matchMedia 再改 src 更稳：不占主线程、不依赖脚本先于渲染执行。 -->
         <a class="welcome-avatar" href="https://www.gourdwork.com/" target="_blank" rel="noopener noreferrer">
-            <img src="/img/favicon.png" alt="GWork" />
+            <picture>
+                <source srcset="/img/mascot-tuanzi-static.png" media="(prefers-reduced-motion: reduce)" />
+                <img class="welcome-avatar-mascot" src="/img/mascot-tuanzi.gif" alt="GWork" />
+            </picture>
         </a>
         <div class="welcome-title" id="welcomeTitle" data-i18n="app.welcome_title">你好，我是 GWork ！</div>
         <!-- 活跃热力图卡片（与「使用统计」同口径，固定 26 周窗口）：位于 hero 与输入框之间；
@@ -20,6 +31,10 @@
                 </div>
             </div>
             <div class="attachments-wrap" id="welcomeAttachmentsWrap"></div>
+            <!-- 技能小卡片行：刻意独立于附件区。附件区由 renderAttachmentsWrap 全量重建
+                 （首行 html('')）且靠 has-items 控制显隐，chip 寄生其中会被清空且看不见；
+                 显隐由 app-history.js 按自身 has-chips 维护。 -->
+            <div class="skill-chips" id="welcomeSkillChips"></div>
             <div class="input-resize-handle" data-i18n-title="app.resize_input"></div>
             <div style="position:relative">
                 <div class="cmd-complete" id="welcomeCmdComplete"></div>
@@ -110,6 +125,17 @@
                     </div>
                     <div class="access-dropdown" id="welcomeAccessDropdown"></div>
                 </div>
+                <!-- 连接器选择（会话级，WorkBuddy 式；默认不启用）：勾选本会话可用的连接器，
+                     内核按 ToolGate::mcp_servers 双端门控。结构同 .access-selector，逻辑见
+                     app-connector-picker.js；两套 DOM（欢迎页/对话页）id 不同。 -->
+                <div class="conn-selector composer-tray-item" id="welcomeConnSelector">
+                    <div class="conn-selector-current" id="welcomeConnCurrent" data-i18n-title="app.conn_pick_title">
+                        <svg class="conn-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 2v6"/><path d="M15 2v6"/><path d="M6 8h12v4a6 6 0 0 1-12 0z"/><path d="M12 18v4"/></svg>
+                        <span class="conn-label" data-i18n="app.conn_pick_label">连接器</span>
+                        <svg class="model-arrow" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>
+                    </div>
+                    <div class="conn-dropdown" id="welcomeConnDropdown"></div>
+                </div>
             </div>
         </div>
         <!-- 消息执行队列 -->
@@ -145,12 +171,13 @@
              内容为该任务的 transient 运行参数（模型/思考/上下文/权限）；刻意标识「仅本任务自动执行使用」，
              因为执行会话的 composer 展示的是会话自己的选择，两者按设计不互通（避免任务污染用户会话）。 -->
         <div class="loop-run-banner" id="loopRunBanner" style="display:none"></div>
-        <!-- 消息滚动区与其右侧刻度带的共同父容器（flex 行）。
-             刻度带是滚动区的【兄弟 flex 列】，不是绝对定位覆盖层：
-             ① 覆盖层会压在 .messages-wrap 的原生滚动条上挡住拖动，并排则互不相干；
-             ② 覆盖层要和各类浮层抢 z-index，并排不需要。
-             它不随消息滚走，是因为它在滚动容器【外面】、且刻度位置按内容比例独立计算。
-             结构见 app-history.js 的 Content History Rail（取代旧「输入框上方历史浮层」）。 -->
+        <!-- 消息滚动区与其右缘内侧刻度带的共同父容器。
+              2026-11-04 位置修正（用户报障「滚动条和刻度搞位置反了」）：
+              .messages-wrap 绝对定位占满 shell，原生滚动条因此贴在整个内容区最右；
+              .history-rail 叠回 wrap 右缘内侧、用 --scrollbar-w 让开滚动条宽度，
+              刻度就排在滚动条左边 —— 与参照稿一致。
+              轨道不随消息滚走：它在滚动容器【外面】、刻度位置按固定步距独立计算。
+              结构见 app-history.js 的 Content History Rail（取代旧「输入框上方历史浮层」）。 -->
         <div class="messages-shell" id="messagesShell">
             <div class="messages-wrap" id="messagesWrap">
                 <!-- Per-session containers are added here dynamically -->
@@ -206,6 +233,8 @@
                     </div>
                 </div>
                 <div class="attachments-wrap" id="chatAttachmentsWrap"></div>
+                <!-- 技能小卡片行：独立于附件区，理由同 welcomeSkillChips 处注释 -->
+                <div class="skill-chips" id="chatSkillChips"></div>
                 <div class="input-resize-handle" data-i18n-title="app.resize_input"></div>
                 <div style="position:relative;">
                     <div class="cmd-complete" id="chatCmdComplete"></div>
@@ -246,6 +275,16 @@
                                 <svg class="model-arrow" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>
                             </div>
                             <div class="access-dropdown" id="chatAccessDropdown"></div>
+                        </div>
+                        <!-- 连接器选择（会话级）：结构同欢迎页 .conn-selector，id 前缀换为 chat；
+                             见 composer-tray 注释与 app-connector-picker.js。 -->
+                        <div class="conn-selector" id="chatConnSelector">
+                            <div class="conn-selector-current" id="chatConnCurrent" data-i18n-title="app.conn_pick_title">
+                                <svg class="conn-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 2v6"/><path d="M15 2v6"/><path d="M6 8h12v4a6 6 0 0 1-12 0z"/><path d="M12 18v4"/></svg>
+                                <span class="conn-label" data-i18n="app.conn_pick_label">连接器</span>
+                                <svg class="model-arrow" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>
+                            </div>
+                            <div class="conn-dropdown" id="chatConnDropdown"></div>
                         </div>
                         <input type="file" class="attach-input" id="chatAttachInput" multiple accept="*/*"/>
                         <input type="file" class="attach-input" id="chatImageInput" multiple accept="image/*"/>

@@ -797,8 +797,10 @@ function ensureAssistantBubble(sess) {
         // 非流式（历史加载）保持原有显示逻辑。
         if (sess.isStreaming) {
             $(row).find('.msg-actions').hide();
-            // 流式中提前创建常驻的内联等待指示器（默认不可见但占位），避免后续显隐造成跳动。
-            ensureInlineThinking(sess);
+            // 【code review 修复 2026-11-24】此处原调 ensureInlineThinking「提前占位」，
+            // 但指示器已整体退役（showInlineThinking no-op 只清残留）：提前创建的元素
+            // 是 visibility:hidden 仍占高 ~35px 的幽灵行，收尾 purge 时整行移除 →
+            // 气泡高度塌陷，正是用户要消灭的「一跳一跳」。不再创建任何占位行。
         }
     }
     return sess.currentBubbleEl;
@@ -825,9 +827,12 @@ function createThinkingBlockEl(sess) {
          + '</span>'
          + '<span class="thinking-status-dot"></span>'
         + '</div>'
-        + '<div class="thinking-block-body"><div class="md-content"></div></div>';
+        /* 灰底内容块与工具输出同族（.thinking-inner-out ↔ .tool-plain-out）：
+           思考展开不再是无底色裸文本（2026-11 用户报「工具展开有阴影块，思考没有」）。 */
+        + '<div class="thinking-block-body"><div class="thinking-inner-out"><div class="md-content"></div></div></div>';
     $(block).find('.thinking-block-header').on('click', function() {
         $(block).toggleClass('expanded');
+        notifyBatchWindowResize(block);   // 思考卡体展开/收起同样触发批次窗重测
     });
     return block;
 }
@@ -1043,7 +1048,13 @@ function ensureThinkingBlockCore(sess, h, opts) {
             // 重来（createStreamMd 的 !active 重置分支）。故新思考段落在同块体内的新 md-content：
             // 视觉上仍是一个思考块，上段内容保留在上、新段流式续在下。
             var reuseBody = $('<div>').addClass('md-content')[0];
-            if (h.thinkingBodyWrapEl) h.thinkingBodyWrapEl.appendChild(reuseBody);
+            /* 【code review 修复 2026-11】新段必须落进灰底块 .thinking-inner-out：
+               直接 append 到 wrap 会绕过灰底/34px 缩进层，第二段思考变裸文本贴左缘
+               （与首段形态分叉，正是用户报的「思考没有阴影块/缩进凸出」在复用路径回潮）。
+               旧历史块无 inner 层时回落 wrap（不改造历史 DOM）。 */
+            var reuseInner = h.thinkingBodyWrapEl
+                ? $(h.thinkingBodyWrapEl).find('.thinking-inner-out')[0] : null;
+            if (h.thinkingBodyWrapEl) (reuseInner || h.thinkingBodyWrapEl).appendChild(reuseBody);
             h.thinkingBodyMdEl = reuseBody;
             h.thinkingBuffer = '';
             resetThinkingPreview(h);   // 与上一行严格配对：复用块重开一段思考，跟踪器必须归零
@@ -1312,7 +1323,20 @@ function insertBeforeActions(sess, el) {
     // 正文一律累积在 meta 行之上。（曾有 bug：meta 行停在首个内容块之后，被后续流式内容顶到消息顶部。）
     var bubble = sess.currentBubbleEl.parentNode;
     var footer = $(bubble).find('.msg-meta-row').first()[0] || $(bubble).find('.msg-actions').first()[0];
-    if (footer) $(footer).before(el);
+    /* 【2026-11 用户报障「文件变更卡怎么跑到思考上面了」】变更卡宿主（.fch-host）
+       也钉在页脚之前：run 收口前落卡（挂起段/迟到帧）后，恢复段的正文/思考/工具若仍
+       以页脚为锚会插到宿主【后面】，卡片就压在过程区上方。新内容一律插到宿主【之前】
+       （宿主恒在内容流末尾、页脚之前），与 placeHostInBubble 的「正文之后」锚定配合，
+       恢复「过程 → 正文 → 变更卡 → 页脚」时序。多宿主（同 run 缝合）取首个。 */
+    var fchHost = null;
+    if (bubble.children) {
+        for (var fh = 0; fh < bubble.children.length; fh++) {
+            var fc = bubble.children[fh];
+            if (fc && fc.classList && fc.classList.contains && fc.classList.contains('fch-host')) { fchHost = fc; break; }
+        }
+    }
+    var refNode = fchHost || footer;
+    if (refNode) $(refNode).before(el);
     else $(bubble).append(el);
     noteBatchInsert(sess, el);
 }
@@ -2541,7 +2565,27 @@ function bindToolCardToggle(card) {
     $(card).find('.tool-card-header').on('click', function() {
         $(card).toggleClass('expanded');
         ensureToolCardBody(card);
+        /* 【滚动窗重测】卡体展开/收起改变成员高度：closed 批次窗没有流式触发源，
+           不补这一次重测，clip/overflow/负 margin 全按旧几何裁（内容被裁/重叠）。 */
+        notifyBatchWindowResize(card);
     });
+}
+
+/* 成员高度变化（卡体展开/收起）后通知所属批次窗重测。
+   盖子 = 成员上方最近的 .turn-batch-header 直接兄弟；无盖子/无窗时 no-op。 */
+function notifyBatchWindowResize(el) {
+    try {
+        if (!el || !el.parentNode || typeof window === 'undefined' || !window.GourdTurnDisplay) return;
+        var kids = el.parentNode.children || [];
+        var idx = Array.prototype.indexOf.call(kids, el);
+        for (var i = idx - 1; i >= 0; i--) {
+            var k = kids[i];
+            if (k.classList && k.classList.contains('turn-batch-header')) {
+                if (k.classList.contains('turn-batch-windowed')) window.GourdTurnDisplay.refreshWindow(k, false);
+                return;
+            }
+        }
+    } catch (e) { /* 展示增强失败静默 */ }
 }
 
 /* action_end 各配对/兜底路径共用：展示模型、参数、头部元数据与结果体一次回填。 */
@@ -3547,52 +3591,39 @@ function applyPhaseLabel(el, phase) {
     $(el).attr('data-phase', phase || waitKey);
 }
 
-// 启动等待指示器：尚无气泡时，在消息区独立显示一行「圆点 + 相位文案 + Ns」
+// 启动等待指示器（历史职责，2026-11 用户拍板后已退役为 no-op）：
+// 用户报障「底部的那个思考中不要再展示了，整个页面总是一跳一跳的」——
+// 该行随首帧到达整行移除（margin-bottom 28px 一并消失）、间隙期又重建，
+// 消息流高度反复变化正是跳动根因。运行反馈已由三层常驻 UI 承担：
+//   · 停止按钮（setBtnStopMode）表达「任务在跑、可中断」；
+//   · 批次盖子「正在执行中 · Ns」秒级计时（app-turn-display.js）；
+//   · 过程行自身状态点（loading 闪烁 / done 常亮）。
+// 函数与 removeThinking / applyPhaseLabel 调用点全部保留：各收尾路径
+// （resetStreamState / finishStream / 会话切换）仍统一调用做幂等清理，
+// 历史会话里已落 DOM 的残留行也能被清掉；此处只是不再【新建】。
 function showThinking(sess) {
     removeThinking(sess);
-    sess.thinkingEl = $('<div>').addClass('thinking-row')[0];
-    sess.thinkingEl.innerHTML = '<div class="thinking-bubble">' + DOTS_HTML
-        + '<span class="thinking-phase-label"></span>'
-        + '<span class="thinking-timer-wrap">'
-        + '<span class="thinking-current-timer">0s</span>'
-        + '</span></div>';
-    $(renderRoot(sess)).append(sess.thinkingEl);
-    applyPhaseLabel(sess.thinkingEl, sess.phase);
-    var currentTimerSpan = $(sess.thinkingEl).find('.thinking-current-timer')[0];
-    startThinkingTimer(sess, 'thinkingTimerId', 'thinkingStartTime', currentTimerSpan);
-    if (sess.sessionId === activeSessionId) scrollToBottom(true);
 }
 function removeThinking(sess) {
     stopThinkingTimer(sess, 'thinkingTimerId', 'thinkingStartTime');
     if (sess.thinkingEl) { $(sess.thinkingEl).remove(); sess.thinkingEl = null; }
 }
 
-// 气泡内的间隙等待指示器（「圆点 + 相位文案 + Ns」）。
-// 关键：元素一旦创建便常驻气泡底部（actions 之前），不可见时用 visibility:hidden 占位，
-// 避免显隐导致的高度跳动；流式结束时再由 purgeInlineThinking 彻底移除。
+// 气泡内的间隙等待指示器（「圆点 + 相位文案 + Ns」）——2026-11 用户拍板整体退役：
+// 「底部的那个思考中不要再展示了，整个页面总是一跳一跳的」。即便有 visibility:hidden
+// 占位，行本身仍常驻占高、且 showInlineThinking 每次都触发 scrollToBottom，
+// 帧间隙反复显隐/置底正是跳动的另一半来源。showInlineThinking 已改为 no-op。
+// 【code review 修复 2026-11-24】ensureInlineThinking 原本还留着「创建隐藏占位行」
+// 的函数体且被 ensureAssistantBubble 流式分支调用——hidden-reserve 是
+// visibility:hidden（仍占高 ~35px），收尾 purge 整行移除时气泡塌陷，跳动复发。
+// 现函数体一并退役为 no-op：不建任何 DOM，历史残留由 remove/purge 统一清理。
 function ensureInlineThinking(sess) {
-    if (!sess.currentBubbleEl) return null;
-    if (sess.inlineThinkingEl && sess.inlineThinkingEl.parentNode) return sess.inlineThinkingEl;
-    var el = $('<div>').addClass('inline-thinking hidden-reserve')[0];
-    el.innerHTML = DOTS_HTML + '<span class="thinking-phase-label"></span>'
-        + '<span class="thinking-timer-wrap">'
-        + '<span class="thinking-current-timer">0s</span>'
-        + '</span>';
-    sess.inlineThinkingEl = el;
-    // 指示器固定在正文底部、页脚（meta 行/操作按钮）之上，使正文与用量行的相对顺序恒为「正文 → meta」。
-    var bubble = sess.currentBubbleEl.parentNode;
-    var footer = $(bubble).find('.msg-meta-row').first()[0] || $(bubble).find('.msg-actions').first()[0];
-    if (footer) $(footer).before(el);
-    return el;
+    return null;
 }
+// no-op（2026-11 用户拍板：底部「思考中」指示器退役，见 ensureInlineThinking 注释）。
+// 调用方 showPhaseIndicator 保留原相位判定逻辑，便于未来按需恢复；此处只清残留。
 function showInlineThinking(sess, phase) {
-    var el = ensureInlineThinking(sess);
-    if (!el) return;
-    $(el).removeClass('hidden-reserve');
-    applyPhaseLabel(el, phase || sess.phase);
-    var currentTimerSpan = $(el).find('.thinking-current-timer')[0];
-    startThinkingTimer(sess, 'inlineThinkingTimerId', 'inlineThinkingStartTime', currentTimerSpan);
-    if (sess.sessionId === activeSessionId) scrollToBottom();
+    removeInlineThinking(sess);
 }
 function removeInlineThinking(sess) {
     stopThinkingTimer(sess, 'inlineThinkingTimerId', 'inlineThinkingStartTime');
@@ -3625,6 +3656,13 @@ function appendHitlCard(sess, toolName, command, actionId) {
     var card = takeoverArgsStreamingCard(sess, toolName, actionId);
     if (card) {
         $(card).addClass('hitl-pending expanded');
+        /* 【HITL 接管吞卡修复】骨架卡已入批（data-turn-batch=1）：转交互态必须
+           立即摘成员标记 + 折叠类 + 窗绘制，否则批次收口把待审批卡 display:none，
+           批准/拒绝按钮消失、任务表面卡死。noteInteractiveInsert 里还有一道
+           detachInteractiveMember 双保险，这里先摘保证收口前几何已正确。 */
+        if (window.GourdTurnDisplay && window.GourdTurnDisplay.detachInteractiveMember) {
+            window.GourdTurnDisplay.detachInteractiveMember(card);
+        }
     } else {
         card = $('<div>').addClass('tool-card hitl-pending expanded')[0];
         // 存储当前 runId，用于后续删除同一运行的消息
@@ -3759,6 +3797,10 @@ function restoreHitlCardPending(sess, card) {
             + '</div>');
     }
     $(card).addClass('hitl-pending');
+    /* 恢复待审批态同样要摘批次成员标记（卡可能仍是旧批成员，下次收口会被吞） */
+    if (window.GourdTurnDisplay && window.GourdTurnDisplay.detachInteractiveMember) {
+        window.GourdTurnDisplay.detachInteractiveMember(card);
+    }
     refreshHitlFoldBoundary(card);   // 例外重新成立：若之前已折，必须重算才能露出审批按钮
     if (sess.approvedToolCard === card) sess.approvedToolCard = null;
     if (sess.pendingHitlCard === card) sess.pendingHitlCard = null;
