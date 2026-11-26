@@ -260,6 +260,7 @@
 	"chat.deviceRequired": "Selectează mai întâi un dispozitiv online din stânga sus",
 	"chat.deviceOffline": "Dispozitivul este offline. Asigură-te că clientul desktop este online și reîncearcă",
 	"chat.loadFailed": "Încărcarea a eșuat, reîncearcă mai târziu",
+	"chat.history.degraded": "Cardurile de proces și rezultate sunt indisponibile; este afișat doar textul salvat",
 	"chat.sendFailed": "Trimiterea a eșuat, reîncearcă mai târziu",
 	"chat.metaTool": "GWork · folosește {name}",
 	"chat.metaError": "GWork · a apărut o eroare",

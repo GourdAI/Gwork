@@ -477,10 +477,16 @@ const MUTATIONS = [
         to: '.msg-row.assistant .msg-bubble .tool-card .grep-hit { padding-left: 64px; }',
     },
     {
+        /* 【修复 2026-11-25】锚点必须是【自绘滚动条 ::after 规则】内唯一形态：
+           'border-radius: var(--scrollbar-radius, 8px);' 在 app.css 出现 2 次（第一处
+           是 webkit-scrollbar-thumb 规则）。旧实现 String.replace（单次替换）只改到
+           第一处 —— ::after 规则原样未动，护栏断言的是 ::after，变异体静默存活
+           （实测 not ok：变异体未被抓住）。锚点补上 preceding 'border-right:' 行后
+           全文唯一，replace 恰好命中 ::after 本体。 */
         name: '自绘滚动条退回独立 3px 圆角',
         file: 'css/app.css',
-        from: 'border-radius: var(--scrollbar-radius, 8px);',
-        to: 'border-radius: 3px;',
+        from: "border-right: var(--scrollbar-thumb-inset, 3px) solid transparent;\r\n    border-radius: var(--scrollbar-radius, 8px);",
+        to: "border-right: var(--scrollbar-thumb-inset, 3px) solid transparent;\r\n    border-radius: 3px;",
     },
 ];
 

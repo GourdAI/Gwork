@@ -260,6 +260,7 @@
 	"chat.deviceRequired": "Please select an online device at the top left first",
 	"chat.deviceOffline": "Device is offline. Make sure the desktop client is online and retry",
 	"chat.loadFailed": "Failed to load, please try again later",
+	"chat.history.degraded": "Process and output cards are unavailable; only the saved final text is shown",
 	"chat.sendFailed": "Failed to send, please try again later",
 	"chat.metaTool": "GWork · using {name}",
 	"chat.metaError": "GWork · error occurred",

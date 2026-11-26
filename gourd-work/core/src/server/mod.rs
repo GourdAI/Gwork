@@ -1708,6 +1708,13 @@ struct ReplayQuery {
     /// DEFAULT_FULL_TAIL so a bare request can never dump a 100MB stream).
     #[serde(default)]
     tail: Option<usize>,
+    /// Response-body byte budget for `Rounds` pages (mobile relay: one replay
+    /// answer rides a single websocket frame with a 16 MB device-side read
+    /// limit). The kernel keeps the window's tail and reports the dropped
+    /// head through `hasMore`/`remainingRounds` so the client pages it back.
+    /// Absent = uncapped (desktop kernels call the endpoint directly).
+    #[serde(rename = "maxBytes", default)]
+    max_bytes: Option<u64>,
 }
 
 /// Hard cap for the parameter-less legacy branch (mirrors Java's
@@ -1749,11 +1756,16 @@ async fn chat_replay(
     // Response contract is unchanged field-for-field (app-history.js
     // :1899-1911 and app-streaming.js's gate both depend on it).
     let mode = if let Some(after) = q.after_seq {
-        crate::session::ReplayMode::After { after_seq: after, limit: q.limit }
+        crate::session::ReplayMode::After {
+            after_seq: after,
+            limit: q.limit,
+            max_bytes: q.max_bytes,
+        }
     } else if q.rounds > 0 || q.before_seq.is_some() {
         crate::session::ReplayMode::Rounds {
             before_seq: q.before_seq,
             rounds: q.rounds as usize,
+            max_bytes: q.max_bytes,
         }
     } else {
         crate::session::ReplayMode::Tail { cap: q.tail.unwrap_or(REPLAY_DEFAULT_FULL_TAIL) }
@@ -1794,6 +1806,7 @@ async fn chat_replay(
                 "totalRounds": w.total_rounds,
                 "remainingRounds": w.remaining_rounds,
                 "hasMore": w.remaining_rounds > 0,
+                "truncated": w.truncated,
                 "firstSeq": first,
                 "lastSeq": last,
                 "latestSeq": last,
@@ -2497,6 +2510,16 @@ where
                         "attachmentTypes" => decl_types.push(value),
                         "attachmentPaths" => fields.attachment_paths.push(value),
                         "attachmentPathTypes" => fields.attachment_path_types.push(value),
+                        // The desktop client sends its id as one more form field
+                        // (`app-streaming.js` postChatInput → sendWithFormDataGrouped),
+                        // so JSON already round-trips it but multipart silently
+                        // dropped it into `_ => {}`. Without the id on the broadcast
+                        // `user` frame the sender cannot recognise its own echo and
+                        // renders the same message twice — observed on **every**
+                        // queue-dispatched message (`processNextQueuedMessage`),
+                        // which (unlike `sendMessage`) has no `_lastSentWireText`
+                        // fallback to dedupe by.
+                        "clientMessageId" => fields.client_message_id = value,
                         _ => {}
                     }
                 }
@@ -7416,6 +7439,7 @@ mod tests {
             crate::session::ReplayMode::After {
                 after_seq: 0,
                 limit: None,
+                max_bytes: None,
             },
         );
         let got = event_types(&stamped.events);
@@ -7432,6 +7456,7 @@ mod tests {
             crate::session::ReplayMode::After {
                 after_seq: 0,
                 limit: None,
+                max_bytes: None,
             },
         );
         let ctrl_types = event_types(&control.events);
@@ -7457,6 +7482,7 @@ mod tests {
             crate::session::ReplayMode::Rounds {
                 before_seq: Some(cursor),
                 rounds: 5,
+                max_bytes: None,
             },
         );
         let paged_types = event_types(&paged.events);
@@ -8041,5 +8067,40 @@ mod tests {
         let g: InputFields =
             serde_json::from_str(r#"{"sessionId":"work-1","input":"hi"}"#).unwrap();
         assert!(g.client_message_id.is_empty());
+    }
+
+    /// The multipart branch of [`InputPayload::from_request`] must keep
+    /// `clientMessageId` too — the desktop client posts FormData, and the
+    /// hand-rolled `match` on field names had no arm for it, so the id fell
+    /// into `_ => {}` and never reached the broadcast `user` frame.
+    ///
+    /// Consequence (observed on disk): every `user` frame carried no
+    /// `clientMessageId`, the sender could not recognise its own echo, and
+    /// **queue-dispatched** messages rendered twice — `sendMessage` dedupes
+    /// by `_lastSentWireText` as a fallback, but the queue path
+    /// (`processNextQueuedMessage`) has no such fallback.
+    ///
+    /// Asserted against the handler source rather than through axum's test
+    /// utilities: standing up a `Multipart` extractor needs a real request
+    /// with a configured content-type boundary; the needle is the explicit
+    /// `"clientMessageId"` arm in the same `match` that maps `sessionId`
+    /// and friends.
+    #[test]
+    fn multipart_parse_keeps_the_client_message_id() {
+        let src = include_str!("mod.rs");
+        let start: usize = src
+            .find("if content_type.contains(\"multipart/form-data\")")
+            .expect("multipart branch missing");
+        let end: usize = src[start..]
+            .find("Ok(InputPayload::Multipart(fields))")
+            .expect("multipart branch terminator missing");
+        let body: &str = &src[start..start + end];
+        assert!(
+            body.contains("\"clientMessageId\" => fields.client_message_id = value,"),
+            "the multipart field match must carry clientMessageId: dropping it \
+             strips the sender's identity from the broadcast user frame, and the \
+             sender renders its own message twice (queue dispatch has no text \
+             fallback)"
+        );
     }
 }

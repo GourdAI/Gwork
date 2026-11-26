@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
@@ -29,6 +30,52 @@ var (
 	ErrRefreshTokenInvalid  = errors.New("refresh token is invalid")
 	ErrRefreshRace          = errors.New("refresh token was already rotated")
 )
+
+// Per-user stale-auth-version sweep throttle: the lazy sweep at login must not
+// run on every single login for the same account. It is a batched UPDATE over
+// user_sessions (deny fence + status flip), and it used to run unconditionally
+// — a user who signs in repeatedly in a short window paid the full sweep cost
+// each time, on the login critical path. One sweep per hour per user is enough:
+// the hourly global backstop (RevokeAllStaleUserSessions in auth_cleanup.go)
+// covers everything else, and a wrong version row cannot hold a usable quota
+// slot anyway (CountUsableUserSessions filters on the current version).
+var (
+	staleSweepMu    sync.Mutex
+	staleSweepAt    = map[int]int64{}
+)
+
+// staleSweepInterval bounds how often one user's login triggers the sweep.
+const staleSweepInterval int64 = 3600
+
+// staleSweepMaxUsers caps the throttle map: it is keyed by user id and would
+// otherwise grow without bound for the lifetime of the process (every user
+// that ever logs in leaves an entry). Clearing at the cap is safe — the sweep
+// is idempotent and the hourly global backstop covers any row the lazy sweep
+// skips, so the worst case of a reset is one extra sweep per affected user.
+const staleSweepMaxUsers = 10000
+
+// staleSweepThrottled reports whether a sweep for this user is due (true) or
+// was performed recently (false). Judgment and bookkeeping are split so a
+// sweep that fails can be retried on the next login instead of being silenced
+// for the full hour.
+func staleSweepThrottled(userID int) bool {
+	staleSweepMu.Lock()
+	defer staleSweepMu.Unlock()
+	last, ok := staleSweepAt[userID]
+	if ok && time.Now().Unix()-last < staleSweepInterval {
+		return false
+	}
+	return true
+}
+
+func markStaleSweepDone(userID int) {
+	staleSweepMu.Lock()
+	defer staleSweepMu.Unlock()
+	if len(staleSweepAt) >= staleSweepMaxUsers {
+		staleSweepAt = map[int]int64{}
+	}
+	staleSweepAt[userID] = time.Now().Unix()
+}
 
 type LoginSessionView struct {
 	SID          string `json:"sid"`
@@ -153,13 +200,17 @@ func reclaimUserSessionQuota(userID int, authVersion int64, activeCount int64) (
 	if userID <= 0 || authVersion <= 0 {
 		return 0, ErrLoginSessionInvalid
 	}
-	if _, err := model.RevokeStaleUserSessions(userID, authVersion, "stale_auth_version"); err != nil {
-		// Not fatal for this login: CountUsableUserSessions already excludes
-		// those rows, so a failed sweep only delays reclaiming the storage. Log
-		// it so the fault stays visible instead of silently repeating on every
-		// login for the same account.
-		common.SysLog(common.LogText(
-			"failed to revoke stale user sessions for user %d: %s", userID, err.Error()))
+	if staleSweepThrottled(userID) {
+		if _, err := model.RevokeStaleUserSessions(userID, authVersion, "stale_auth_version"); err != nil {
+			// Not fatal for this login: CountUsableUserSessions already excludes
+			// those rows, so a failed sweep only delays reclaiming the storage. Log
+			// it so the fault stays visible instead of silently repeating on every
+			// login for the same account.
+			common.SysLog(common.LogText(
+				"failed to revoke stale user sessions for user %d: %s", userID, err.Error()))
+		} else {
+			markStaleSweepDone(userID)
+		}
 	}
 	if activeCount < int64(common.UserSessionActiveLimit) {
 		return activeCount, nil

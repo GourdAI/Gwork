@@ -135,6 +135,7 @@
         '/js/app-file-changes.js',
         '/js/app-streaming.js',
         '/js/app-access-mode.js',
+        '/js/app-connector-picker.js', // 对话内连接器选择（会话级；须在 app-history 之后——setActiveSession 钩子链）
         '/js/app-todos.js',
         '/js/app-memory.js',
         '/js/app-context.js',
@@ -145,7 +146,7 @@
 '/js/app-account.js',            // 账号入口（登录/注册/登出），纯 IPC，无 /web 请求
         '/js/app-settings-appearance.js',
         '/js/app-settings-permission.js',
-        '/js/app-settings-mcp.js',
+        '/js/app-settings-mcp.js',   // 内含唯一的 window.McpAuth 定义（认证层须早于市场页）
         '/js/app-settings-openapi.js',
         '/js/app-settings-lsp.js',
         '/js/app-model-settings.js',

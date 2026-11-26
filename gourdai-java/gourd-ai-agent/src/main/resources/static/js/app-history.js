@@ -3393,6 +3393,8 @@ function closeAllToolbarPanels() {
     $('#chatModelDropdown, #welcomeModelDropdown').removeClass('show');
     // 访问控制档位气泡（工具栏左区，与其余浮层互斥）
     $('.access-selector').removeClass('open');
+    // 连接器选择器气泡（同族；模型/档位/任务面板任一打开都收起它）
+    $('.conn-selector').removeClass('open');
     // 任务面板
     if (typeof window.hideTodoPanel === 'function') window.hideTodoPanel();
     // 队列面板
@@ -3648,14 +3650,14 @@ function navigateCmdComplete(e, inputEl, completeEl) {
    旧实现只认「整串以 / 开头且无空格」，于是输入框里一旦有了内容（或已选过一个技能），
    再打 / 就永远唤不出面板——即用户报的「只能触发一次」。
 
-   现口径分两步（A 优先，B 兜底）：
-   A. 从光标向左扫到最近的空白/串首得到 token；token 本身以 / 或 @ 开头即为触发段。
-      这条同时照顾两级组织技能名（design/lanhu 整段命中，不会被名字内部的 / 截断）。
-   B. token 不以触发符开头时，取 token 内【最后一个】/ 或 @ 作为触发段起点 —— 中文场景
-      必须走这条：「帮我写/」里 token 是整串（中文不带空格分词），只认 A 就永远弹不出面板。
-      同理「+ → 技能」按钮在已有文字后插入 /，随后每敲一个字都要靠 B 续住面板。
-      B 加一道护栏：触发符前一个字符若是 ASCII 字母数字或 : / . - _（URL 与文件路径的
-      构成字符），判为非触发 —— 否则 http://x.com、src/main 这类输入会误弹面板。 */
+   现口径：从光标向左扫到最近的空白/串首得到 token，再在 token 内【从右往左找最后一个
+   真正的触发符】，规则见下方 findCmdTriggerToken 内的分条注释（① token 即以触发符开头
+   → 整段命中，照顾 design/lanhu 这类两级技能名；② 触发符前一个字符是 ASCII 名字字符
+   → 判为 URL/路径的一段，跳过；③ 其余 → 用户新打的触发符，就地成段）。
+
+   为什么必须「找最后一个」而非「token 以触发符开头就整段命中」：中文不按空格分词，
+   回填出的 "@general" 会与紧接输入的正文粘成同一个 token，若整段命中旧触发符，用户
+   之后再打的 @ / / 永远被遮住 —— 这正是子代理「只能触发一次」的病根（见 ⑤e 护栏）。 */
 function findCmdTriggerToken(inputEl) {
     var val = inputEl.value;
     var cursor = inputEl.selectionStart == null ? val.length : inputEl.selectionStart;
@@ -4933,6 +4935,13 @@ function inheritSelectionToSession(newSessionId) {
     }).fail(function (err) {
         console.error('Failed to inherit context length to new session:', err);
     });
+
+    // 连接器选择同样继承（含空选择）：新会话明确「无/哪些连接器」，
+    // 不落盘会让 context.mcpServers 停在 null——语义上等价于无，但回显
+    // 与用户刚做的选择可能不一致（欢迎页勾了却没带过去）。
+    if (window.GourdConnPicker && typeof window.GourdConnPicker.inheritToSession === 'function') {
+        window.GourdConnPicker.inheritToSession(newSessionId);
+    }
 }
 window.inheritSelectionToSession = inheritSelectionToSession;
 
@@ -5138,6 +5147,10 @@ function refreshSessionModel(sessionId) {
                 // 同一会话重新打开（刷新后）时恢复用户上次档位；新建会话不会走这里（无缓存 + 后端也回 default）。
                 if (window.GourdAccessMode && typeof window.GourdAccessMode.applyServerMode === 'function') {
                     window.GourdAccessMode.applyServerMode(sessionId, data.accessMode);
+                }
+                // 连接器选择回显（会话级）：同一响应携带 mcpServers（null=从未选过=无）。
+                if (window.GourdConnPicker && typeof window.GourdConnPicker.applyServerSelection === 'function') {
+                    window.GourdConnPicker.applyServerSelection(sessionId, data.mcpServers);
                 }
                 // Loop 执行取证提示条恢复：执行会话 composer 回显的是会话自己的旧值（任务参数
                 // transient 不写会话），刷新后/任意入口打开执行会话都靠这里从 /web/chat/loop-run

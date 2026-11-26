@@ -260,6 +260,7 @@
 	"chat.deviceRequired": "请先在左上角选择一台在线设备",
 	"chat.deviceOffline": "设备已离线，请确认桌面客户端在线后重试",
 	"chat.loadFailed": "加载失败，请稍后重试",
+	"chat.history.degraded": "过程与产物暂不可用，当前仅显示已保存的正文",
 	"chat.sendFailed": "发送失败，请稍后重试",
 	"chat.metaTool": "GWork · 正在使用 {name}",
 	"chat.metaError": "GWork · 处理出错",

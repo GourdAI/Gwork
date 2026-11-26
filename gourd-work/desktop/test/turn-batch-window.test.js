@@ -521,3 +521,142 @@ test('★ offsetParent 是滚动容器：量测必须扣除 scrollTop（滚动�
     batch.refreshWindow(h, false);
     assert.equal(h._winOverflow, overflowAt0, '任意滚动位置量测结果必须一致');
 });
+
+/* ★★ 隐藏会话不量测（2026-11-25 用户报障「切到别的任务再切回来，没有限高，
+   过一会儿才恢复」真因钉死）：
+   切走的会话容器 display:none（setActiveSession 只 hide 不卸 DOM），ticker 每秒
+   仍会对全部 windowed 盖子调 refreshWindow。隐藏态量几何全是 0 → 旧实现据此
+   overflow=0 → teardownWindow 拆掉限高窗；切回后无重建入口，直到下一个工具事件
+   才重建 —— 即用户看到的「过一会儿才恢复」。
+   守卫行为（code review 后精化）：隐藏链下 refreshWindow 跳过【量测】——
+   不清补偿、不拆窗、不动 _winVisible/_winPos/_winOverflow；
+   但「DOM 状态驱动的拆窗」（!open / 成员清空）不受守卫影响，照常执行。 */
+test('★ 隐藏会话（display:none）下 refreshWindow 不得拆窗：跳过量测', () => {
+    const b = mkLayoutBubble();
+    const sess = mkSess(b);
+    let h = null;
+    const rows = [];
+    for (let i = 0; i < 12; i++) { const r = addRow(b, sess); rows.push(r.card); h = r.header; }
+    const overflowBefore = h._winOverflow;
+    const posBefore = h._winPos;
+    assert.ok(h._classes.has('turn-batch-windowed'), '前置：12 行已建限高窗');
+
+    /* 祖先（会话容器）display:none：切走的会话形态。
+       桩无 offsetParent 字段 → hiddenFromRoot 只靠 inline display:none 命中
+       （该链判定先于 offsetParent 探测，桩与真浏览器一致走通）。 */
+    const hidden = el('div', [], 0);
+    hidden.style.display = 'none';
+    const oldParent = b.parentNode;
+    hidden.appendChild(b);
+
+    batch.refreshWindow(h, true);   // ticker 在隐藏态的每秒重量
+    assert.ok(h._classes.has('turn-batch-windowed'), '隐藏态不得拆窗');
+    assert.equal(h._winOverflow, overflowBefore, '隐藏态不得把 overflow 归零');
+    assert.equal(h._winPos, posBefore, '隐藏态不得动滚动游标');
+    assert.equal(h._winVisible && h._winVisible.length, 12, '隐藏态不得清窗缓存');
+
+    /* 恢复可见：重建必须拿到与隐藏前一致的几何 */
+    b.parentNode = oldParent;
+    hidden.style.display = '';
+    batch.refreshWindow(h, true);
+    assert.equal(h._winOverflow, overflowBefore, '恢复可见后重量与隐藏前一致');
+    assert.ok(layoutSpanOf(rows) <= WIN + 1, '恢复可见后批次占位仍受视窗约束');
+});
+
+/* ★★ offsetParent 探测分支（真浏览器 display:none 的语义：自身及全链 offsetParent
+   === null）：inline display:none 链之外的兜底判定。桩节点无 offsetParent 字段
+   （undefined → 不判隐藏），本用例在【盖子自身】补 offsetParent=null ——
+   hiddenFromRoot 读的正是 header.offsetParent，必须定义在 h 上才探得到。 */
+test('★ offsetParent===null（无 inline display:none）也判隐藏：量测跳过', () => {
+    const b = mkLayoutBubble();
+    const sess = mkSess(b);
+    let h = null;
+    for (let i = 0; i < 12; i++) h = addRow(b, sess).header;
+    const overflowBefore = h._winOverflow;
+    assert.ok(h._classes.has('turn-batch-windowed'));
+
+    /* 只补 offsetParent=null，不设 inline display:none —— 纯 offsetParent 探测路径 */
+    h.offsetParent = null;
+    batch.refreshWindow(h, true);
+    assert.ok(h._classes.has('turn-batch-windowed'), 'offsetParent=null 不得拆窗');
+    assert.equal(h._winOverflow, overflowBefore, 'offsetParent=null 不得归零 overflow');
+
+    /* 还原可见（offsetParent 字段存在且非 null → 不隐藏），量测恢复 */
+    h.offsetParent = { nodeType: 1 };
+    batch.refreshWindow(h, true);
+    assert.equal(h._winOverflow, overflowBefore, '还原可见后重量恢复');
+});
+
+/* ★★ 【code review 回归 · 隐藏态收口必须照常拆窗】后台会话跑完收口
+   （closeBatchFor → applyMembers(false) → refreshWindow 的 !open 分支）
+   在 display:none 期间发生时：拆窗是纯 DOM 状态动作（不量布局），守卫不得拦。
+   旧守卫在函数顶端 ⇒ teardownWindow 被跳过，.turn-batch-windowed 类与
+   --win-sb-* / --batch-guide-h 变量残留 —— 切回后折叠盖子下方漂着
+   「幽灵滚动条」，要等 ticker 下一秒才拆（视觉毛刺）。
+   注：桩 style 的 setProperty 把 --win-sb-top 驼化为 --winSbTop 落键，
+   removeProperty 同路清空 —— 断言直读驼化键，与桩写入路径一致。 */
+test('★ 隐藏态收口（closeBatchFor）必须照常拆窗清滚动条变量', () => {
+    const b = mkLayoutBubble();
+    const sess = mkSess(b);
+    let h = null;
+    const rows = [];
+    for (let i = 0; i < 12; i++) { const r = addRow(b, sess); rows.push(r.card); h = r.header; }
+    assert.ok(h._classes.has('turn-batch-windowed'), '前置：已建窗');
+
+    /* 桩的盖子默认 0 高：paintWindowScrollbar 的 hr.height>0 守卫会跳过变量写入，
+       先补高度并重量一次，让 --win-sb-* / --batch-guide-h 真实落键（断言非空洞）。
+       桩 setProperty 的驼化规则：--win-sb-top → -WinSbTop（前导双横杠留一杠）。 */
+    h._h = 20;
+    batch.refreshWindow(h, true);
+    assert.notEqual(h.style['-WinSbTop'], undefined, '前置：--win-sb-top 已写入');
+    assert.notEqual(h.style['-WinSbTop'], '', '前置：--win-sb-top 非空');
+    assert.notEqual(h.style['-WinSbThumbY'], '', '前置：--win-sb-thumb-y 已写入');
+    assert.notEqual(h.style['-BatchGuideH'], '', '前置：--batch-guide-h 已写入');
+
+    const hidden = el('div', [], 0);
+    hidden.style.display = 'none';
+    hidden.appendChild(b);
+
+    /* 后台收口：走模块真实入口（与运行时同一调用链，盖子仍是 running 态） */
+    const closed = batch.closeBatchFor(b);
+    assert.ok(closed, '收口必须返回 true');
+    assert.equal(h.getAttribute('data-batch-state'), 'closed', '盖子必须转 closed');
+    assert.equal(h.getAttribute('data-batch-open'), 'false', '盖子必须转收起');
+
+    assert.ok(!h._classes.has('turn-batch-windowed'), '隐藏态收口后必须摘除窗口类');
+    assert.equal(h._winOverflow, undefined, '收口拆窗必须清空 overflow 游标');
+    assert.equal(h._winVisible, undefined, '收口拆窗必须清空窗缓存');
+    assert.equal(h.style['-WinSbTop'], '', '收口拆窗必须清 --win-sb-top');
+    assert.equal(h.style['-WinSbH'], '', '收口拆窗必须清 --win-sb-h');
+    assert.equal(h.style['-WinSbThumbY'], '', '收口拆窗必须清 --win-sb-thumb-y');
+    assert.equal(h.style['-BatchGuideH'], '', '收口拆窗必须清 --batch-guide-h');
+    /* 成员 inline 补偿必须被 clearWindowPaint 还原 */
+    for (const r of rows) {
+        assert.equal(r.style.transform, '', '收口后成员 transform 必须还原');
+        assert.equal(r.style.marginBottom, '', '收口后成员补偿 margin 必须还原');
+    }
+});
+
+/* ★★ 切回会话重建限高窗（app-base.js setActiveSession 的 refreshWindowsIn 钩子）：
+   即便盖子因历史原因（其他零几何路径）已拆窗、成员 inline 残留补偿也被清掉，
+   只要 data-batch-open=true 且成员超限，refreshWindowsIn 必须重建窗口态。
+   桩 DOM 直接调模块 API（与 setActiveSession 钩子同入口，行为级断言）。 */
+test('★ refreshWindowsIn：盖子 open 且成员超限 → 无窗也重建限高', () => {
+    const b = mkLayoutBubble();
+    const sess = mkSess(b);
+    let h = null;
+    const rows = [];
+    for (let i = 0; i < 12; i++) { const r = addRow(b, sess); rows.push(r.card); h = r.header; }
+    /* 模拟「历史上被零几何路径拆过窗」：teardown + 清类，保留 open 态与成员标记 */
+    batch.clearBatch;   // 不调用（会连盖子一起删），只拆窗：
+    h._classes.delete('turn-batch-windowed');
+    h._winPos = undefined;
+    h._winOverflow = undefined;
+    h._winVisible = undefined;
+    for (const r of rows) { r.style.transform = ''; r.style.marginBottom = ''; }
+
+    batch.refreshWindowsIn(b);
+    assert.ok(h._classes.has('turn-batch-windowed'), '切回钩子必须重建限高窗');
+    assert.ok(h._winOverflow > 0, '重建后 overflow 恢复正值');
+    assert.ok(layoutSpanOf(rows) <= WIN + 1, '重建后批次占位受视窗约束');
+});

@@ -267,6 +267,27 @@
             && el.ownerDocument && el.ownerDocument.defaultView);
     }
 
+    /* 【隐藏链判定】header 是否处于 display:none 的祖先（隐藏会话容器）内。
+       隐藏态下 getBoundingClientRect 全 0、offsetTop 不可信 —— 任何量测都是垃圾值。
+       实现上沿 offsetParent 链找（隐藏分支 offsetParent 为 null，真布局链正常终止）；
+       同时兜底查 inline display:none（display:none 的元素 offsetParent 也为 null，
+       无法与「未入文档」区分时一律按隐藏处理 —— 两者的共同点正是量不到布局）。
+       桩 DOM 无 offsetParent 字段（undefined）→ 不判隐藏（契约测试零布局兼容）。 */
+    function hiddenFromRoot(el) {
+        if (!el) return false;
+        /* 自身或祖先链上任何 inline display:none 即隐藏（display:none 子树不参与布局） */
+        var node = el;
+        while (node && node.nodeType === 1) {
+            if (node.style && node.style.display === 'none') return true;
+            node = node.parentNode;
+        }
+        /* offsetParent 链：真浏览器里可见元素的 offsetParent 非空（body/html 兜底），
+           display:none 元素 offsetParent 为 null。桩 DOM（无该字段）跳过此判定。 */
+        var op = el.offsetParent;
+        if (op !== undefined) return !op;
+        return false;
+    }
+
     function px(n) { return (Math.round(Math.max(0, n) * 100) / 100) + 'px'; }
 
     /* 成员几何：rect.height 与 transform/clip 无关，可直接量；margin 用
@@ -448,6 +469,23 @@
             if (!open) clearBatchGuide(header);
             return;
         }
+        /* 【隐藏会话不量测 · 2026-11-25 用户报障「切到别的任务再切回来，限高窗没了，
+           过一会儿才恢复」】切走的会话容器 display:none（setActiveSession 只 hide 不卸 DOM），
+           ticker 每秒仍会对全部 windowed 盖子调 refreshWindow —— 隐藏态量几何全是 0/折叠值，
+           由此算出 overflow=0 → teardownWindow 把限高窗整个拆掉。切回来时没有任何重建入口
+           （盖子仍 open、成员可见、_winVisible 已被清），界面表现为「没有限制高度」，直到
+           下一个新成员到达 noteProcessInsert 才重建 —— 正是「等过一会儿才恢复」。
+           守卫：隐藏链下直接跳过【量测】（不清补偿、不拆窗、不动绘制），一切游标原样
+           保留，等重新可见时再算；显示态由 setActiveSession 切回钩子（refreshWindowsIn）
+           立刻重建。
+           【code review 修复 2026-11-25 · 守卫必须在拆窗分支之后】放函数顶端会把
+           「DOM 状态驱动的拆窗」一并拦掉：后台会话跑完收口（closeBatchFor →
+           applyMembers(false) → 此处 !open 分支）在隐藏态被拦 ⇒ teardownWindow 不跑，
+           .turn-batch-windowed 类与 --win-sb-* / --batch-guide-h 变量残留 —— 切回后
+           折叠盖子下方漂着「幽灵滚动条/引导线」，要等 ticker 下一秒才拆（旧实现隐藏态
+           零几何 teardown 反而瞬时拆干净）。拆窗只读 DOM 状态、不量布局，隐藏态照常
+           执行；量测建窗才是必须跳过的路径。 */
+        if (hiddenFromRoot(header)) return;
         /* 【量测前必须先清补偿 + 强制重排】负 margin-bottom 会经兄弟 margin 折叠
            把后续行布局位整体上提（rect.top 被污染）；上一轮补偿可能写在【旧末行】
            （新成员到达后它已不是末行，但补偿还挂在它身上）。按 _winVisible 旧缓存

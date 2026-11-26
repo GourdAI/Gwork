@@ -36,7 +36,8 @@
 						<view class="app-chat__bubble-wrap"
 							:class="msg.role === 'user' ? 'app-chat__bubble-wrap--user' : 'app-chat__bubble-wrap--ai'">
 							<app-chat-bubble :message="msg" :show-head="headIds.indexOf(msg.id) >= 0"
-								@approve="onInteractApprove" @answer="onInteractAnswer" @edit="onInteractEdit"></app-chat-bubble>
+								@approve="onInteractApprove" @answer="onInteractAnswer" @edit="onInteractEdit"
+								@retry-history="onRetryHistory"></app-chat-bubble>
 						</view>
 					</view>
 				</list-item>
@@ -140,7 +141,7 @@
 	const {
 		activeConversation,
 		renameConversation, togglePin, removeConversation, sendMessage, stopMessage,
-		approveHitl, answerQuestion, setQuestionAnswer
+		approveHitl, answerQuestion, setQuestionAnswer, retryHistory
 	} = useConversations()
 
 	const {
@@ -356,6 +357,13 @@
 		if (conv == null) return
 		renameConversation(conv.id, value)
 		uni.showToast({ title: t('conv.renamed'), icon: 'none' })
+	}
+
+	/** 历史回放降级提示里的重试：清掉 loaded 标记后走同一套幂等历史加载，
+	 *  目标是用 replay 帧重建过程与产物卡，而不是再展示一次 /messages 快照。 */
+	function onRetryHistory(): void {
+		if (activeId.value.length === 0) return
+		retryHistory(activeId.value)
 	}
 
 	function onMenuSelect(action: ActionSheetAction): void {

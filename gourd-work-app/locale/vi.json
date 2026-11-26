@@ -260,6 +260,7 @@
 	"chat.deviceRequired": "Vui lòng chọn một thiết bị trực tuyến ở góc trên bên trái trước",
 	"chat.deviceOffline": "Thiết bị đang ngoại tuyến. Hãy đảm bảo ứng dụng máy tính đang trực tuyến rồi thử lại",
 	"chat.loadFailed": "Tải thất bại, vui lòng thử lại sau",
+	"chat.history.degraded": "Thẻ quy trình và kết quả hiện không khả dụng; chỉ hiển thị nội dung đã lưu",
 	"chat.sendFailed": "Gửi thất bại, vui lòng thử lại sau",
 	"chat.metaTool": "GWork · đang dùng {name}",
 	"chat.metaError": "GWork · đã xảy ra lỗi",

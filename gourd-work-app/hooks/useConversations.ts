@@ -49,6 +49,8 @@ export type Conversations = {
 	setQuestionAnswer: (id: string, actionId: string, index: number, patch: AskAnswer) => void
 	/** 列表刷新（登录/选设备后自动触发；下拉/重试可手动调） */
 	refresh: () => Promise<void>
+	/** 历史回放降级后重试：幂等清掉本次快照并重新走 replay 帧重建 */
+	retryHistory: (id: string) => void
 	listLoading: Ref<boolean>
 	listError: Ref<string>
 }
@@ -176,6 +178,7 @@ function emptyChatMessage(id: string, role: 'user' | 'ai', text: string, status:
 		id, role, text, meta: '', status, thinking,
 		blocks: [], summary: '', compactOpen: false,
 		counts: { tools: 0, reasons: 0, agents: 0, batches: 0, texts: 0 },
+		degradedNotice: '',
 		imageUrls: [],
 		steer
 	}
@@ -442,7 +445,16 @@ function statusOf(frame: LinkFrame): ChatBlockStatus {
 /** 帧上的 args 可能是 UTSJSONObject / 普通对象；只安全读取字符串字段 */
 function frameArgs(frame: LinkFrame): ApiBody {
 	const args = frame['args']
-	return args != null && typeof args === 'object' ? args as ApiBody : {}
+	if (args != null && typeof args === 'object') return args as ApiBody
+	// 某些内核/中转会把 args 序列化成 JSON 字符串：不兼容会把 file_changes
+	// 的 files[] 当成空对象，产物卡永远不出现（回放后只剩最终正文）。
+	if (typeof args !== 'string' || args.length === 0) return {}
+	try {
+		const parsed: unknown = JSON.parse(args as string)
+		return parsed != null && typeof parsed === 'object' ? parsed as ApiBody : {}
+	} catch (_) {
+		return {}
+	}
 }
 
 function argString(frame: LinkFrame, key: string): string {
@@ -1155,37 +1167,69 @@ export async function refreshConversations(): Promise<void> {
 		projects.value.forEach((item): void => {
 			roots.push(item.root)
 		})
-		const collected: Conversation[] = []
 		const seenRoots: Set<string> = new Set<string>()
 		projects.value.forEach((item): void => {
 			seenRoots.add(item.root)
 		})
 		let failed: boolean = false
-		for (let i = 0; i < roots.length; i++) {
-			const root: string = roots[i]
-			let body: ApiBody
+		// 【2026-11-26 性能修复】各 root 的会话列表并行拉取。旧实现按 root 逐个
+		// await：每个 root 一次 WS 中转往返（手机→后台→PC→内核→回程），N 个项目
+		// 就是 N+1 次串行往返叠加，选完设备后「工作空间 + 消息」的加载时间随
+		// 项目数线性恶化（每跳 200-500ms 时 3 个项目就多出秒级等待）。
+		// 【并发上限 · code review 2026-11-26】全量 roots 一次性 Promise.all 会把
+		// N 个请求同时压到同一条中转 WS：慢网下在途帧排队 + 35s 超时连锁风险，
+		// 且设备侧内核串行处理时突发并发没有收益。分批 4 个并行：串行 N 次往返
+		// 收敛为 ceil(N/4) 批，在途压力有界。
+		// 【UTS 纪律】闭包不写共享变量（UTS/Kotlin 对闭包捕获可变外部状态的处理
+		// 不可靠）：每个 root 的结果连同「是否失败」「行内兜底 root」一并返回，
+		// 归并统一在 await 之后主线程做，语义与串行版一致（任一失败置 failed、
+		// projectRoot 兜底合并仍在本地）。
+		type PerRoot = { failed: boolean, roots: string[], convs: Conversation[] }
+		const REFRESH_CONCURRENCY: number = 4
+		const fetchRoot = async (root: string): Promise<PerRoot> => {
 			try {
-				body = await request('GET', '/web/chat/sessions', 'root=' + encodeURIComponent(root))
+				const body: ApiBody = await request('GET', '/web/chat/sessions', 'root=' + encodeURIComponent(root))
+				if (!kernelOk(body)) {
+					return { failed: true, roots: [], convs: [] }
+				}
+				const rows = body.data
+				if (!Array.isArray(rows)) return { failed: false, roots: [], convs: [] }
+				const items = rows as ApiBody[]
+				const convs: Conversation[] = []
+				const extraRoots: string[] = []
+				for (let j = 0; j < items.length; j++) {
+					const row = items[j]
+					const rowRoot = fieldString(row, 'projectRoot')
+					const effectiveRoot: string = rowRoot.length > 0 ? rowRoot : root
+					if (effectiveRoot.length > 0) extraRoots.push(effectiveRoot)
+					const conv = convFromSessionRow(row, effectiveRoot)
+					if (conv != null) convs.push(conv)
+				}
+				return { failed: false, roots: extraRoots, convs: convs }
 			} catch (_) {
-				failed = true
-				continue
-			}
-			if (!kernelOk(body)) {
-				failed = true
-				continue
-			}
-			const rows = body.data
-			if (!Array.isArray(rows)) continue
-			const items = rows as ApiBody[]
-			for (let j = 0; j < items.length; j++) {
-				const row = items[j]
-				const rowRoot = fieldString(row, 'projectRoot')
-				const effectiveRoot: string = rowRoot.length > 0 ? rowRoot : root
-				if (effectiveRoot.length > 0) seenRoots.add(effectiveRoot)
-				const conv = convFromSessionRow(row, effectiveRoot)
-				if (conv != null) collected.push(conv)
+				return { failed: true, roots: [], convs: [] }
 			}
 		}
+		const perRoot: PerRoot[] = []
+		let batchStart: number = 0
+		while (batchStart < roots.length) {
+			const batch: string[] = roots.slice(batchStart, batchStart + REFRESH_CONCURRENCY)
+			batchStart += REFRESH_CONCURRENCY
+			const results: PerRoot[] = await Promise.all(batch.map(fetchRoot))
+			results.forEach((result: PerRoot): void => {
+				perRoot.push(result)
+			})
+		}
+		const collected: Conversation[] = []
+		perRoot.forEach((result: PerRoot): void => {
+			if (result.failed) failed = true
+			result.roots.forEach((r: string): void => {
+				seenRoots.add(r)
+			})
+			result.convs.forEach((item: Conversation): void => {
+				collected.push(item)
+			})
+		})
 		if (gen !== refreshGen) return
 		const rootsList: string[] = []
 		seenRoots.forEach((root: string): void => {
@@ -1279,12 +1323,13 @@ function messageFromHistoryRow(row: ApiBody): ChatMessage {
  *  REPLAY_PAGE_ROUNDS 轮、更早轮由 loadMoreMessages 按需翻——移动端对齐：
  *  这里只拉一页立即上屏，更早轮由 loadEarlierRounds 在接流之后逐页前插。
  *
- *  返回 false = 本页失败/空页（loadMessagesInner 降级文本快照）。 */
-async function rebuildHistory(id: string): Promise<boolean> {
+ *  返回 { ok, degraded }：ok=本页完整；degraded=帧已渲染但回放链路不完整，
+ *  调用方必须保留已重建的 blocks（只加提示/重试），绝不降级 /messages 清空过程。 */
+async function rebuildHistory(id: string): Promise<HistoryResult> {
 	const conv: Conversation | null = conversationOf(id)
-	if (conv == null) return false
+	if (conv == null) return { ok: false, degraded: false } as HistoryResult
 	const devices = useDevices()
-	if (devices.activeDeviceId.value.length === 0) return false
+	if (devices.activeDeviceId.value.length === 0) return { ok: false, degraded: false } as HistoryResult
 	// 旧翻页链作废：重建后消息数组已清空，迟到的更早段前插会拼进错序历史
 	earlierEpoch += 1
 	earlierCursors.delete(id)
@@ -1305,12 +1350,14 @@ async function rebuildHistory(id: string): Promise<boolean> {
 		// 都全文件重扫；Rounds 模式一次扫描合帧投影。详见 replayRoundsPage 头注释。
 		const ok: boolean = await replayRoundsPage(id)
 		const current: Conversation | null = conversationOf(id)
-		if (current == null) return false
+		if (current == null) return { ok: false, degraded: false } as HistoryResult
 		// 回放是历史快照，拿不到真实耗时：0 = 不伪造「已完成 1s」。
 		// 【末页收口只动最后一条】更早轮的回放期收口由 user 帧切轮完成；
 		// 若设备端仍在跑（running=true），尾条保持 processing 交给 probeRunning 接流。
 		if (lastPageRunning.get(id) !== true) finishProcessingTail(current, 0)
-		if (current.messages.length > 0) return ok
+		if (current.messages.length > 0) {
+			return { ok: ok, degraded: !ok } as HistoryResult
+		}
 		// 【空窗口不是「无历史」· 三轮报障「历史只剩最终正文」真因】旧内核 Rounds
 		// 投影以 user 帧切轮，无 user 帧的流（续跑/截断/纯附件轮）回空信封，但
 		// latestSeq>0 说明流里明明有帧。旧实现降级 /messages 文本快照 → 过程轨迹
@@ -1328,16 +1375,16 @@ async function rebuildHistory(id: string): Promise<boolean> {
 			appendStreamingPlaceholder(current)
 			const pulled: boolean = await replayFrom(id, 0)
 			const after: Conversation | null = conversationOf(id)
-			if (after != null && after.messages.some((m: ChatMessage): boolean => m.text.length > 0 || m.blocks.length > 0)) {
+			if (after != null && hasReplayContent(after)) {
 				if (lastPageRunning.get(id) !== true) finishProcessingTail(after, 0)
-				return pulled
+				return { ok: pulled, degraded: !pulled } as HistoryResult
 			}
 			// After 兜底也没拿到内容（病态流/链路失败）：清掉空占位再交调用方降级
 			if (after != null) after.messages = []
 		}
-		return false
+		return { ok: false, degraded: false } as HistoryResult
 	} catch (_) {
-		return false
+		return { ok: false, degraded: hasReplayContent(conversationOf(id)) } as HistoryResult
 	} finally {
 		historyReplay.delete(id)
 		lastPageRunning.delete(id)
@@ -1360,6 +1407,7 @@ async function loadTextSnapshot(id: string): Promise<void> {
 			list.push(msg)
 		}
 		current.messages = list
+		markDegradedHistory(id)
 	} else {
 		current.messages = []
 	}
@@ -1373,7 +1421,7 @@ async function loadTextSnapshot(id: string): Promise<void> {
 	// 对齐后反而会把中间整段跳过。【也不用无参 Tail】默认尾窗 2000 帧原始
 	// delta，长流上白白多传几 MB；rounds=1 走合帧投影，体积小得多。
 	try {
-		const probe: ApiBody = await request('GET', '/web/chat/replay', 'sessionId=' + encodeURIComponent(id) + '&rounds=1', '', rootOf(current))
+		const probe: ApiBody = await request('GET', '/web/chat/replay', 'sessionId=' + encodeURIComponent(id) + '&rounds=1&maxBytes=' + REPLAY_MAX_BYTES.toString(), '', rootOf(current))
 		if (kernelOk(probe) && probe.data != null && typeof probe.data === 'object') {
 			const pdata = probe.data as ApiBody
 			const latestRaw = pdata.latestSeq
@@ -1404,6 +1452,40 @@ function loadMessages(id: string): Promise<void> {
 	return task
 }
 
+type HistoryResult = { ok: boolean; degraded: boolean }
+
+/** 回放帧是否已经产出可展示内容；只认结构化过程/终态摘要，不把空占位算成功。 */
+function hasReplayContent(conv: Conversation | null): boolean {
+	if (conv == null) return false
+	return conv.messages.some((msg: ChatMessage): boolean =>
+		msg.text.length > 0 || msg.blocks.length > 0 || msg.summary.length > 0)
+}
+
+/** 文本快照最终只能保住正文：给每条 AI 行落显式提示+重试入口，不假装完整。 */
+function markDegradedHistory(id: string): void {
+	const conv: Conversation | null = conversationOf(id)
+	if (conv == null) return
+	const notice: string = t('chat.history.degraded')
+	let tail: ChatMessage | null = null
+	conv.messages.forEach((msg: ChatMessage): void => {
+		msg.degradedNotice = ''
+		if (msg.role === 'ai') tail = msg
+	})
+	if (tail != null) tail.degradedNotice = notice
+}
+
+/** 用户点降级提示：清 loaded / in-flight，再走同一套幂等 replay 重建过程与产物卡。 */
+function retryHistory(id: string): void {
+	if (id.length === 0 || conversationOf(id) == null) return
+	loaded.delete(id)
+	loadingMessages.delete(id)
+	earlierEpoch += 1
+	earlierCursors.delete(id)
+	earlierMore.delete(id)
+	cancelResumeRetry(id)
+	loadMessages(id)
+}
+
 async function loadMessagesInner(id: string): Promise<void> {
 	const devices = useDevices()
 	if (devices.activeDeviceId.value.length === 0) return
@@ -1413,10 +1495,19 @@ async function loadMessagesInner(id: string): Promise<void> {
 	conv.messages = [placeholder]
 	try {
 		await ensureConnected(devices.activeDeviceId.value)
-		const ok: boolean = await rebuildHistory(id)
-		if (!ok) await loadTextSnapshot(id)
+		const built: HistoryResult = await rebuildHistory(id)
+		// 回放帧已渲染出内容时绝不降级 /messages：那会清空 blocks，只剩最终正文。
+		// 不完整时（首页 overflow / After 兜底半途失败）保留过程与产物卡，
+		// 仅标记降级提示，用户可点「重试」按 replay 重建。
+		const partial: boolean = hasReplayContent(conversationOf(id))
+		if (!built.ok) {
+			if (partial) markDegradedHistory(id)
+			else await loadTextSnapshot(id)
+		}
 		const current: Conversation | null = conversationOf(id)
-		if (current != null && current.messages.length === 0) await loadTextSnapshot(id)
+		if (current != null && current.messages.length === 0) {
+			await loadTextSnapshot(id)
+		}
 		loaded.add(id)
 		// 设备端仍在进行中的轮次：接 live 流并补帧（replay 已把可见历史铺好）。
 		// 【先接流，再翻更早轮】接流只需要一次轻量探针 + 从游标续拉；更早轮翻页
@@ -1443,6 +1534,7 @@ async function loadMessagesInner(id: string): Promise<void> {
 		} catch (_e) {
 			current.messages = []
 		}
+		markDegradedHistory(id)
 		toast('chat.loadFailed')
 	}
 }
@@ -1458,7 +1550,7 @@ async function probeRunning(id: string): Promise<void> {
 		// 【探针必须轻量 · 2026-11-24】旧实现 afterSeq=0&limit=1 走 After 分支：
 		// 内核对整个流文件全量扫描 + 逐帧计数（total_after），长流上这一步就秒级；
 		// rounds=1 只解析末轮窗口，latestSeq 同样是全文件最大 seq，开销有界。
-		const body: ApiBody = await request('GET', '/web/chat/replay', 'sessionId=' + encodeURIComponent(id) + '&rounds=1', '', rootOf(conv))
+		const body: ApiBody = await request('GET', '/web/chat/replay', 'sessionId=' + encodeURIComponent(id) + '&rounds=1&maxBytes=' + REPLAY_MAX_BYTES.toString(), '', rootOf(conv))
 		if (!kernelOk(body)) return
 		const data = body.data != null && typeof body.data === 'object' ? body.data as ApiBody : {}
 		if (data.running !== true) return
@@ -1672,7 +1764,7 @@ function applyFileChanges(conv: Conversation, frame: LinkFrame): void {
 		let agents: number = 0
 		let batches: number = 0
 		msg.blocks.forEach((item: ChatBlock): void => {
-			if (item.args === 'fileChanges') return
+			if (isChangesBlock(item)) return
 			if (item.kind === 'batch') batches += 1
 			else if (item.kind === 'tool') tools += 1
 			else if (item.kind === 'thinking') reasons += 1
@@ -1717,6 +1809,12 @@ function settleTerminalBatchHeads(conv: Conversation, msg: ChatMessage): void {
 	if (st.batchOpen) { st.batchOpen = false; st.batchId = ''; st.batchStartedAt = 0 }
 }
 
+/** 变更卡判定不能只靠 args 字符串标记：回放/兼容帧里 marker 若缺失，
+ *  已有 changes[] 的块仍必须钉底渲染，否则用户看到产物卡整个消失。 */
+function isChangesBlock(item: ChatBlock): boolean {
+	return item.args === 'fileChanges' || item.changes.length > 0
+}
+
 /** 变更卡钉底（过程区数据层，PC insertBeforeActions 越过 fch-host 同口径）：
  *  file_changes 是 run 级被动快照，常在正文/思考帧【之间】到达；若留在到达时序位，
  *  后到的思考/正文全部排在卡片下方——用户报障「文件变更卡怎么跑到这里了，之前不是
@@ -1729,7 +1827,7 @@ function sinkChangesBlocks(msg: ChatMessage): void {
 	const keep: ChatBlock[] = []
 	const cards: ChatBlock[] = []
 	msg.blocks.forEach((item: ChatBlock): void => {
-		if (item.args === 'fileChanges') cards.push(item)
+		if (isChangesBlock(item)) cards.push(item)
 		else keep.push(item)
 	})
 	if (cards.length === 0) return
@@ -2472,7 +2570,7 @@ async function replayFrom(id: string, afterSeq: number): Promise<boolean> {
 		for (;;) {
 			const pageConv: Conversation | null = conversationOf(id)
 			if (pageConv == null) return false
-			const body: ApiBody = await request('GET', '/web/chat/replay', 'sessionId=' + encodeURIComponent(id) + '&afterSeq=' + cursorSeq.toString() + '&limit=500', '', rootOf(pageConv))
+			const body: ApiBody = await request('GET', '/web/chat/replay', 'sessionId=' + encodeURIComponent(id) + '&afterSeq=' + cursorSeq.toString() + '&limit=500&maxBytes=' + REPLAY_MAX_BYTES.toString(), '', rootOf(pageConv))
 			if (!kernelOk(body)) return false
 			const data = body.data != null && typeof body.data === 'object' ? body.data as ApiBody : {}
 			const events = data.events
@@ -2555,6 +2653,12 @@ async function replayFrom(id: string, afterSeq: number): Promise<boolean> {
  *  游标对齐 latestSeq（rounds 全文件扫描的 latest_seq=全文件最大 seq）在消费之后，
  *  供 probeRunning 续流不重复。 */
 const HISTORY_PAGE_ROUNDS: number = 10
+/** 单页 replay 响应体字节预算（2026-11-25 移动端「过程与产物暂不可用」真因之二）。
+ *  中继协议把整个 replay 响应装进【单个 WS res 帧】，后台设备侧读上限 16MB：
+ *  一页 rounds 的合帧投影超限即切断设备连接 → 36s 超时 → 降级纯文本快照丢全过程。
+ *  8MB = 硬墙的一半：内核按预算保留窗口尾部、把头部计入 hasMore，本页用现成的
+ *  beforeSeq 翻页逐页补回（loadEarlierRounds 同参数），单帧永远碰不到 16MB。 */
+const REPLAY_MAX_BYTES: number = 8 * 1024 * 1024
 /** 更早轮翻页游标（sessionId → 下一页 beforeSeq）与剩余标记 */
 const earlierCursors: Map<string, number> = new Map<string, number>()
 const earlierMore: Set<string> = new Set<string>()
@@ -2585,7 +2689,7 @@ async function replayRoundsPage(id: string): Promise<boolean> {
 	try {
 		const pageConv: Conversation | null = conversationOf(id)
 		if (pageConv == null) return false
-		const q: string = 'sessionId=' + encodeURIComponent(id) + '&rounds=' + HISTORY_PAGE_ROUNDS.toString()
+		const q: string = 'sessionId=' + encodeURIComponent(id) + '&rounds=' + HISTORY_PAGE_ROUNDS.toString() + '&maxBytes=' + REPLAY_MAX_BYTES.toString()
 		const body: ApiBody = await request('GET', '/web/chat/replay', q, '', rootOf(pageConv))
 		if (!kernelOk(body)) return false
 		const data = body.data != null && typeof body.data === 'object' ? body.data as ApiBody : {}
@@ -2666,7 +2770,7 @@ async function loadEarlierRounds(id: string): Promise<void> {
 			if (conv == null) return
 			const beforeSeq: number | undefined = earlierCursors.get(id)
 			if (beforeSeq == null || beforeSeq <= 0) return
-			const q: string = 'sessionId=' + encodeURIComponent(id) + '&rounds=' + HISTORY_PAGE_ROUNDS.toString() + '&beforeSeq=' + beforeSeq.toString()
+			const q: string = 'sessionId=' + encodeURIComponent(id) + '&rounds=' + HISTORY_PAGE_ROUNDS.toString() + '&beforeSeq=' + beforeSeq.toString() + '&maxBytes=' + REPLAY_MAX_BYTES.toString()
 			const body: ApiBody = await request('GET', '/web/chat/replay', q, '', rootOf(conv))
 			if (epoch !== earlierEpoch) return
 			if (!kernelOk(body)) return
@@ -2856,7 +2960,7 @@ function armRunWatchdog(id: string): void {
 		if (!running.has(id) || conversationOf(id) == null) return
 		const conv: Conversation | null = conversationOf(id)
 		if (conv == null) return
-		request('GET', '/web/chat/replay', 'sessionId=' + encodeURIComponent(id) + '&rounds=1', '', rootOf(conv)).then((body: ApiBody): void => {
+		request('GET', '/web/chat/replay', 'sessionId=' + encodeURIComponent(id) + '&rounds=1&maxBytes=' + REPLAY_MAX_BYTES.toString(), '', rootOf(conv)).then((body: ApiBody): void => {
 			if (!running.has(id)) return
 			if (kernelOk(body)) {
 				const data = body.data != null && typeof body.data === 'object' ? body.data as ApiBody : {}
@@ -3600,6 +3704,7 @@ export function useConversations(): Conversations {
 		answerQuestion,
 		setQuestionAnswer,
 		refresh: refreshConversations,
+		retryHistory,
 		listLoading,
 		listError
 	}

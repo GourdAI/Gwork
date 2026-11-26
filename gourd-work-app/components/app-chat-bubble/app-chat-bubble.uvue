@@ -71,7 +71,7 @@
 					<view v-for="item in seg.members" :key="item.id" :class="memberWrapClass(item)">
 						<app-interact-card v-if="item.interact.length > 0" :block="item"
 							@approve="onInteractApprove" @answer="onInteractAnswer" @edit="onInteractEdit"></app-interact-card>
-						<view v-else-if="item.args === 'fileChanges'" class="app-chat-bubble__changes">
+						<view v-else-if="item.args === 'fileChanges' || item.changes.length > 0" class="app-chat-bubble__changes">
 							<view class="app-chat-bubble__changes-head">
 								<text class="iconfont app-chat-bubble__changes-icon">&#xe69f;</text>
 								<text class="app-chat-bubble__changes-title">{{ item.label }}</text>
@@ -129,7 +129,7 @@
 						<view v-for="item in seg.members" :key="item.id" :class="memberWrapClass(item)">
 							<app-interact-card v-if="item.interact.length > 0" :block="item"
 								@approve="onInteractApprove" @answer="onInteractAnswer" @edit="onInteractEdit"></app-interact-card>
-							<view v-else-if="item.args === 'fileChanges'" class="app-chat-bubble__changes">
+							<view v-else-if="item.args === 'fileChanges' || item.changes.length > 0" class="app-chat-bubble__changes">
 								<view class="app-chat-bubble__changes-head">
 									<text class="iconfont app-chat-bubble__changes-icon">&#xe69f;</text>
 									<text class="app-chat-bubble__changes-title">{{ item.label }}</text>
@@ -179,7 +179,7 @@
 					<!-- 文件变更卡：对齐桌面 .msg-run-changes-card——头部「已编辑 N 个文件 +x -y」，
 						 body 是 A/M/D 徽标 + 路径 + 增删统计的文件行（默认 3 行，超出折叠）。
 						 绝不 dump 内核 manifest 原文（status/runId/revision… 是协议字段不是给人看的） -->
-					<view v-else-if="item.args === 'fileChanges'" class="app-chat-bubble__changes">
+					<view v-else-if="item.args === 'fileChanges' || item.changes.length > 0" class="app-chat-bubble__changes">
 						<view class="app-chat-bubble__changes-head">
 							<!-- 项目 iconfont 文件图标码点（加号面板同款）：rice-icon 字体集没有裸 file 名 -->
 							<text class="iconfont app-chat-bubble__changes-icon">&#xe69f;</text>
@@ -270,6 +270,11 @@
 			<text v-if="item.changes.length > 3" class="app-chat-bubble__changes-more"
 				@click.stop="onToggleChanges(item)">{{ item.changesOpen ? t('chat.changes.collapse') : t('chat.changes.more', { n: (item.changes.length - 3).toString() }) }}</text>
 		</view>
+		<view v-if="message.degradedNotice.length > 0" class="app-chat-bubble__degraded">
+			<text class="app-chat-bubble__degraded-icon">!</text>
+			<text class="app-chat-bubble__degraded-text">{{ message.degradedNotice }}</text>
+			<text class="app-chat-bubble__degraded-retry" @click.stop="emit('retry-history')">{{ t('chat.segment.retry') }}</text>
+		</view>
 		<text v-if="message.meta.length > 0" class="app-chat-bubble__meta">{{ message.meta }}</text>
 	</view>
 </template>
@@ -295,6 +300,7 @@
 		(e: 'approve', actionId: string, approved: boolean): void
 		(e: 'answer', actionId: string): void
 		(e: 'edit', actionId: string, index: number, patch: AskAnswer): void
+		(e: 'retry-history'): void
 	}>()
 
 	const props = withDefaults(defineProps<{
@@ -326,12 +332,12 @@
 	   meta 之前常驻渲染（折叠态也常驻，与 PC KEEP_VISIBLE 白名单同口径），
 	   同时不再污染批次分段 / 限高滚动窗 / 26px 成员缩进。 */
 	const changesBlocks: ComputedRef<ChatBlock[]> = computed<ChatBlock[]>((): ChatBlock[] => {
-		return props.message.blocks.filter((item: ChatBlock): boolean => item.args === 'fileChanges')
+		return props.message.blocks.filter((item: ChatBlock): boolean => item.args === 'fileChanges' || item.changes.length > 0)
 	})
 
 	const visibleBlocks: ComputedRef<ChatBlock[]> = computed<ChatBlock[]>((): ChatBlock[] => {
 		// 变更卡由尾部循环单独渲染：过程区只保留真正的轨迹行 / 常驻证据行。
-		const list: ChatBlock[] = props.message.blocks.filter((item: ChatBlock): boolean => item.args !== 'fileChanges')
+		const list: ChatBlock[] = props.message.blocks.filter((item: ChatBlock): boolean => item.args !== 'fileChanges' && item.changes.length === 0)
 		// 轮结束：非交互过程行随 Compact 一起隐藏（桌面 [data-turn-process] 同款）；
 		// 错误/重试/等待/问答凭据/子智能体徽章 process=false，始终常驻。
 		if (props.message.summary.length > 0 && !props.message.compactOpen) {
@@ -1189,6 +1195,52 @@
 			margin-top: 6px;
 			font-size: 11px;
 			color: var(--color-text-tertiary);
+		}
+
+		/* 回放降级提示：正文仍在，但过程/产物数据不可用，必须显式告知并可重试，
+		   绝不把纯文本快照伪装成完整历史。 */
+		&__degraded {
+			align-self: stretch;
+			flex-direction: row;
+			align-items: center;
+			margin-top: 8px;
+			padding-top: 8px;
+			padding-right: 10px;
+			padding-bottom: 8px;
+			padding-left: 10px;
+			border-radius: 8px;
+			background-color: rgba(245, 158, 11, 0.12);
+		}
+
+		&__degraded-icon {
+			flex-shrink: 0;
+			width: 16px;
+			height: 16px;
+			border-radius: 8px;
+			text-align: center;
+			font-size: 11px;
+			font-weight: 700;
+			line-height: 16px;
+			color: #ffffff;
+			background-color: #d97706;
+		}
+
+		&__degraded-text {
+			flex: 1;
+			min-width: 0;
+			margin-left: 8px;
+			margin-right: 8px;
+			font-size: 12px;
+			line-height: 18px;
+			color: var(--color-text-secondary);
+		}
+
+		&__degraded-retry {
+			flex-shrink: 0;
+			font-size: 12px;
+			font-weight: 600;
+			line-height: 18px;
+			color: var(--color-primary);
 		}
 
 		/* 文件变更卡：桌面 .msg-run-changes-card——浅底圆角小卡，头部统计 + 文件行 */

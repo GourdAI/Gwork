@@ -240,7 +240,19 @@ function makeDevice(clock, opts) {
                 const after = Number(q.get('afterSeq'));
                 const limit = Number(q.get('limit') || '500');
                 const rest = all.filter((e) => e.eventSeq > after);
-                const page = rest.slice(0, limit);
+                let page = rest.slice(0, limit);
+                // 字节预算（真内核 After 语义）：保头丢尾，hasMore 由
+                // total_after > 返回数 自洽，客户端分页循环从页尾续拉。
+                const budget = q.has('maxBytes') ? Number(q.get('maxBytes')) : Infinity;
+                let used = 0;
+                const kept = [];
+                for (const e of page) {
+                    const need = used + JSON.stringify(e).length + 1;
+                    if (need > budget && kept.length > 0) break;
+                    used = need;
+                    kept.push(e);
+                }
+                page = kept;
                 return {
                     code: 200,
                     data: {
@@ -270,12 +282,31 @@ function makeDevice(clock, opts) {
                 hasMore = true;
             }
             const page = pool.slice(from);
+            // 字节预算（真内核 Rounds 语义）：保尾丢头，被丢的轮计入 hasMore，
+            // firstSeq 取保留段首帧——客户端用 beforeSeq=firstSeq 把头部翻回。
+            const budget = q.has('maxBytes') ? Number(q.get('maxBytes')) : Infinity;
+            let used = 0;
+            let cut = page.length;
+            for (let i = page.length - 1; i >= 0; i--) {
+                const need = used + JSON.stringify(page[i]).length + 1;
+                if (need > budget && cut < page.length) break;
+                used = need;
+                cut = i;
+            }
+            const kept = page.slice(cut);
+            const truncated = cut > 0;
+            if (truncated) {
+                // 被丢头部里的 user 帧 = 可翻的更早轮
+                const droppedUsers = page.slice(0, cut).filter((e) => e.type === 'user' || e.type === 'user_input').length;
+                hasMore = hasMore || droppedUsers > 0;
+            }
             return {
                 code: 200,
                 data: {
-                    events: page, runId: dev.runId, running: dev.running, hasMore,
+                    events: kept, runId: dev.runId, running: dev.running, hasMore,
+                    truncated,
                     latestSeq,
-                    firstSeq: page.length ? page[0].eventSeq : 0,
+                    firstSeq: kept.length ? kept[0].eventSeq : 0,
                 },
             };
         }
@@ -913,6 +944,65 @@ await scenario('S11 真实落盘流回放：过程块/用户行/正文齐全（�
     const realUserCount = realEvents.filter((e) => e.type === 'user' && (e.text || '').length > 0).length;
     const shownUsers = rt.conv.messages.filter((m) => m.role === 'user').length;
     assert.ok(shownUsers >= Math.min(realUserCount, usersInPage.length), '更早轮前插不得丢用户行');
+});
+
+/* S12 回放失败后的降级/重试：必须明确提示「只有正文」，重试走 replay 重建过程卡。 */
+await scenario('S12 回放失败降级：正文保住且可重试重建过程与产物卡', async () => {
+    const sid = 'work-s12';
+    let failOnce = true;
+    const rt = await makeRuntime({
+        sessionId: sid,
+        failReplay: (query) => {
+            // 初次首屏 rounds 失败，重试时放行
+            if (failOnce && query.includes('rounds=') && !query.includes('beforeSeq=')) {
+                failOnce = false;
+                return true;
+            }
+            return false;
+        },
+    });
+    let s = 1;
+    const f = (type, extra) => ({ eventSeq: s++, type, sessionId: sid, runId: 'run-12', ...(extra || {}) });
+    [
+        f('user', { text: 'Q12' }),
+        f('action_start', { actionId: 'h12', toolName: 'read', args: { file_path: 'a.rs' } }),
+        f('action_end', { actionId: 'h12', toolName: 'read', text: 'body', durationMs: 10 }),
+        f('text', { text: 'final text only' }),
+        f('file_changes', { args: { files: [{ path: 'a.rs', changeType: 'MODIFIED', additions: 3, deletions: 1 }] } }),
+        f('done', {}),
+    ].forEach((fr) => rt.dev.append(fr));
+    rt.api.setActive(sid);
+    await rt.clock.tick(500);
+    let tail = lastAi(rt.conv);
+    assert.ok(aiTextOf(tail).includes('final text only'), 'snapshot fallback must preserve the final text');
+    assert.ok((tail.degradedNotice || '').length > 0, 'degraded text snapshot must carry an explicit notice');
+    assert.ok(!rt.dev.requests.some((r) => r.path === '/web/chat/messages' && r.query.includes('afterSeq')), 'snapshot must not pretend to be replay');
+    // 用户点重试：清除 loaded 后重新走 replay 帧，过程块与产物卡回来且提示消失
+    rt.api.retryHistory(sid);
+    await rt.clock.tick(500);
+    tail = lastAi(rt.conv);
+    assert.ok(tail.blocks.some((b) => b.kind === 'tool' && b.actionId === 'h12'), 'retry must rebuild the process card via replay frames');
+    assert.ok(tail.blocks.some((b) => b.args === 'fileChanges' && b.changes.length > 0), 'retry must rebuild the file-changes card');
+    assert.ok((tail.degradedNotice || '').length === 0, 'a successful retry must clear the degraded notice');
+});
+
+/* S13 args 被 JSON 字符串化：file_changes 仍必须解析出产物卡。 */
+await scenario('S13 字符串化 args：文件变更卡不因协议形态差异消失', async () => {
+    const sid = 'work-s13';
+    const rt = await makeRuntime({ sessionId: sid });
+    let s = 1;
+    const f = (type, extra) => ({ eventSeq: s++, type, sessionId: sid, runId: 'run-13', ...(extra || {}) });
+    [
+        f('user', { text: 'Q13' }),
+        f('text', { text: 'answer' }),
+        f('file_changes', { args: JSON.stringify({ files: [{ path: 'a.ts', changeType: 'ADDED', additions: 7, deletions: 0 }] }) }),
+        f('done', {}),
+    ].forEach((fr) => rt.dev.append(fr));
+    rt.api.setActive(sid);
+    await rt.clock.tick(500);
+    const tail = lastAi(rt.conv);
+    assert.ok(tail.blocks.some((b) => b.args === 'fileChanges' && b.changes.length > 0 && b.changes[0].path === 'a.ts'),
+        'stringified file_changes args must still produce a visible changes card');
 });
 
 /* ---------------- 汇总 ---------------- */

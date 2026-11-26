@@ -678,7 +678,7 @@ assert.deepEqual(parseFileChanges({ files: [{ path: 'x', additions: -3, deletion
 	'bad stats must clamp to 0, never NaN on screen');
 
 // 12-c) 气泡渲染：fileChanges 卡分支在通用行之前；折叠 3 行；不再渲染协议字段
-assert.ok(bubble.indexOf("item.args === 'fileChanges'") < bubble.indexOf('app-chat-bubble__row-head'),
+assert.ok(bubble.indexOf("item.args === 'fileChanges' || item.changes.length > 0") < bubble.indexOf('app-chat-bubble__row-head'),
 	'the changes-card branch must precede the generic process row');
 assert.ok(/visibleChanges\(item\)/.test(bubble) && /item\.changes\.slice\(0, 3\)/.test(bubble),
 	'the card must default to 3 rows with an expand toggle (desktop COLLAPSED_ROWS parity)');
@@ -759,6 +759,21 @@ assert.ok(/<code class="language-ts" style="[^"]*color:#e5e7eb/.test(styled),
 	'code inside pre must be pinned light-on-dark (rich-text does not inherit color)');
 assert.ok(/<code style="[^"]*background-color:rgba\(127,127,127,0\.16\)/.test(styled),
 	'inline code outside pre keeps the translucent chip background');
+// PC .md-content code 的 2px×7px 圆角胶囊：native rich-text 没有 CSS 继承/简写保障，
+// 四条 padding + radius 必须逐个注入；否则就是用户看到的直角贴字灰块。
+assert.ok(/<code style="[^"]*padding-top:2px;padding-right:7px;padding-bottom:2px;padding-left:7px/.test(styled),
+	'inline code must carry all four UCSS-safe padding edges (shorthand silently drops)');
+assert.ok(/<code style="[^"]*border-radius:5px/.test(styled),
+	'inline code must round the chip like PC .md-content code');
+assert.ok(/<code style="[^"]*color:#1f2328/.test(styled),
+	'inline code must pin its own text color (rich-text does not inherit)');
+// 块间呼吸感归外层分段容器：rich-text 节点的 margin/padding/border 简写在 UCSS 下不可靠。
+assert.ok(!/style="[^"]*(?:margin|padding|border):/.test(styled),
+	'rich-text inline styles must not rely on unsupported shorthand (PC paragraph/list gaps would collapse)');
+const mdCompSrc = fs.readFileSync(path.join(__dirname, '..', 'components', 'app-md-text', 'app-md-text.uvue'), 'utf8');
+assert.ok(/index < segments\.length - 1 \? 'margin-bottom:7px;/.test(mdCompSrc),
+	'markdown block wrapper must add a single-side margin between segments (last block excluded)');
+assert.ok(/line-height:24px/.test(mdCompSrc), 'mobile body line-height must match PC breathing room');
 const styledDark = md.prepareMdHtml('<h3>x</h3><blockquote>q</blockquote>', true);
 assert.ok(/color:#e8eaed/.test(styledDark), 'dark mode headings must flip to light text');
 assert.equal(md.findMdOpenTag('<codex> <code>', 'code', 0), 8, 'tag matcher must not hit prefix collisions like <codex>');
@@ -1310,6 +1325,7 @@ console.log('PASS  i18n-flags: vue-i18n esm-bundler feature flags literalized (d
         compilerOptions: { target: ts.ScriptTarget.ES2020, module: ts.ModuleKind.None }
     }).outputText;
     const stripComments17 = (s) => s.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '');
+    const hookPath17 = path.join(__dirname, '..', 'hooks', 'useConversations.ts');
     const replayFnSrc = extractBlock('async function replayFrom(');
 
     // 形态断言：硬上限不得回潮；必须返回成败；零进展护栏必须在
@@ -1317,9 +1333,14 @@ console.log('PASS  i18n-flags: vue-i18n esm-bundler feature flags literalized (d
     assert.ok(/Promise<boolean>/.test(replayFnSrc), 'replayFrom must report success/failure to its callers');
     assert.ok(/pageMax <= cursorSeq/.test(replayFnSrc), 'a zero-progress guard must replace the page cap');
     const rebuildFn = extractBlock('async function rebuildHistory(');
-    // 2026-11-24 首屏重构：rebuildHistory 只拉最新一页（ok 由 replayRoundsPage 的
-    // dropped 护栏决定成败），更早轮由 loadEarlierRounds 后台前插。失败仍不得算成功。
-    assert.ok(/return ok/.test(rebuildFn), 'a failed first-page replay must not count as a successful history rebuild');
+    assert.ok(/Promise<HistoryResult>/.test(rebuildFn), 'rebuildHistory must report full/partial replay state');
+    assert.ok(/return \{ ok: ok, degraded: !ok \} as HistoryResult/.test(rebuildFn),
+        'partial replay must be preserved instead of being replaced by a text snapshot');
+    const loadInnerHistory = extractBlockFrom(fs.readFileSync(hookPath17, 'utf8'), 'function loadMessagesInner(');
+    assert.ok(/if \(!built\.ok\) \{/.test(loadInnerHistory) && /if \(partial\) markDegradedHistory\(id\)/.test(loadInnerHistory),
+        'a failed-but-rendered replay must keep its blocks and show a retryable degraded notice');
+    assert.ok(/markDegradedHistory\(id\)/.test(loadInnerHistory) && /await loadTextSnapshot\(id\)/.test(loadInnerHistory),
+        'text snapshot is only allowed when no replay content was rendered');
     assert.ok(!/for \(;;\)/.test(rebuildFn), 'rebuildHistory must NOT serially back-page the whole history before first paint (the extreme-slowness bug)');
     const probeRunFn = extractBlock('async function probeRunning(');
     assert.ok(/scheduleResumeRetry\(id\)/.test(probeRunFn), 'probeRunning must schedule backoff retry when the catch-up fails');
@@ -1364,6 +1385,7 @@ console.log('PASS  i18n-flags: vue-i18n esm-bundler feature flags literalized (d
         let failAt = o.failAt || 0; // 第 N 次请求返回非 200（一次性）
         let calls = 0;
         const env = {
+            REPLAY_MAX_BYTES: 8 * 1024 * 1024,
             conversationOf: () => ({ id: 's', messages: [] }),
             request: async (_m, _p, query) => {
                 calls++;
@@ -1423,6 +1445,7 @@ console.log('PASS  i18n-flags: vue-i18n esm-bundler feature flags literalized (d
         const cursor = { lastSeq: 0, runId: '', startedAt: 0 };
         let calls = 0;
         const env = {
+            REPLAY_MAX_BYTES: 8 * 1024 * 1024,
             conversationOf: () => ({ id: 's' }),
             request: async () => { calls++; return { code: 200, data: { events: [{ type: 'text' }], hasMore: true, running: true } }; },
             kernelOk: () => true, rootOf: () => '',
@@ -1664,6 +1687,15 @@ console.log('PASS  i18n-flags: vue-i18n esm-bundler feature flags literalized (d
             'history replay must use a rounds-paginated loader (kernel coalesced projection)');
         assert.ok(/'&rounds=' \+ HISTORY_PAGE_ROUNDS/.test(hookSrc),
             'the rounds loader must send rounds=N (desktop app-history.js parity)');
+        // 【2026-11-25 回归锁】每个 replay 请求都必须带字节预算：中继把整个响应
+        // 装进单个 WS res 帧（设备侧读上限 16MB），超限即断链降级。rounds 首页/
+        // 更早轮/rounds=1 探针/After 补帧四处一个都不能漏。
+        const replayCallSites = (hookSrc.match(/'GET', '\/web\/chat\/replay'/g) || []).length;
+        const maxBytesSites = (hookSrc.match(/maxBytes=' \+ REPLAY_MAX_BYTES\.toString\(\)/g) || []).length;
+        assert.ok(replayCallSites >= 4 && maxBytesSites >= replayCallSites,
+            'every /web/chat/replay request must carry the maxBytes byte budget (' + replayCallSites + ' sites, ' + maxBytesSites + ' budgeted)');
+        assert.ok(/const REPLAY_MAX_BYTES: number = 8 \* 1024 \* 1024/.test(hookSrc),
+            'the byte budget must stay at 8MB (half the 16MB relay frame cap)');
         assert.ok(/'&beforeSeq=' \+ beforeSeq\.toString\(\)/.test(hookSrc),
             'earlier-rounds pagination must advance via beforeSeq, not re-pull from the top');
         const rbAt = hookSrc.indexOf('async function rebuildHistory');
@@ -1908,7 +1940,7 @@ console.log('PASS  i18n-flags: vue-i18n esm-bundler feature flags literalized (d
             .replace(/\(\s*msg:\s*ChatMessage\s*\)\s*:\s*void/g, '(msg)')
             .replace(/\(\s*item:\s*ChatBlock\s*\)\s*:\s*void/g, '(item)')
             .replace(/:\s*ChatBlock\[\]/g, '').replace(/:\s*boolean/g, '').replace(/:\s*number/g, '');
-        const sink = new Function(sinkJs + '; return sinkChangesBlocks;')();
+        const sink = new Function('function isChangesBlock(item) { return item.args === "fileChanges" || (item.changes || []).length > 0; }' + sinkJs + '; return sinkChangesBlocks;')();
         const card = (id) => ({ id, args: 'fileChanges' });
         const row = (id) => ({ id, args: '' });
         const c1 = card('c1'), r1 = row('r1'), r2 = row('r2'), c2 = card('c2');
@@ -1942,10 +1974,10 @@ console.log('PASS  i18n-flags: vue-i18n esm-bundler feature flags literalized (d
         //    钉死：过程区数据必须滤掉卡片，卡片由尾部循环在最终正文之后/meta 之前渲染。
         const bubble27 = fs.readFileSync(path.join(__dirname, '..', 'components', 'app-chat-bubble', 'app-chat-bubble.uvue'), 'utf8');
         assert.ok(/const changesBlocks: ComputedRef<ChatBlock\[\]> = computed/.test(bubble27)
-            && /item\.args === 'fileChanges'/.test(bubble27),
+            && /item\.args === 'fileChanges' \|\| item\.changes\.length > 0/.test(bubble27),
             'bubble must expose a dedicated changesBlocks list (cards are not process rows)');
-        assert.ok(/props\.message\.blocks\.filter\(\(item: ChatBlock\): boolean => item\.args !== 'fileChanges'\)/.test(bubble27),
-            'visibleBlocks/segments must exclude changes cards (no batch-window/indent pollution)');
+        assert.ok(/item\.args !== 'fileChanges' && item\.changes\.length === 0/.test(bubble27),
+            'visibleBlocks/segments must exclude both marker-based and data-only changes cards');
         const tailCard = bubble27.indexOf('<view v-for="item in changesBlocks"');
         const finalText = bubble27.indexOf('<app-md-text v-if="!message.thinking');
         const metaTail = bubble27.indexOf('class="app-chat-bubble__meta"');

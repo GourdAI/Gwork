@@ -2156,6 +2156,12 @@ async function processNextQueuedMessage(sessionId) {
     // 与 sendMessage 同口径登记待回显集合：队列连发时单槽位会被下一条覆盖，
     // 前一条的回显认不出自己 → 重复渲染用户气泡（registerPendingEchoId 见 app-streaming.js）。
     if (typeof registerPendingEchoId === 'function') registerPendingEchoId(guardSess, guardSess._pendingClientMessageId);
+    /* 无 id 回显帧的文本兜底与 sendMessage 同口径：记下本轮 wire 原文。
+       【2026-11 双气泡修复】user 广播帧若因旧内核丢 clientMessageId（multipart
+       解析曾无该分支）而不带身份，id 认亲失效后全靠「尾部同文」认亲——
+       sendMessage 设了 _lastSentWireText 所以普通消息被兜住，而队列派发从未设置，
+       队列消息的回显被他端化 → 同一条消息渲染两次。 */
+    guardSess._lastSentWireText = text;
     guardSess._requestStartSeq = guardSess.lastEventSeq || 0;
     guardSess._awaitingSendAck = true;
     guardSess._sendAckConfirmed = false;

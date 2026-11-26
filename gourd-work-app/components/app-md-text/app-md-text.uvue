@@ -5,8 +5,12 @@
 			 无原生依赖：Android / iOS / 鸿蒙 / Web 同一份代码，标准基座直接生效
 			 （原生 markdown 插件已移除：标准基座不生效 + iOS 无实现，2026-11 用户拍板自研）。
 			 解析异常/无内容时回退纯文本，保证正文永远可见（不许白屏）。 -->
+		<!-- 每个 Markdown 块一个 rich-text：块间间隔必须落在外层已验证可用的 UCSS
+			 单边 margin-bottom 上，不能寄望 HTML 节点的 margin 简写（原生端会静默失效）。
+			 末段不加间距，对齐 PC .md-content > :last-child { margin-bottom:0 }。 -->
 		<view v-if="segments.length > 0" class="app-md-text__stack">
-			<view v-for="seg in segments" :key="seg.key" class="app-md-text__seg">
+			<view v-for="(seg, index) in segments" :key="seg.key" class="app-md-text__seg"
+				:style="index < segments.length - 1 ? 'margin-bottom:7px;' : ''">
 				<rich-text class="app-md-text__rich" :style="richStyle" :nodes="seg.html" mode="native"
 					:user-select="true" @itemclick="onItemClick"></rich-text>
 			</view>
@@ -112,7 +116,7 @@
 
 	// rich-text 不继承外层 color：正文字色必须写在组件根 style 上（随主题翻转）
 	const richStyle: ComputedRef<string> = computed<string>((): string => {
-		return 'font-size:14px;line-height:22px;color:' + (isDark.value ? '#e8eaed' : '#1f2328') + ';'
+		return 'font-size:14px;line-height:24px;color:' + (isDark.value ? '#e8eaed' : '#1f2328') + ';'
 	})
 </script>
 
@@ -134,12 +138,12 @@
 		&__rich {
 			width: 100%;
 			font-size: 14px;
-			line-height: 22px;
+			line-height: 24px;
 		}
 
 		&__plain {
 			font-size: 14px;
-			line-height: 22px;
+			line-height: 24px;
 		}
 	}
 </style>

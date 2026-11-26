@@ -2449,6 +2449,10 @@ function dispatchGateChunk(chunk) {
                    淘汰或会话 LRU 重建抹掉，只靠单槽位兜底会在「补发在途期间又开新轮」
                    时被覆盖 → 补发回显被当他端消息重复渲染。 */
                 registerPendingEchoId(s2, s2._pendingClientMessageId);
+                /* 【同上·无 id 帧文本兜底】补发实际发出的 wire 文本就是 pending.text
+                   （busy 时 handleSendBusy 存的 trim 快照）。旧值是原轮 sendMessage 记的
+                   未 trim 原文，两端不一致会漏认；旧内核丢 id 的回显帧将再次双渲染。 */
+                s2._lastSentWireText = pending.text || '';
                 s2.projectRoot = pending.projectRoot || s2.projectRoot || '';
                 s2._requestStartSeq = s2.lastEventSeq || 0;
                 s2._awaitingSendAck = true;

@@ -260,6 +260,7 @@
 	"chat.deviceRequired": "Selecione primeiro um dispositivo online no canto superior esquerdo",
 	"chat.deviceOffline": "O dispositivo está offline. Verifique se o cliente de desktop está online e tente novamente",
 	"chat.loadFailed": "Falha ao carregar, tente novamente mais tarde",
+	"chat.history.degraded": "Os cartões de processo e resultados estão indisponíveis; apenas o texto salvo é exibido",
 	"chat.sendFailed": "Falha ao enviar, tente novamente mais tarde",
 	"chat.metaTool": "GWork · usando {name}",
 	"chat.metaError": "GWork · ocorreu um erro",

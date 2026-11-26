@@ -416,6 +416,19 @@ function setActiveSession(sessionId) {
     $(sess.container).show();
     sess.lastActiveAt = Date.now();
     activeSessionId = sessionId;
+    /* 【切回会话重建批次限高窗 · 2026-11-25 用户报障「切到别的任务再切回来，没有限高，
+       过一会儿才恢复」】切走期间容器 display:none：批次窗的周期重量（ticker 每秒对全部
+       windowed 盖子 refreshWindow）在隐藏态量到零几何，旧实现据此 overflow=0 →
+       teardownWindow 把限高窗拆掉；切回后无任何重建入口，直到下一个工具事件
+       noteProcessInsert 才重建（即「等过一会儿才恢复」）。模块侧已加隐藏链守卫
+       （refreshWindow 隐藏态不量测不拆窗，hiddenFromRoot）；此处再补一道：会话重新
+       可见时立即对全部 open 批次盖子重建限高窗，双保险覆盖其他零几何路径拆窗的历史态。
+       typeof 守卫：app-base 先于 app-turn-display 装载（同 syncQuestionCard 纪律）；
+       空容器/无批次时 refreshWindowsIn 幂等 no-op；纯展示增强失败静默。 */
+    if (switching && typeof window.GourdTurnDisplay === 'object'
+            && window.GourdTurnDisplay && typeof window.GourdTurnDisplay.refreshWindowsIn === 'function') {
+        try { window.GourdTurnDisplay.refreshWindowsIn(sess.container); } catch (eWin) { /* 展示增强静默 */ }
+    }
     // 结构化问答卡归属活动会话：切换即按新会话状态重建/隐藏（切回时由回放重建）
     if (typeof syncQuestionCard === 'function') syncQuestionCard();
     SESSION_ID = sessionId;

@@ -260,6 +260,7 @@
 	"chat.deviceRequired": "Sélectionnez d’abord un appareil en ligne en haut à gauche",
 	"chat.deviceOffline": "L’appareil est hors ligne. Vérifiez que le client de bureau est en ligne et réessayez",
 	"chat.loadFailed": "Échec du chargement, veuillez réessayer plus tard",
+	"chat.history.degraded": "Les cartes de processus et de résultats sont indisponibles ; seul le texte enregistré est affiché",
 	"chat.sendFailed": "Échec de l’envoi, veuillez réessayer plus tard",
 	"chat.metaTool": "GWork · utilise {name}",
 	"chat.metaError": "GWork · une erreur est survenue",

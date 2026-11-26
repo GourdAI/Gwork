@@ -329,9 +329,15 @@ export async function gworkLogin(username: string, password: string): Promise<Gw
 		   服务端已改为触顶时自动挤号兜底，但本机自己制造的垃圾应由本机自己清掉，
 		   不该靠兜底把用户别的设备挤下线。
 		   best-effort：失败不影响刚刚成功的登录；旧凭据可能早已在服务端失效。
-		   调用点在 serialize 链内，与 refresh/logout 天然串行，无并发撤销竞态。 */
+		   调用点在 serialize 链内发起，但撤销本身 fire-and-forget（见下），不再
+		   与 refresh/logout 串行 —— 无竞态：闭包只持有旧会话的快照值，撤的
+		   只可能是「被顶替的旧 Session」，碰不到刚写入的新凭据。
+		   【2026-11-26 性能回归修复】这里必须 fire-and-forget，绝不 await：
+		   登录关键路径上这一个同步网络往返（可达数秒，网络差时更久）直接加在
+		   「点登录→进首页→拉设备→建链→拉会话」整条链的头上，用户感知就是
+		   「登录后所有东西都变慢了」。撤销本身是善后工作，与登录结果无关。 */
 		if (superseded != null && shouldRevokeSuperseded(superseded.sid, session.sid, superseded.refreshToken)) {
-			await revokeSessionQuietly(superseded)
+			revokeSessionQuietly(superseded).catch((_e): void => { })
 		}
 		return session
 	})

@@ -29,6 +29,14 @@ func setupAuthSessionTestDB(t *testing.T) *model.User {
 	previousIssuanceWindow := common.UserSessionIssuanceWindowSeconds
 	previousRevokedRetention := common.UserSessionRevokedRetentionDays
 	previousAlertThreshold := common.UserSessionHourlyAlertThreshold
+	// staleSweepAt 是进程级全局 map，而每个测试的 user 都来自全新 :memory:
+	// DB（自增主键，Id 恒为 1）。不重置的话，前一个测试为「userId=1」记下的
+	// 节流时间戳会静默跳过本测试的 lazy sweep —— 依赖 sweep 副作用的断言
+	//（如 TestCreateLoginSessionIgnoresStaleAuthVersionsForActiveLimit 对
+	// stale 行被撤销的断言）会在 -shuffle / -count>1 / 测试顺序变化时随机翻红。
+	staleSweepMu.Lock()
+	staleSweepAt = map[int]int64{}
+	staleSweepMu.Unlock()
 	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	require.NoError(t, err)
 	sqlDB, err := db.DB()
@@ -50,6 +58,11 @@ func setupAuthSessionTestDB(t *testing.T) *model.User {
 		common.UserSessionIssuanceWindowSeconds = previousIssuanceWindow
 		common.UserSessionRevokedRetentionDays = previousRevokedRetention
 		common.UserSessionHourlyAlertThreshold = previousAlertThreshold
+		// 恢复（清空）节流快照，与函数入口的重置对称：既保证本测试不影响
+		// 后续测试，也保证并发 t.Parallel 下互不串扰。
+		staleSweepMu.Lock()
+		staleSweepAt = map[int]int64{}
+		staleSweepMu.Unlock()
 		_ = sqlDB.Close()
 	})
 	user := &model.User{
@@ -152,6 +165,115 @@ func TestCreateLoginSessionIgnoresStaleAuthVersionsForActiveLimit(t *testing.T) 
 	usable, err := model.CountUsableUserSessions(user.Id, user.AuthVersion, now)
 	require.NoError(t, err)
 	assert.Equal(t, int64(50), usable)
+}
+
+// TestCreateLoginSessionSweepsStaleOncePerInterval pins the per-user throttle:
+// the lazy sweep must run for the first login of the hour and must NOT run for
+// a second login within the interval — a repeated sweep would put the full
+// batched-UPDATE cost back on the login critical path that the throttle
+// exists to remove. The sweep itself is idempotent, so "skipped" is asserted
+// behaviorally: a freshly planted stale row survives the second login (the
+// hourly global backstop owns it from here).
+func TestCreateLoginSessionSweepsStaleOncePerInterval(t *testing.T) {
+	useTestSessionSecret(t)
+	user := setupAuthSessionTestDB(t)
+	common.UserSessionActiveLimit = 50
+	common.UserSessionIssuanceLimit = 100
+	now := time.Now().Unix()
+
+	plantStale := func(sid string) model.UserSession {
+		row := model.UserSession{
+			SID:             sid,
+			UserID:          user.Id,
+			Version:         1,
+			UserAuthVersion: user.AuthVersion + 1, // stale: superseded auth version
+			Status:          model.UserSessionStatusActive,
+			RefreshHash:     "hash-" + sid,
+			LoginMethod:     "password",
+			CreatedAt:       now,
+			LastActiveAt:    now,
+			ExpiresAt:       now + 3600,
+		}
+		require.NoError(t, model.DB.Create(&row).Error)
+		return row
+	}
+
+	// First login: sweep is due, the planted stale row must be revoked.
+	plantStale("throttle-first")
+	_, err := CreateLoginSession(user.Id, "password", "127.0.0.1", "test-agent")
+	require.NoError(t, err)
+	var first model.UserSession
+	require.NoError(t, model.DB.Where("sid = ?", "throttle-first").First(&first).Error)
+	assert.Equal(t, model.UserSessionStatusRevoked, first.Status, "first login of the hour must sweep stale rows")
+
+	// Second login within the interval: sweep is throttled. A new stale row
+	// must survive this login (proving the sweep did not run again).
+	plantStale("throttle-second")
+	_, err = CreateLoginSession(user.Id, "password", "127.0.0.1", "test-agent")
+	require.NoError(t, err)
+	var second model.UserSession
+	require.NoError(t, model.DB.Where("sid = ?", "throttle-second").First(&second).Error)
+	assert.Equal(t, model.UserSessionStatusActive, second.Status, "second login within the interval must skip the sweep")
+}
+
+// TestCreateLoginSessionRetriesStaleSweepAfterFailure pins the split of
+// judgment (staleSweepThrottled) from bookkeeping (markStaleSweepDone): a
+// sweep that fails must not be silenced for the full hour — the next login
+// must try again. Forced via the same gorm error-injection pattern used by
+// TestCreateLoginSessionFailsClosedWhenLimitCountFails.
+func TestCreateLoginSessionRetriesStaleSweepAfterFailure(t *testing.T) {
+	useTestSessionSecret(t)
+	user := setupAuthSessionTestDB(t)
+	common.UserSessionActiveLimit = 50
+	common.UserSessionIssuanceLimit = 100
+	now := time.Now().Unix()
+
+	stale := model.UserSession{
+		SID:             "throttle-retry",
+		UserID:          user.Id,
+		Version:         1,
+		UserAuthVersion: user.AuthVersion + 1,
+		Status:          model.UserSessionStatusActive,
+		RefreshHash:     "hash-throttle-retry",
+		LoginMethod:     "password",
+		CreatedAt:       now,
+		LastActiveAt:    now,
+		ExpiresAt:       now + 3600,
+	}
+	require.NoError(t, model.DB.Create(&stale).Error)
+
+	// Fail only the UPDATE path of the stale sweep (revoked-by-reason update
+	// over user_sessions), then restore it so the retry can succeed.
+	forcedErr := errors.New("forced stale sweep failure")
+	callbackName := "test:fail_stale_sweep_update"
+	callbackRegistered := true
+	require.NoError(t, model.DB.Callback().Update().Before("gorm:update").Register(callbackName, func(tx *gorm.DB) {
+		if tx.Statement != nil && tx.Statement.Table == "user_sessions" {
+			tx.AddError(forcedErr)
+		}
+	}))
+	t.Cleanup(func() {
+		if callbackRegistered {
+			_ = model.DB.Callback().Update().Remove(callbackName)
+		}
+	})
+
+	_, err := CreateLoginSession(user.Id, "password", "127.0.0.1", "test-agent")
+	require.NoError(t, err, "a failed sweep must not fail the login itself")
+	var afterFail model.UserSession
+	require.NoError(t, model.DB.Where("sid = ?", "throttle-retry").First(&afterFail).Error)
+	assert.Equal(t, model.UserSessionStatusActive, afterFail.Status, "the forced-failed sweep must leave the stale row untouched")
+
+	require.NoError(t, model.DB.Callback().Update().Remove(callbackName))
+	callbackRegistered = false
+
+	// Next login must retry the sweep instead of honoring a throttle marker
+	// that was never written for the failed attempt.
+	_, err = CreateLoginSession(user.Id, "password", "127.0.0.1", "test-agent")
+	require.NoError(t, err)
+	var afterRetry model.UserSession
+	require.NoError(t, model.DB.Where("sid = ?", "throttle-retry").First(&afterRetry).Error)
+	assert.Equal(t, model.UserSessionStatusRevoked, afterRetry.Status, "a failed sweep must be retried on the next login")
 }
 
 // TestCreateLoginSessionEvictsIdlestAtActiveLimit pins the self-service escape

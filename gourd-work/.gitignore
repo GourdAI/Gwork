@@ -46,6 +46,7 @@ package-lock.json
 # 以本目录为 workspace 启动内核时会在此生成 sessions/ loops/ 等运行态数据。
 # 仓库根 .gitignore 的 `.gwork/` 已按任意层级覆盖，此处显式声明。
 /.gwork/
+/target*/
 
 # ── OS ─────────────────────────────────────────────────────────────────────
 .DS_Store

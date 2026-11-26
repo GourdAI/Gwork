@@ -969,6 +969,63 @@ fn request_origin(base: &str) -> String {
     base.trim_end_matches('/').to_string()
 }
 
+/// 撤销被顶替旧会话的网络部分（login 内 fire-and-forget spawn 调用）。
+/// 独立成自由函数是为了脱离 `&self`（AuthState 无 Clone，login 持锁时无法
+/// 把整个状态借给后台任务）：只捕获 client 克隆与 host 字符串即可发请求。
+///
+/// 【2026-11 `Conflict [AUTH_SESSION_LIMIT]` 报障的一环】桌面端每次登录都
+/// 无条件让后台签发一份新 Session，并用它覆盖内存与 keyring 里的旧凭据。
+/// 旧凭据一旦被覆盖就再也拿不到 refresh token，也就永远无法登出，于是那份
+/// Session 在服务端保持 `status=active` 直到 365 天绝对上限到期。反复登录
+/// 同一账号、或在两个账号之间来回切换，就会攒出一堆用户既看不见（设备列表
+/// 只显示当前鉴权版本）也撤不掉的僵尸行，最终把 `USER_SESSION_ACTIVE_LIMIT`
+/// 占满。本机自己制造的垃圾应由本机自己清掉，不该靠服务端挤号兜底。
+///
+/// best-effort：失败只记日志，绝不影响刚刚成功的登录。旧凭据可能已在服务端
+/// 失效（改过密码、被挤号、绝对上限到期），后台此时返回错误属于预期。
+async fn revoke_superseded_session_request(
+    client: reqwest::Client,
+    host: &str,
+    old: &StoredSession,
+    new_sid: &str,
+) {
+    if !should_revoke_superseded(&old.sid, new_sid, &old.refresh_token) {
+        return;
+    }
+    let url = format!("{}/api/user/auth/logout", host);
+    let result = client
+        .post(&url)
+        .header("Origin", request_origin(host))
+        .header("Accept", "application/json")
+        .header("X-Auth-Session", &old.sid)
+        .header(
+            "Cookie",
+            format!("{}={}", REFRESH_COOKIE_NAME, old.refresh_token),
+        )
+        .bearer_auth(&old.access_token)
+        .send()
+        .await;
+    match result {
+        Ok(resp) if resp.status().is_success() => {
+            tracing::debug!(old_sid = %old.sid, "revoked superseded local session");
+        }
+        Ok(resp) => {
+            tracing::debug!(
+                status = resp.status().as_u16(),
+                old_sid = %old.sid,
+                "superseded session revoke rejected (likely already gone server-side); ignored"
+            );
+        }
+        Err(e) => {
+            tracing::debug!(
+                error = %e,
+                old_sid = %old.sid,
+                "superseded session revoke failed; ignored"
+            );
+        }
+    }
+}
+
 /// 登录态就绪后准备官方模型凭据，写入内核进程内存。
 ///
 /// 【为什么不在 login() 里做】login/refresh 持 `session_lock`，而本函数经
@@ -1107,7 +1164,7 @@ impl AuthState {
         let _guard = self.session_lock.lock().await;
         // 本机上一份会话的快照，必须在 self.store(Some(..)) 覆盖之前取：
         // 覆盖之后旧 refresh token 就永久丢失，那份 Session 在服务端会一直
-        // active 到绝对上限到期。见 revoke_superseded_session。
+        // active 到绝对上限到期。见 revoke_superseded_session_request。
         let superseded = self.snapshot();
         let url = format!("{}/api/user/login", self.host());
         let mut payload = serde_json::json!({ "username": username, "password": password });
@@ -1160,66 +1217,26 @@ impl AuthState {
         let session = session_from_auth_data(data, refresh, None);
         self.store(Some(session.clone()));
         keyring_store(&session).await;
+        // 【2026-11-26 性能回归修复】撤销被顶替的旧会话绝不 await 在登录关键路径上：
+        // 它是善后网络请求（慢网下数秒），旧实现持 `session_lock` 同步等它完成，
+        // 直接把时延加在「点登录→进入可用状态」上。这里 fire-and-forget：
+        // - 任务只捕获克隆值（client / host / StoredSession），不借用 `&self`，
+        //   不受 guard 释放影响，也不取 session_lock（与 keeper 无锁竞态）；
+        // - 失败只记日志，不影响刚成功的登录（原 best-effort 语义不变）；
+        // - spawn 走 async_runtime，与本文件其余后台任务同一条 runtime（风格统一）；
+        // - 判据在 spawn 前短路：三个跳过条件命中时不必起一个立即 return 的任务。
         if let Some(old) = superseded {
-            self.revoke_superseded_session(&old, &session.sid).await;
+            let new_sid = session.sid.clone();
+            if should_revoke_superseded(&old.sid, &new_sid, &old.refresh_token) {
+                let client = self.client.clone();
+                let host = self.host();
+                async_runtime::spawn(async move {
+                    revoke_superseded_session_request(client, &host, &old, &new_sid).await;
+                });
+            }
         }
         self.start_keeper();
         Ok(self.status())
-    }
-
-    /// 登录成功后，在服务端撤销本机被顶替掉的那一份会话。
-    ///
-    /// 【2026-11 `Conflict [AUTH_SESSION_LIMIT]` 报障的一环】桌面端每次登录都
-    /// 无条件让后台签发一份新 Session，并用它覆盖内存与 keyring 里的旧凭据。
-    /// 旧凭据一旦被覆盖就再也拿不到 refresh token，也就永远无法登出，于是那份
-    /// Session 在服务端保持 `status=active` 直到 365 天绝对上限到期。反复登录
-    /// 同一账号、或在两个账号之间来回切换，就会攒出一堆用户既看不见（设备列表
-    /// 只显示当前鉴权版本）也撤不掉的僵尸行，最终把 `USER_SESSION_ACTIVE_LIMIT`
-    /// 占满。服务端已改为触顶时按 `last_active_at` 自动挤号兜底，但本机自己
-    /// 制造的垃圾应由本机自己清掉，不该靠兜底去把用户别的设备挤下线。
-    ///
-    /// best-effort：失败只记日志，绝不影响刚刚成功的登录。旧凭据可能已在服务端
-    /// 失效（改过密码、被挤号、绝对上限到期），后台此时返回错误属于预期。
-    ///
-    /// 调用点持有 `session_lock`，因此这里**不得**再取该锁（会死锁）；keeper 的
-    /// refresh 同样要抢这把锁，所以不存在与保活任务并发撤销同一份会话的竞态。
-    async fn revoke_superseded_session(&self, old: &StoredSession, new_sid: &str) {
-        if !should_revoke_superseded(&old.sid, new_sid, &old.refresh_token) {
-            return;
-        }
-        let url = format!("{}/api/user/auth/logout", self.host());
-        let result = self
-            .client
-            .post(&url)
-            .header("Origin", request_origin(&self.host()))
-            .header("Accept", "application/json")
-            .header("X-Auth-Session", &old.sid)
-            .header(
-                "Cookie",
-                format!("{}={}", REFRESH_COOKIE_NAME, old.refresh_token),
-            )
-            .bearer_auth(&old.access_token)
-            .send()
-            .await;
-        match result {
-            Ok(resp) if resp.status().is_success() => {
-                tracing::debug!(old_sid = %old.sid, "revoked superseded local session");
-            }
-            Ok(resp) => {
-                tracing::debug!(
-                    status = resp.status().as_u16(),
-                    old_sid = %old.sid,
-                    "superseded session revoke rejected (likely already gone server-side); ignored"
-                );
-            }
-            Err(e) => {
-                tracing::debug!(
-                    error = %e,
-                    old_sid = %old.sid,
-                    "superseded session revoke failed; ignored"
-                );
-            }
-        }
     }
 
     /// 注册。new-api 的注册接口只返回 `{success:true}` 不发 token，因此
@@ -1560,7 +1577,7 @@ impl AuthState {
     }
 }
 
-/// 是否应在登录成功后撤销被顶替的旧会话（[`AuthState::revoke_superseded_session`]
+/// 是否应在登录成功后撤销被顶替的旧会话（[`revoke_superseded_session_request`]
 /// 的判据，抽成纯函数以便单测枚举真值表）。
 ///
 /// 三种情况必须跳过，否则会主动把刚登录的用户弄掉线：

@@ -260,6 +260,7 @@
 	"chat.deviceRequired": "先に左上でオンラインのデバイスを選択してください",
 	"chat.deviceOffline": "デバイスがオフラインです。デスクトップクライアントがオンラインか確認して再試行してください",
 	"chat.loadFailed": "読み込みに失敗しました。しばらくして再試行してください",
+	"chat.history.degraded": "過程と成果カードは利用できません。保存済みの本文のみ表示されます",
 	"chat.sendFailed": "送信に失敗しました。しばらくして再試行してください",
 	"chat.metaTool": "GWork · {name} を使用中",
 	"chat.metaError": "GWork · エラーが発生しました",

@@ -62,10 +62,34 @@ where
 pub enum ReplayMode {
     /// Paginated history: the last `rounds` conversation rounds whose frames
     /// are strictly older than `before_seq` (a `user` frame seq).
-    Rounds { before_seq: Option<i64>, rounds: usize },
+    ///
+    /// `max_bytes` caps the **response body** (sum of the returned window's
+    /// raw line lengths): the mobile relay carries one replay answer in a
+    /// single websocket frame with a 16 MB device-side read limit, so an
+    /// over-budget page would kill the device link and degrade the client to
+    /// a text snapshot. When the window exceeds the budget its head is
+    /// dropped (the tail — newest rounds, final text, `done` — is kept) and
+    /// the dropped rounds are reported through `remaining_rounds`/`hasMore`
+    /// so the client pages them back with `before_seq`. `None` = uncapped
+    /// (desktop kernels call the endpoint directly).
+    Rounds {
+        before_seq: Option<i64>,
+        rounds: usize,
+        max_bytes: Option<u64>,
+    },
     /// Live-stream recovery: frames with `eventSeq > after_seq`, capped at
     /// `limit` (plus one extra line so `hasMore` stays exact).
-    After { after_seq: i64, limit: Option<usize> },
+    ///
+    /// `max_bytes` caps the response body like [`ReplayMode::Rounds`], but the
+    /// cut keeps the **head** and drops the tail: recovery resumes from the
+    /// returned page's max seq, and `total_after > events.len()` keeps
+    /// `hasMore` truthful so the client's paging loop continues where the
+    /// budget stopped.
+    After {
+        after_seq: i64,
+        limit: Option<usize>,
+        max_bytes: Option<u64>,
+    },
     /// Legacy parameter-less request: the last `cap` frames.
     Tail { cap: usize },
 }
@@ -85,6 +109,11 @@ pub struct ReplayWindow {
     pub last_run_id: Option<String>,
     /// Total frames after `after_seq` before `limit` was applied.
     pub total_after: usize,
+    /// The requested window exceeded the caller's byte budget, so only its
+    /// **tail** was returned (the head is paged via `before_seq` like older
+    /// rounds). `remaining_rounds` then also counts the rounds the budget
+    /// dropped, keeping `hasMore` truthful for the client's paging loop.
+    pub truncated: bool,
 }
 
 /// Read a bare top-level `eventSeq` number out of a raw NDJSON line without
@@ -239,18 +268,280 @@ fn delta_owner_of(line: &str, run_id: Option<&str>) -> String {
     owner
 }
 
-/// The probe-pass record for one line. The 99% of lines outside the selected
-/// window are never deserialized into a `serde_json::Value`.
-struct ProbeLine {
-    line: String,
+// ── Replay probe index cache ───────────────────────────────────────────────
+//
+// WHY THIS EXISTS (measured, 2026-11-25 mobile "every task opens slow and
+// degraded" report): `.stream.ndjson` grows without bound (82 MB / 115k lines
+// observed on a real session) and **every** replay request re-read the whole
+// file line by line to rebuild the probe index — ~1.5 s of pure I/O per call,
+// with mobile issuing 3+ calls per open (first page, running probe, catch-up).
+// The file is append-only in practice (rewind only touches the *messages*
+// file; nothing truncates or rewrites the stream), so the probe index of the
+// already-written prefix never changes: cache it and continue the scan from
+// the cached byte length.
+//
+// Invalidation is by file length: a longer file appends (continue the scan);
+// any other length (shrink = rewrite/truncate, or same-length rewrite which we
+// cannot distinguish from an append-without-growth) drops the entry and
+// rebuilds from zero. A wrong-but-accepted index would mis-page history, so
+// the conservative rule wins over a clever one.
+//
+// Memory is bounded: entries are evicted least-recently-used past
+// `INDEX_CACHE_MAX_ENTRIES`, and any file whose *index alone* would exceed
+// `INDEX_CACHE_MAX_BYTES` is not cached at all (scanning stays correct, just
+// uncached). The index keeps only probe scalars — never the raw lines — so an
+// 82 MB file costs a few MB of index, not 82 MB.
+#[derive(Clone)]
+struct CachedProbe {
     seq: Option<i64>,
     kind: Option<&'static str>,
-    /// Only populated for delta frames; identifies which append-only stream the
-    /// delta belongs to. Consecutive deltas with a different owner must not be
-    /// merged (see [`delta_owner_of`]).
     owner: String,
     is_user: bool,
     run_id: Option<String>,
+    /// Byte offset of this line in the stream file and its length without the
+    /// line terminator. The window selected in pass 1 is read back in pass 2
+    /// as one contiguous `[off, off+len)` range — no whole-file slurp.
+    off: u64,
+    len: usize,
+}
+
+struct StreamIndex {
+    /// Byte length of the file the cached probes cover exactly.
+    covered_len: u64,
+    /// File mtime captured right after the scan that reached `covered_len`.
+    /// Same length + same mtime = unchanged (reuse without scanning); same
+    /// length + different mtime = rewrite (rebuild). Length alone cannot tell
+    /// the two apart, and treating every same-length hit as a rewrite would
+    /// rescan the whole file on **every** re-open of a finished session — the
+    /// exact mobile symptom this cache exists to remove.
+    mtime: Option<std::time::SystemTime>,
+    probes: Vec<CachedProbe>,
+    /// `latest_seq` / `last_run_id` of the covered prefix.
+    latest_seq: i64,
+    last_run_id: Option<String>,
+    last_used: std::time::Instant,
+}
+
+const INDEX_CACHE_MAX_ENTRIES: usize = 64;
+const INDEX_CACHE_MAX_BYTES: u64 = 64 << 20;
+
+fn stream_index_cache() -> &'static Mutex<std::collections::HashMap<PathBuf, StreamIndex>> {
+    static CACHE: OnceLock<Mutex<std::collections::HashMap<PathBuf, StreamIndex>>> =
+        OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
+/// Probe one raw line into its cacheable scalars (shared by the cold scan and
+/// the incremental continuation so both paths can never drift apart).
+fn probe_line_at(line: &str, off: u64, len: usize) -> CachedProbe {
+    let run_id = probe_string_field(line, "runId");
+    let frame_type = probe_string_field(line, "type");
+    let kind = delta_kind_of(frame_type.as_deref());
+    let owner = if kind.is_some() {
+        delta_owner_of(line, run_id.as_deref())
+    } else {
+        String::new()
+    };
+    CachedProbe {
+        seq: probe_event_seq(line),
+        kind,
+        owner,
+        is_user: frame_type.as_deref() == Some("user"),
+        run_id,
+        off,
+        len,
+    }
+}
+
+fn cached_probe_memory(p: &CachedProbe) -> u64 {
+    (std::mem::size_of::<CachedProbe>() as u64) + (p.owner.len() as u64)
+        + p.run_id.as_ref().map(|r| r.len() as u64).unwrap_or(0)
+}
+
+/// Fold one probe into the running `latest_seq` / `last_run_id` aggregates
+/// (forward scan keeps the LAST runId, matching the old handler's
+/// `all.iter().rev().find_map(...)`).
+fn fold_probe_meta(meta: &mut (i64, Option<String>), p: &CachedProbe) {
+    if let Some(s) = p.seq {
+        meta.0 = meta.0.max(s);
+    }
+    if let Some(r) = &p.run_id {
+        meta.1 = Some(r.clone());
+    }
+}
+
+/// Build the probe index for `path`, reusing the cached prefix when the file
+/// has only grown. Returns `(probes, latest_seq, last_run_id)`.
+///
+/// Concurrency contract (code review 2026-11-26):
+/// - The scan runs **outside** the cache lock. The old implementation held the
+///   global mutex for the entire scan, so one cold multi-second scan of a huge
+///   stream stalled replay requests for *every other session* — reintroducing
+///   the very latency this cache exists to remove.
+/// - `covered_len` is the offset just past the last **newline-terminated**
+///   line the scan consumed — never the metadata length captured before the
+///   scan. A writer appending concurrently can extend the file past that
+///   pre-scan length while the reader (open on the same inode) already sees
+///   the new bytes; committing the stale length while the probes cover more
+///   would make the next continuation scan re-probe the overlap — duplicate
+///   frames in replay. Symmetrically, a partial line at EOF (no `\n` yet) is
+///   NOT indexed: the writer may still append to it, and a cached short `len`
+///   would make pass 2 read a truncated JSON line and silently drop the frame.
+/// - Commit never overwrites an entry that already covers more bytes (two
+///   concurrent scans of the same file: the longer coverage wins; the other's
+///   work is discarded, never mixed in).
+fn probe_index(path: &PathBuf) -> (Vec<CachedProbe>, i64, Option<String>) {
+    let Ok(file) = std::fs::File::open(path) else {
+        return (Vec::new(), 0, None);
+    };
+    let Ok(meta) = file.metadata() else {
+        return (Vec::new(), 0, None);
+    };
+    let len = meta.len();
+
+    // Snapshot (and take ownership of) any cached prefix under the lock, then
+    // release it before scanning. Reuse rules:
+    // - strictly longer file → append-only growth: continue the scan from the
+    //   cached prefix;
+    // - same length AND same mtime → unchanged: reuse as-is, no scan at all
+    //   (this is the finished-session re-open path; length alone cannot tell
+    //   "unchanged" from "same-length rewrite", which is why the mtime is
+    //   recorded — treating every same-length hit as a rewrite would rescan
+    //   the whole file on every re-open, defeating the cache);
+    // - anything else (shrink, or same length with a newer mtime) → rewrite
+    //   or truncation: drop the entry and rebuild from zero.
+    let cached: Option<StreamIndex> = {
+        let mut guard = stream_index_cache().lock().unwrap_or_else(|e| e.into_inner());
+        guard.remove(path).filter(|e| {
+            if len > e.covered_len {
+                return true;
+            }
+            if len == e.covered_len {
+                let mtime_now = meta.modified().ok();
+                return match (&e.mtime, &mtime_now) {
+                    (Some(a), Some(b)) => a == b,
+                    // No mtime on either side: cannot prove "unchanged"; the
+                    // conservative rule rebuilds.
+                    _ => false,
+                };
+            }
+            false
+        })
+    };
+
+    let mut probes: Vec<CachedProbe> = Vec::new();
+    let mut agg: (i64, Option<String>) = (0, None);
+    let mut covered: u64 = 0;
+    if let Some(e) = cached {
+        probes = e.probes;
+        agg = (e.latest_seq, e.last_run_id);
+        covered = e.covered_len;
+    }
+
+    // `None` = do not store (seek failed, or the tail exceeded the memory
+    // budget for this call).
+    let mut new_covered: Option<u64> = Some(covered);
+    if covered < len {
+        use std::io::{Seek, SeekFrom};
+        let mut reader = BufReader::new(file);
+        if reader.seek(SeekFrom::Start(covered)).is_ok() {
+            let mut pending: Vec<CachedProbe> = Vec::new();
+            let mut pending_bytes: u64 = 0;
+            // Byte-exact walk (read_until, not `lines()`): pass 2 reads the
+            // selected window back as one contiguous [off, off+len) range, so
+            // every probe must carry its true file offset.
+            let mut off: u64 = covered;
+            let mut buf: Vec<u8> = Vec::new();
+            loop {
+                buf.clear();
+                let n = match std::io::BufRead::read_until(&mut reader, b'\n', &mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => n as u64,
+                };
+                let line_off = off;
+                let terminated = buf.last() == Some(&b'\n');
+                off += n;
+                if !terminated {
+                    // Partial line at EOF: a writer may still be appending to
+                    // it. Do not index it; the next scan resumes exactly here.
+                    off = line_off;
+                    break;
+                }
+                let mut trimmed = buf.clone();
+                while matches!(trimmed.last(), Some(&b'\n') | Some(&b'\r')) {
+                    trimmed.pop();
+                }
+                let Ok(text) = String::from_utf8(trimmed) else {
+                    continue;
+                };
+                // Same raw-line emptiness rule as the historical cold scan:
+                // whitespace-only lines cannot start with `{`.
+                if text.is_empty() {
+                    continue;
+                }
+                let p = probe_line_at(&text, line_off, text.len());
+                fold_probe_meta(&mut agg, &p);
+                pending_bytes += cached_probe_memory(&p);
+                pending.push(p);
+            }
+            // Commit only when the whole tail fits the memory budget; a
+            // partial commit would desync `covered_len` from the probes.
+            let total = probes.iter().map(cached_probe_memory).sum::<u64>() + pending_bytes;
+            if total <= INDEX_CACHE_MAX_BYTES {
+                probes.append(&mut pending);
+                new_covered = Some(off);
+            } else {
+                // Uncached path: the tail probes are still needed for *this*
+                // request, so keep them out of the cache but return them.
+                probes.append(&mut pending);
+                new_covered = None; // marker: do not store
+            }
+        } else {
+            new_covered = None;
+        }
+    }
+    let (latest_seq, last_run_id) = (agg.0, agg.1);
+    if let Some(covered_len) = new_covered {
+        let now = std::time::Instant::now();
+        // Fresh mtime at commit (not the pre-scan one): if a writer appended
+        // during the scan, the stored stamp must reflect the file as it is
+        // *now*, or the very next open of this still-settled file would see a
+        // "changed" mtime and rebuild from zero once for nothing. (`file` was
+        // moved into the reader, so re-stat by path.)
+        let mtime = std::fs::metadata(path).ok().and_then(|m| m.modified().ok());
+        let mut guard = stream_index_cache().lock().unwrap_or_else(|e| e.into_inner());
+        // A concurrent scan may already have committed a longer coverage for
+        // this path; never regress it.
+        let keep_existing = guard
+            .get(path)
+            .map(|existing| existing.covered_len >= covered_len)
+            .unwrap_or(false);
+        if !keep_existing {
+            guard.insert(
+                path.clone(),
+                StreamIndex {
+                    covered_len,
+                    mtime,
+                    probes: probes.clone(),
+                    latest_seq,
+                    last_run_id: last_run_id.clone(),
+                    last_used: now,
+                },
+            );
+        }
+        if guard.len() > INDEX_CACHE_MAX_ENTRIES {
+            // Evict least-recently-used entries until back under the cap.
+            let mut order: Vec<(PathBuf, std::time::Instant)> = guard
+                .iter()
+                .map(|(k, v)| (k.clone(), v.last_used))
+                .collect();
+            order.sort_by_key(|(_, t)| *t);
+            for (k, _) in order.iter().take(order.len().saturating_sub(INDEX_CACHE_MAX_ENTRIES)) {
+                guard.remove(k);
+            }
+        }
+    }
+    (probes, latest_seq, last_run_id)
 }
 
 /// Coalesce a run of consecutive delta frames from one owner bucket into one.
@@ -301,71 +592,100 @@ fn push_coalesced(out: &mut Vec<serde_json::Value>, run: &mut Vec<serde_json::Va
 /// read by substring probes, and only lines inside the selected window are
 /// JSON-parsed.
 fn load_replay_window_at(path: &PathBuf, mode: ReplayMode) -> ReplayWindow {
-    let Ok(file) = std::fs::File::open(path) else {
-        return ReplayWindow::default();
-    };
-    let mut probes: Vec<ProbeLine> = Vec::new();
-    for line in BufReader::new(file).lines().filter_map(|l| l.ok()) {
-        // Empty check on the raw line (every writer emits `\r?\n`-terminated
-        // records, and a line that is whitespace-only cannot start with `{`):
-        // `line.trim().is_empty()` would scan multi-byte whitespace over the
-        // whole 37 MB of pass-1 input for no behavioural difference.
-        if line.is_empty() || line.as_bytes().first() == Some(&b'\r') && line.len() == 1 {
-            continue;
-        }
-        let run_id = probe_string_field(&line, "runId");
-        let frame_type = probe_string_field(&line, "type");
-        let kind = delta_kind_of(frame_type.as_deref());
-        let owner = if kind.is_some() {
-            delta_owner_of(&line, run_id.as_deref())
-        } else {
-            String::new()
-        };
-        probes.push(ProbeLine {
-            seq: probe_event_seq(&line),
-            kind,
-            owner,
-            is_user: frame_type.as_deref() == Some("user"),
-            run_id,
-            line,
-        });
-    }
+    let (probes, latest_seq, last_run_id) = probe_index(path);
     let mut out = ReplayWindow::default();
-    for p in &probes {
-        if let Some(s) = p.seq {
-            out.latest_seq = out.latest_seq.max(s);
-        }
-        // Forward scan keeps the LAST runId, matching the old handler's
-        // `all.iter().rev().find_map(...)`.
-        if let Some(r) = &p.run_id {
-            out.last_run_id = Some(r.clone());
-        }
+    out.latest_seq = latest_seq;
+    out.last_run_id = last_run_id;
+    if probes.is_empty() {
+        return out;
     }
 
     // `After` (live-stream recovery) is kept frame-for-frame: it is small by
     // construction and its `limit`/`hasMore` contract is seq-based, so
     // coalescing there would change the recovery cursor semantics.
-    if let ReplayMode::After { after_seq, limit } = mode {
-        for p in &probes {
+    if let ReplayMode::After {
+        after_seq,
+        limit,
+        max_bytes,
+    } = mode
+    {
+        let mut matching: usize = 0;
+        let mut first_idx: Option<usize> = None;
+        let mut last_idx: usize = 0;
+        for (i, p) in probes.iter().enumerate() {
             if !p.seq.map(|s| s > after_seq).unwrap_or(false) {
                 continue;
             }
-            let Ok(v) = serde_json::from_str::<serde_json::Value>(&p.line) else {
-                continue;
-            };
-            out.total_after += 1;
-            if let Some(n) = limit {
-                if n > 0 && out.total_after > n {
-                    continue; // still counted, just not returned
+            matching += 1;
+            if first_idx.is_none() {
+                first_idx = Some(i);
+            }
+            last_idx = i;
+        }
+        out.total_after = matching;
+        let Some(begin) = first_idx else { return out };
+        let take = match limit {
+            Some(n) if n > 0 => n,
+            _ => usize::MAX,
+        };
+        // Read only as far as the first `take` matching probes (plus the
+        // non-matching lines interleaved before them). The old code read the
+        // WHOLE matching range — with `afterSeq=0&limit=500` on a 115k-line
+        // stream that slurped ~82 MB of raw lines to return 500 frames. A
+        // matching line that fails JSON parse is skipped (not counted toward
+        // `taken`); the client then pages forward from the max returned seq
+        // and re-covers the gap, so nothing is lost on pathological files.
+        let mut read_end = begin;
+        {
+            let mut seen = 0usize;
+            for i in begin..=last_idx {
+                if probes[i].seq.map(|s| s > after_seq).unwrap_or(false) {
+                    seen += 1;
+                    if seen >= take {
+                        read_end = i + 1;
+                        break;
+                    }
                 }
             }
+            if seen < take {
+                read_end = last_idx + 1;
+            }
+        }
+        let lines = read_probe_range(path, &probes, begin, read_end);
+        let mut idx = begin;
+        let mut taken = 0usize;
+        let mut used: u64 = 0;
+        for line in lines {
+            let p = &probes[idx];
+            idx += 1;
+            if !p.seq.map(|s| s > after_seq).unwrap_or(false) {
+                continue;
+            }
+            if taken >= take {
+                continue; // still counted in total_after, just not returned
+            }
+            if let Some(budget) = max_bytes {
+                let need = used + p.len as u64;
+                // Keep at least the head frame: an empty recovery page stalls
+                // the client's zero-progress guard worse than a fat one, and
+                // `total_after > events.len()` keeps hasMore truthful so the
+                // paging loop resumes exactly where the budget stopped.
+                if need > budget && taken > 0 {
+                    break;
+                }
+                used = need;
+            }
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
+                continue;
+            };
             out.events.push(v);
+            taken += 1;
         }
         return out;
     }
 
     let (start, end) = match mode {
-        ReplayMode::Rounds { before_seq, rounds } => {
+        ReplayMode::Rounds { before_seq, rounds, .. } => {
             // Eligible window: frames strictly older than the cursor. We keep
             // the full slice and re-check the predicate in pass 2 so a file
             // with out-of-order seqs still matches the old `filter` exactly.
@@ -415,24 +735,69 @@ fn load_replay_window_at(path: &PathBuf, mode: ReplayMode) -> ReplayWindow {
     if start >= end {
         return out;
     }
-    let before_seq = match mode {
-        ReplayMode::Rounds { before_seq, .. } => before_seq,
-        _ => None,
+    let (before_seq, max_bytes) = match mode {
+        ReplayMode::Rounds {
+            before_seq,
+            max_bytes,
+            ..
+        } => (before_seq, max_bytes),
+        _ => (None, None),
     };
 
-    // Pass 2: parse only the selected lines. A run of consecutive deltas with
-    // the same (kind, owner) is coalesced; any other frame or a different owner
-    // flushes the run first, preserving ordering and round boundaries exactly.
+    // ── Byte budget: keep the window's TAIL, page the head ────────────────
+    // 【2026-11-25 移动端「过程与产物暂不可用」+ 加载慢真因之二】中继协议把整个
+    // replay 响应装进【单个 WS res 帧】，后台设备侧读上限 16MB：一页 rounds 的
+    // 合帧投影一旦超限，设备连接被切断 → 移动端 36s 超时 → 降级纯文本快照。
+    // 响应体必须自限：超预算时丢掉窗口【头部】（保留含最终正文/done 的尾部），
+    // 被丢的轮计入 remaining_rounds 并由 handler 置 hasMore，客户端用现成的
+    // beforeSeq 翻页把头部逐页补回——不新增任何协议字段。
+    // 尾行单独超预算也保留（空响应比超预算更糟：会触发降级快照丢全过程）。
+    let mut page_start = start;
+    if let Some(budget) = max_bytes {
+        let mut used: u64 = 0;
+        let mut cut = end; // first kept index
+        for i in (start..end).rev() {
+            let need = used + probes[i].len as u64;
+            if need > budget && cut < end {
+                break;
+            }
+            used = need;
+            cut = i;
+        }
+        if cut > start {
+            // Rounds dropped by the budget become pageable earlier rounds.
+            // Headless streams have no user frames to count, but the dropped
+            // head must still stay pageable: count one synthetic round so
+            // `hasMore` remains truthful (the client pages it back with
+            // `beforeSeq = firstSeq`, which works on any frame, user or not).
+            let dropped_users = probes[start..cut].iter().filter(|p| p.is_user).count();
+            out.remaining_rounds += if dropped_users > 0 { dropped_users } else { 1 };
+            out.truncated = true;
+            page_start = cut;
+        }
+    }
+    if page_start >= end {
+        return out;
+    }
+
+    // Pass 2: read only the selected byte range and parse only those lines. A
+    // run of consecutive deltas with the same (kind, owner) is coalesced; any
+    // other frame or a different owner flushes the run first, preserving
+    // ordering and round boundaries exactly.
+    let lines = read_probe_range(path, &probes, page_start, end);
     let mut delta_run: Vec<serde_json::Value> = Vec::new();
     let mut delta_kind: Option<&'static str> = None;
     let mut delta_owner: String = String::new();
-    for p in &probes[start..end] {
+    let mut idx = page_start;
+    for line in lines {
+        let p = &probes[idx];
+        idx += 1;
         if let Some(b) = before_seq {
             if !p.seq.map(|s| s < b).unwrap_or(false) {
                 continue;
             }
         }
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(&p.line) else {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
             continue;
         };
         if p.kind != delta_kind || (p.kind.is_some() && p.owner != delta_owner) {
@@ -450,6 +815,60 @@ fn load_replay_window_at(path: &PathBuf, mode: ReplayMode) -> ReplayWindow {
         }
     }
     push_coalesced(&mut out.events, &mut delta_run);
+    out
+}
+
+/// Read the raw lines covering probe indices `[begin, end)` with one
+/// contiguous seek+read: the stream file is written in probe order, so the
+/// window is a single byte range `[probes[begin].off, probes[end-1].off +
+/// probes[end-1].len)`. Lines that are not valid UTF-8 are skipped exactly as
+/// the historical `BufReader::lines()` pass did (they could never parse as
+/// JSON either), and the index walk stays in lockstep because the scan that
+/// built the index skipped them too.
+fn read_probe_range(
+    path: &PathBuf,
+    probes: &[CachedProbe],
+    begin: usize,
+    end: usize,
+) -> Vec<String> {
+    if begin >= end || begin >= probes.len() {
+        return Vec::new();
+    }
+    let end_idx = end.min(probes.len()) - 1;
+    let from = probes[begin].off;
+    let to = probes[end_idx].off + probes[end_idx].len as u64;
+    let Ok(file) = std::fs::File::open(path) else {
+        return Vec::new();
+    };
+    let mut reader = BufReader::new(file);
+    {
+        use std::io::{Seek, SeekFrom};
+        if reader.seek(SeekFrom::Start(from)).is_err() {
+            return Vec::new();
+        }
+    }
+    let mut out: Vec<String> = Vec::new();
+    let mut off = from;
+    let mut buf: Vec<u8> = Vec::new();
+    while off < to {
+        buf.clear();
+        let n = match std::io::BufRead::read_until(&mut reader, b'\n', &mut buf) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => n as u64,
+        };
+        off += n;
+        let mut line = buf.clone();
+        while matches!(line.last(), Some(&b'\n') | Some(&b'\r')) {
+            line.pop();
+        }
+        let Ok(text) = String::from_utf8(line) else {
+            continue;
+        };
+        if text.is_empty() {
+            continue;
+        }
+        out.push(text);
+    }
     out
 }
 
@@ -2810,7 +3229,7 @@ mod tests {
             frame("done", "", 8),
         ];
         let f = StreamScratch::new("coalesce", &lines);
-        let w = load_replay_window_at(&f.0, ReplayMode::Rounds { before_seq: None, rounds: 10 });
+        let w = load_replay_window_at(&f.0, ReplayMode::Rounds { before_seq: None, rounds: 10, max_bytes: None });
         assert_eq!(w.total_rounds, 1);
         assert_eq!(w.latest_seq, 8);
         assert_eq!(w.events.len(), 5, "delta runs must collapse: {:?}", w.events);
@@ -2834,11 +3253,11 @@ mod tests {
             frame("user", "问3", 7), frame("text", "答3", 8), frame("done", "", 9),
         ];
         let f = StreamScratch::new("pages", &lines);
-        let first = load_replay_window_at(&f.0, ReplayMode::Rounds { before_seq: None, rounds: 2 });
+        let first = load_replay_window_at(&f.0, ReplayMode::Rounds { before_seq: None, rounds: 2, max_bytes: None });
         assert_eq!(first.total_rounds, 3);
         assert_eq!(first.remaining_rounds, 1);
         assert_eq!(first.events[0]["eventSeq"], 4, "page starts at round 2's user frame");
-        let older = load_replay_window_at(&f.0, ReplayMode::Rounds { before_seq: Some(4), rounds: 2 });
+        let older = load_replay_window_at(&f.0, ReplayMode::Rounds { before_seq: Some(4), rounds: 2, max_bytes: None });
         assert_eq!(older.total_rounds, 1);
         assert_eq!(older.remaining_rounds, 0);
         assert_eq!(older.events[0]["eventSeq"], 1);
@@ -2859,7 +3278,7 @@ mod tests {
             frame("done", "", 7),
         ];
         let f = StreamScratch::new("no-user", &lines);
-        let w = load_replay_window_at(&f.0, ReplayMode::Rounds { before_seq: None, rounds: 10 });
+        let w = load_replay_window_at(&f.0, ReplayMode::Rounds { before_seq: None, rounds: 10, max_bytes: None });
         assert_eq!(w.total_rounds, 1, "headless stream counts as one round");
         assert_eq!(w.remaining_rounds, 0);
         assert_eq!(w.latest_seq, 7);
@@ -2870,12 +3289,12 @@ mod tests {
         assert_eq!(w.events[2]["text"], "答案");
         assert_eq!(w.events[3]["type"], "done");
         // before_seq 过滤语义保持一致：只取 < before 的帧，仍是一个无头轮
-        let older = load_replay_window_at(&f.0, ReplayMode::Rounds { before_seq: Some(5), rounds: 10 });
+        let older = load_replay_window_at(&f.0, ReplayMode::Rounds { before_seq: Some(5), rounds: 10, max_bytes: None });
         assert_eq!(older.total_rounds, 1);
         assert_eq!(older.events.len(), 2, "reason run + action_start: {:?}", older.events);
         assert_eq!(older.latest_seq, 7, "latestSeq still spans the whole file");
         // before_seq 早于全部帧：真正无可展示内容，保持空窗
-        let none = load_replay_window_at(&f.0, ReplayMode::Rounds { before_seq: Some(1), rounds: 10 });
+        let none = load_replay_window_at(&f.0, ReplayMode::Rounds { before_seq: Some(1), rounds: 10, max_bytes: None });
         assert_eq!(none.total_rounds, 0);
         assert!(none.events.is_empty());
     }
@@ -2887,7 +3306,7 @@ mod tests {
             frame("text", "C", 4), frame("done", "", 5),
         ];
         let f = StreamScratch::new("after", &lines);
-        let w = load_replay_window_at(&f.0, ReplayMode::After { after_seq: 1, limit: Some(2) });
+        let w = load_replay_window_at(&f.0, ReplayMode::After { after_seq: 1, limit: Some(2), max_bytes: None });
         assert_eq!(w.total_after, 4);
         assert_eq!(w.events.len(), 2);
         assert_eq!(w.events[0]["text"], "A", "no coalescing in recovery path");
@@ -2904,7 +3323,7 @@ mod tests {
         }).to_string();
         let lines = vec![frame("user", "问", 1), frame("text", "正文", 2), tool, frame("text", "续", 4)];
         let f = StreamScratch::new("nested-type", &lines);
-        let w = load_replay_window_at(&f.0, ReplayMode::Rounds { before_seq: None, rounds: 5 });
+        let w = load_replay_window_at(&f.0, ReplayMode::Rounds { before_seq: None, rounds: 5, max_bytes: None });
         assert_eq!(w.events.len(), 4, "tool frame must survive: {:?}", w.events);
         assert_eq!(w.events[2]["type"], "action_start");
         assert_eq!(w.events[2]["args"]["type"], "text");
@@ -2934,7 +3353,7 @@ mod tests {
             frame("done", "", 5),
         ];
         let f = StreamScratch::new("agent-coalesce", &lines);
-        let w = load_replay_window_at(&f.0, ReplayMode::Rounds { before_seq: None, rounds: 5 });
+        let w = load_replay_window_at(&f.0, ReplayMode::Rounds { before_seq: None, rounds: 5, max_bytes: None });
         assert_eq!(w.events.len(), 3, "agent run must collapse into one frame: {:?}", w.events);
         assert_eq!(w.events[1]["text"], "子代理输出");
         assert_eq!(w.events[1]["eventSeq"], 4, "group max seq must survive");
@@ -2961,7 +3380,7 @@ mod tests {
             frame("done", "", 7),
         ];
         let f = StreamScratch::new("agent-owner-buckets", &lines);
-        let w = load_replay_window_at(&f.0, ReplayMode::Rounds { before_seq: None, rounds: 5 });
+        let w = load_replay_window_at(&f.0, ReplayMode::Rounds { before_seq: None, rounds: 5, max_bytes: None });
         assert_eq!(w.events.len(), 6, "user + 4 owner buckets + done: {:?}", w.events);
         assert_eq!(w.events[1]["text"], "A1A2");
         assert_eq!(w.events[1]["coalesced"], 2);
@@ -2988,7 +3407,7 @@ mod tests {
             frame("done", "", 7),
         ];
         let f = StreamScratch::new("agent-mixed", &lines);
-        let w = load_replay_window_at(&f.0, ReplayMode::Rounds { before_seq: None, rounds: 5 });
+        let w = load_replay_window_at(&f.0, ReplayMode::Rounds { before_seq: None, rounds: 5, max_bytes: None });
         assert_eq!(w.events.len(), 5, "user + main + agent + main + done: {:?}", w.events);
         assert_eq!(w.events[1]["text"], "主线");
         assert!(w.events[1].get("args").is_none(), "main-line frame unchanged");
@@ -3014,7 +3433,7 @@ mod tests {
         };
         let lines = vec![frame("user", "问", 1), spoof(2), spoof(3)];
         let f = StreamScratch::new("fake-agent-keys", &lines);
-        let w = load_replay_window_at(&f.0, ReplayMode::Rounds { before_seq: None, rounds: 5 });
+        let w = load_replay_window_at(&f.0, ReplayMode::Rounds { before_seq: None, rounds: 5, max_bytes: None });
         assert_eq!(w.events.len(), 2, "main-line deltas still coalesce: {:?}", w.events);
         assert!(w.events[1].get("args").is_none());
         assert_eq!(w.events[1]["coalesced"], 2);
@@ -3030,7 +3449,7 @@ mod tests {
             agent_delta("B", 3, "sub-a", "explore", "inv-1", "thinking"),
         ];
         let f = StreamScratch::new("agent-after", &lines);
-        let w = load_replay_window_at(&f.0, ReplayMode::After { after_seq: 1, limit: None });
+        let w = load_replay_window_at(&f.0, ReplayMode::After { after_seq: 1, limit: None, max_bytes: None });
         assert_eq!(w.total_after, 2);
         assert_eq!(w.events.len(), 2);
         assert_eq!(w.events[0]["text"], "A");
@@ -3061,13 +3480,186 @@ mod tests {
             r#"{"type" : "done", "eventSeq" : 4, "runId" : "run-j"}"#.to_string(),
         ];
         let f = StreamScratch::new("java-spaced", &lines);
-        let w = load_replay_window_at(&f.0, ReplayMode::Rounds { before_seq: Some(4), rounds: 3 });
+        let w = load_replay_window_at(&f.0, ReplayMode::Rounds { before_seq: Some(4), rounds: 3, max_bytes: None });
         assert_eq!(w.latest_seq, 4, "spaced eventSeq must be probed");
         assert_eq!(w.total_rounds, 1, "spaced type=user must be probed");
         assert_eq!(w.events.len(), 2, "user + coalesced text (done@4 is excluded by beforeSeq)");
         assert_eq!(w.events[1]["text"], "AB");
         assert_eq!(w.events[1]["eventSeq"], 3);
         assert_eq!(w.last_run_id.as_deref(), Some("run-j"));
+    }
+
+    // ─── Byte-budget paging & incremental probe index (2026-11-25) ────────
+    //
+    // Two contracts the mobile "every task opens degraded + slow" fix rests on:
+    // (1) an over-budget Rounds page keeps the window TAIL and reports the
+    // dropped head as pageable rounds (hasMore/remainingRounds), so a single
+    // relay frame can never exceed the device-side 16 MB read limit;
+    // (2) the probe index is reused across calls on an append-only file and
+    // invalidated on any non-growth length change.
+
+    #[test]
+    fn rounds_byte_budget_keeps_tail_and_pages_head() {
+        // Three rounds; round 1 carries a fat text line so the budget can
+        // only fit rounds 2+3.
+        let fat = "X".repeat(400);
+        let lines = vec![
+            frame("user", "问1", 1),
+            frame("text", &fat, 2),
+            frame("done", "", 3),
+            frame("user", "问2", 4),
+            frame("text", "答2", 5),
+            frame("done", "", 6),
+            frame("user", "问3", 7),
+            frame("text", "答3", 8),
+            frame("done", "", 9),
+        ];
+        let f = StreamScratch::new("budget", &lines);
+        let budget: u64 = lines[3..].iter().map(|l| l.len() as u64 + 1).sum();
+        let w = load_replay_window_at(
+            &f.0,
+            ReplayMode::Rounds {
+                before_seq: None,
+                rounds: 10,
+                max_bytes: Some(budget),
+            },
+        );
+        assert!(w.truncated, "the fat head must be dropped by the budget");
+        assert_eq!(w.total_rounds, 3);
+        assert_eq!(w.remaining_rounds, 1, "dropped round 1 must stay pageable");
+        let first_seq = w.events[0]["eventSeq"].as_i64().unwrap();
+        assert_eq!(first_seq, 4, "tail starts at round 2's user frame");
+        assert_eq!(w.events.last().unwrap()["type"], "done");
+        assert_eq!(w.events.last().unwrap()["eventSeq"], 9);
+
+        // Paging the head back with beforeSeq=firstSeq returns exactly round 1.
+        let head = load_replay_window_at(
+            &f.0,
+            ReplayMode::Rounds {
+                before_seq: Some(first_seq),
+                rounds: 10,
+                max_bytes: None,
+            },
+        );
+        assert_eq!(head.total_rounds, 1);
+        assert_eq!(head.remaining_rounds, 0);
+        assert_eq!(head.events[0]["eventSeq"], 1);
+        assert_eq!(head.events[1]["text"], fat, "fat line must survive intact");
+
+        // A generous budget truncates nothing.
+        let full = load_replay_window_at(
+            &f.0,
+            ReplayMode::Rounds {
+                before_seq: None,
+                rounds: 10,
+                max_bytes: Some(1 << 20),
+            },
+        );
+        assert!(!full.truncated);
+        assert_eq!(full.events.len(), 9);
+    }
+
+    #[test]
+    fn probe_index_reuses_prefix_on_append_and_invalidates_on_rewrite() {
+        let lines = vec![
+            frame("user", "问1", 1),
+            frame("text", "答1", 2),
+            frame("done", "", 3),
+        ];
+        let f = StreamScratch::new("index", &lines);
+        let w1 = load_replay_window_at(&f.0, ReplayMode::Rounds { before_seq: None, rounds: 10, max_bytes: None });
+        assert_eq!(w1.total_rounds, 1);
+        assert_eq!(w1.latest_seq, 3);
+
+        // Append a second round: the cached prefix must be reused (the result
+        // is identical either way, so assert the cache entry advanced).
+        let mut more = std::fs::read_to_string(&f.0).unwrap();
+        more.push_str(&(frame("user", "q2", 4) + "\n"));
+        more.push_str(&(frame("text", "ans2", 5) + "\n"));
+        more.push_str(&(frame("done", "", 6) + "\n"));
+        std::fs::write(&f.0, &more).unwrap();
+        let w2 = load_replay_window_at(&f.0, ReplayMode::Rounds { before_seq: None, rounds: 10, max_bytes: None });
+        assert_eq!(w2.total_rounds, 2);
+        assert_eq!(w2.latest_seq, 6);
+        {
+            let cache = stream_index_cache().lock().unwrap();
+            let e = cache.get(&f.0).expect("grown file must keep a cache entry");
+            assert_eq!(e.covered_len, more.len() as u64);
+            assert_eq!(e.probes.len(), 6);
+        }
+
+        // Same-length rewrite (swap payload bytes 1:1, ASCII so byte length
+        // is preserved): length did not grow, so reuse now hinges on mtime —
+        // advance it explicitly (coarse-tick filesystems could otherwise stamp
+        // both writes identically and make this test flaky) and assert the
+        // entry is dropped and rebuilt from the new content.
+        let rewritten = more.replace("ans2", "ZZZZ");
+        assert_eq!(rewritten.len(), more.len(), "the rewrite must be byte-length preserving");
+        std::fs::write(&f.0, &rewritten).unwrap();
+        let future = std::time::SystemTime::now() + std::time::Duration::from_secs(5);
+        std::fs::File::options()
+            .write(true)
+            .open(&f.0)
+            .unwrap()
+            .set_modified(future)
+            .unwrap();
+        let w3 = load_replay_window_at(&f.0, ReplayMode::Rounds { before_seq: None, rounds: 10, max_bytes: None });
+        assert_eq!(w3.events[4]["text"], "ZZZZ", "same-length rewrite must invalidate the index");
+
+        // Unchanged re-open (same length AND same mtime): the finished-session
+        // path. The entry must be reused, not rebuilt — assert via the cache
+        // entry surviving with full coverage.
+        let w4 = load_replay_window_at(&f.0, ReplayMode::Rounds { before_seq: None, rounds: 10, max_bytes: None });
+        assert_eq!(w4.events[4]["text"], "ZZZZ");
+        {
+            let cache = stream_index_cache().lock().unwrap();
+            let e = cache.get(&f.0).expect("unchanged file must stay cached");
+            assert_eq!(e.covered_len, rewritten.len() as u64);
+        }
+    }
+
+    /// A partial line at EOF (writer mid-append, no `\n` yet) must NOT enter
+    /// the cached index, and `covered_len` must stop at the last complete
+    /// line: committing the pre-scan metadata length while the probes cover
+    /// more would make the next continuation scan re-probe the overlap and
+    /// duplicate frames in replay. Completing the line must then pick it up.
+    #[test]
+    fn probe_index_does_not_cache_a_partial_last_line() {
+        let lines = vec![
+            frame("user", "问1", 1),
+            frame("text", "答1", 2),
+            frame("done", "", 3),
+        ];
+        let f = StreamScratch::new("partial", &lines);
+        // Append a half-written line (no terminator): simulates a writer that
+        // has not finished the record yet.
+        let half = frame("user", "问2", 4);
+        {
+            use std::io::Write;
+            let mut fh = std::fs::OpenOptions::new().append(true).open(&f.0).unwrap();
+            fh.write_all(half.as_bytes()).unwrap();
+        }
+        let w1 = load_replay_window_at(&f.0, ReplayMode::Rounds { before_seq: None, rounds: 10, max_bytes: None });
+        assert_eq!(w1.total_rounds, 1, "the unterminated line must not be indexed");
+        assert_eq!(w1.latest_seq, 3);
+        let complete_prefix: u64 = (lines.join("\n").len() + 1) as u64;
+        {
+            let cache = stream_index_cache().lock().unwrap();
+            let e = cache.get(&f.0).expect("complete prefix must be cached");
+            assert_eq!(e.covered_len, complete_prefix, "coverage must stop at the last newline");
+            assert_eq!(e.probes.len(), 3);
+        }
+        // The writer finishes the record: the continuation scan must index it
+        // exactly once (no duplicate from re-probing the overlap).
+        {
+            use std::io::Write;
+            let mut fh = std::fs::OpenOptions::new().append(true).open(&f.0).unwrap();
+            fh.write_all(b"\n").unwrap();
+        }
+        let w2 = load_replay_window_at(&f.0, ReplayMode::Rounds { before_seq: None, rounds: 10, max_bytes: None });
+        assert_eq!(w2.total_rounds, 2);
+        assert_eq!(w2.latest_seq, 4);
+        assert_eq!(w2.events.iter().filter(|e| e.get("eventSeq").and_then(|s| s.as_i64()) == Some(4)).count(), 1, "the completed line must appear exactly once");
     }
 
     // ─── Structured `failed` flag on replay ────────────────────────────────

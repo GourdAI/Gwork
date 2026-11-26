@@ -241,6 +241,9 @@ export type ChatMessage = {
 	/** 摘要展开态，默认收起：只留最终正文 */
 	compactOpen: boolean
 	counts: { tools: number; reasons: number; agents: number; batches: number; texts: number }
+	/** 历史回放失败后仅展示 /messages 文本快照：过程与产物卡片不可用。
+	 *  非空时气泡展示提示并提供重试入口，绝不把降级态伪装成完整消息。 */
+	degradedNotice: string
 }
 
 export type Conversation = {

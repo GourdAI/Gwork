@@ -7,7 +7,9 @@
  * 纯文本变换，不解析 markdown 语法（语法解析在 markdown-parse.uts 里）。
  *
  * 设计口径（与桌面 md-content 一致）：
- * - 正文 14px/22px；标题 h1 20 → h6 14 加粗；代码块深底等宽、行内 code 浅底；
+ * - 正文 14px/24px；标题 h1 20 → h6 14 加粗；代码块深底等宽、行内 code 浅底；
+ * - UCSS 安全：不用 margin/padding/border 简写（原生端静默失效），块间距由
+ *   app-md-text 的分段容器单边 margin-bottom 承担。
  * - 引用块左侧竖线；表格边框中性半透明色（深浅主题都可读）；
  * - 链接品牌蓝；图片 max-width 防溢出。
  *
@@ -162,32 +164,41 @@ function preRanges(source: string): Array<[number, number]> {
 export function prepareMdHtml(html: string, dark: boolean): string {
 	const text = dark ? '#e8eaed' : '#1f2328'
 	const dim = dark ? '#9aa0a6' : '#6b7280'
+	// 【UCSS 纪律】rich-text HTML 内联样式里的 margin/padding/border 简写解析不可靠，
+	// 会静默失效：桌面 .md-content 的段落间距在手机上表现为「换行连在一起」。
+	// 块间呼吸感一律由 app-md-text 的分段容器单边 margin-bottom 承担；这里只保留
+	// 长属性展开的 padding，不用 margin/padding/border 简写。
+	const pad = (top: number, right: number, bottom: number, left: number): string =>
+		'padding-top:' + top.toString() + 'px;padding-right:' + right.toString() + 'px;'
+		+ 'padding-bottom:' + bottom.toString() + 'px;padding-left:' + left.toString() + 'px;'
 	let result = html
-	result = styleMdOpenTags(result, 'h1', 'font-size:20px;line-height:28px;font-weight:700;margin:10px 0 6px;color:' + text + ';')
-	result = styleMdOpenTags(result, 'h2', 'font-size:18px;line-height:26px;font-weight:700;margin:10px 0 6px;color:' + text + ';')
-	result = styleMdOpenTags(result, 'h3', 'font-size:16px;line-height:24px;font-weight:700;margin:8px 0 4px;color:' + text + ';')
-	result = styleMdOpenTags(result, 'h4', 'font-size:15px;line-height:23px;font-weight:600;margin:8px 0 4px;color:' + text + ';')
-	result = styleMdOpenTags(result, 'h5', 'font-size:14px;line-height:22px;font-weight:600;margin:6px 0 4px;color:' + text + ';')
-	result = styleMdOpenTags(result, 'h6', 'font-size:14px;line-height:22px;font-weight:600;margin:6px 0 4px;color:' + dim + ';')
-	result = styleMdOpenTags(result, 'p', 'margin:4px 0;')
-	result = styleMdOpenTags(result, 'ul', 'margin:4px 0;padding-left:22px;')
-	result = styleMdOpenTags(result, 'ol', 'margin:4px 0;padding-left:22px;')
-	result = styleMdOpenTags(result, 'li', 'margin:2px 0;line-height:22px;')
-	result = styleMdOpenTags(result, 'blockquote', 'margin:6px 0;padding-left:10px;border-left:3px solid rgba(127,127,127,0.38);color:' + dim + ';')
+	result = styleMdOpenTags(result, 'h1', 'font-size:20px;line-height:28px;font-weight:700;color:' + text + ';')
+	result = styleMdOpenTags(result, 'h2', 'font-size:18px;line-height:26px;font-weight:700;color:' + text + ';')
+	result = styleMdOpenTags(result, 'h3', 'font-size:16px;line-height:24px;font-weight:700;color:' + text + ';')
+	result = styleMdOpenTags(result, 'h4', 'font-size:15px;line-height:23px;font-weight:600;color:' + text + ';')
+	result = styleMdOpenTags(result, 'h5', 'font-size:14px;line-height:22px;font-weight:600;color:' + text + ';')
+	result = styleMdOpenTags(result, 'h6', 'font-size:14px;line-height:22px;font-weight:600;color:' + dim + ';')
+	result = styleMdOpenTags(result, 'p', 'line-height:24px;')
+	result = styleMdOpenTags(result, 'ul', 'padding-left:22px;line-height:24px;')
+	result = styleMdOpenTags(result, 'ol', 'padding-left:22px;line-height:24px;')
+	result = styleMdOpenTags(result, 'li', 'line-height:24px;')
+	result = styleMdOpenTags(result, 'blockquote', 'padding-left:10px;border-left-width:3px;border-left-style:solid;border-left-color:rgba(127,127,127,0.38);color:' + dim + ';')
 	result = styleMdOpenTags(result, 'a', 'color:#2979ff;')
 	// 代码块：深底 + 显式浅色文字。rich-text 不继承 color，块内文字必须钉死浅色，
 	// 否则亮色主题下深底黑字不可读。区间必须按「原始 html」计算并最先处理：
 	// 后续每次注入都会改变字符串长度，先算后注的偏移全部作废（skipRanges 会错位）。
 	const blocks = preRanges(result)
 	result = styleMdOpenTagsInRanges(result, 'code', 'font-family:monospace;font-size:13px;line-height:20px;color:#e5e7eb;', blocks)
-	result = styleMdOpenTags(result, 'pre', 'margin:6px 0;padding:10px;border-radius:8px;background-color:#111827;color:#e5e7eb;')
-	// 行内 code（pre 之外）：浅灰底等宽，跟随正文色。区间随上面两次注入平移，
-	// 这里不再按偏移跳过，改为逐个检查该 code 前面最近的未闭合 pre（见 styleInlineCode）
-	result = styleInlineCode(result, 'font-family:monospace;font-size:13px;line-height:20px;background-color:rgba(127,127,127,0.16);')
-	result = styleMdOpenTags(result, 'table', 'border-collapse:collapse;margin:6px 0;')
-	result = styleMdOpenTags(result, 'th', 'border:1px solid rgba(127,127,127,0.38);padding:6px 8px;font-weight:700;background-color:rgba(127,127,127,0.12);')
-	result = styleMdOpenTags(result, 'td', 'border:1px solid rgba(127,127,127,0.38);padding:6px 8px;')
+	result = styleMdOpenTags(result, 'pre', pad(10, 10, 10, 10) + 'border-radius:8px;background-color:#111827;color:#e5e7eb;')
+	// 行内 code（pre 之外）：PC .md-content code 的 2px×7px 浅底胶囊。圆角与四边
+	// padding 必须显式注入，否则 native rich-text 只画贴字直角灰块；跨行时灰底还会连片。
+	const inlineCode: string = 'font-family:monospace;font-size:13px;line-height:20px;color:' + text + ';'
+		+ 'background-color:rgba(127,127,127,0.16);' + pad(2, 7, 2, 7) + 'border-radius:5px;'
+	result = styleInlineCode(result, inlineCode)
+	result = styleMdOpenTags(result, 'table', 'border-collapse:collapse;')
+	result = styleMdOpenTags(result, 'th', 'border-top-width:1px;border-right-width:1px;border-bottom-width:1px;border-left-width:1px;border-top-style:solid;border-right-style:solid;border-bottom-style:solid;border-left-style:solid;border-top-color:rgba(127,127,127,0.38);border-right-color:rgba(127,127,127,0.38);border-bottom-color:rgba(127,127,127,0.38);border-left-color:rgba(127,127,127,0.38);' + pad(6, 8, 6, 8) + 'font-weight:700;background-color:rgba(127,127,127,0.12);')
+	result = styleMdOpenTags(result, 'td', 'border-top-width:1px;border-right-width:1px;border-bottom-width:1px;border-left-width:1px;border-top-style:solid;border-right-style:solid;border-bottom-style:solid;border-left-style:solid;border-top-color:rgba(127,127,127,0.38);border-right-color:rgba(127,127,127,0.38);border-bottom-color:rgba(127,127,127,0.38);border-left-color:rgba(127,127,127,0.38);' + pad(6, 8, 6, 8))
 	result = styleMdOpenTags(result, 'img', 'max-width:100%;')
-	result = styleMdOpenTags(result, 'hr', 'margin:10px 0;border:none;border-top:1px solid rgba(127,127,127,0.3);')
+	result = styleMdOpenTags(result, 'hr', 'border-top-width:1px;border-top-style:solid;border-top-color:rgba(127,127,127,0.3);')
 	return result
 }

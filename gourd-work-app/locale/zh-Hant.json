@@ -260,6 +260,7 @@
 	"chat.deviceRequired": "請先在左上角選擇一台線上裝置",
 	"chat.deviceOffline": "裝置已離線，請確認桌面用戶端在線後重試",
 	"chat.loadFailed": "載入失敗，請稍後重試",
+	"chat.history.degraded": "過程與產物暫不可用，目前僅顯示已儲存的正文",
 	"chat.sendFailed": "傳送失敗，請稍後重試",
 	"chat.metaTool": "GWork · 正在使用 {name}",
 	"chat.metaError": "GWork · 處理出錯",
