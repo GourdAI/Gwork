@@ -365,6 +365,11 @@ function loadWheelHandler(jsSrc, dir) {
         membersOf: (h) => h._members || [],
         paintWindow: () => { calls.painted++; },
         moveWindowScrollbar: () => {},
+        /* 【几何新鲜度 · 2026-11-25】wheel 消费缓存前差分实测：桩节点无
+           getBoundingClientRect → windowExtentLive 不可差分（null）→
+           语义上等于「无缓存」，这里按「无漂移」处理（不触发重算），
+           E1~E4 断言的边界/让位行为不受影响。 */
+        ensureWindowFresh: () => {},
         console
     };
     const names = Object.keys(deps);

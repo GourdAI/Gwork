@@ -114,6 +114,9 @@
         balance: '', avatar_url: ''
     };
     var selfLoaded = false;
+    /* 首帧状态是否已回显：启动恢复的 applyStatus 不算「翻转」，不派发
+       auth-changed（否则每次开应用都触发一轮官方模型强制重取）。 */
+    var statusInitialized = false;
     var entry = null;
     var backdrop = null;
     var popover = null;
@@ -724,7 +727,62 @@
             if (prev !== state.signed_in) show();  // 登录态翻转：重建弹层骨架
             else refreshView();                    // 同态刷新：只更文本，不动表单
         }
+        /* 登录态翻转（侧栏登录成功 / 会话被服务端判死清理）统一在此派发事件：
+           官方模型源面板与聊天模型下拉都靠它重载。首帧（启动恢复回显）不派发，
+           避免每次开应用都白打一轮强制重取。 */
+        var flip = statusInitialized && prev !== state.signed_in;
+        statusInitialized = true;
         if (state.signed_in) refreshSelf();
+        if (flip) notifyAuthChanged();
+    }
+
+    /* 登录态变化广播：官方模型面板重载登录态与模型列表、聊天模型下拉补拉
+       /web/chat/models。接收方只做幂等重载，重复派发无副作用。 */
+    function notifyAuthChanged() {
+        try { $(document).trigger('gwork:auth-changed'); } catch (_) {}
+    }
+
+    /* 服务端登录态校验：本地 status() 只看本地 access token 过期时间，服务端
+       已撤销的会话（改密码 / 他端退出 / 绝对上限到期）在壳的 keeper 清理落地
+       前仍会显示「已登录」——侧栏假登录态的真因。
+
+       【必须走 authSelf，不能用 authRefresh】refresh() 对「access token 仍在
+       有效期内」直接本地短路返回（auth.rs REFRESH_LEAD_SECS 分支），根本不发
+       网络请求；而服务端撤销会话后本地 JWT 通常还有最长 15 分钟有效期，
+       authRefresh 校验恰好在这个假登录窗口里全程空转。authSelf →
+       authorized_get('/api/user/self') 每次都真发请求，服务端 terminal 判死
+       时壳已 mark_session_dead 清掉本地会话，回拉 authStatus 即同帧翻成
+       未登录；网络/限流类失败不动状态，等下一轮。顺带刷新余额/头像展示。 */
+    var VERIFY_MIN_INTERVAL_MS = 5 * 60 * 1000;
+    var lastVerifyAt = 0;
+    var verifying = false;
+
+    function verifyAgainstServer() {
+        var i = ipc();
+        if (!i || typeof i.authSelf !== 'function') return;
+        var nowMs = Date.now();
+        if (verifying || nowMs - lastVerifyAt < VERIFY_MIN_INTERVAL_MS) return;
+        lastVerifyAt = nowMs;
+        verifying = true;
+        i.authSelf().then(function (raw) {
+            verifying = false;
+            /* 会话被服务端认可：顺手把最新余额/头像刷进弹层（复用
+               refreshSelf 的解析纪律：只取 quota_display，不做客户端换算）。 */
+            var d = (raw && raw.data) ? raw.data : raw;
+            if (d && typeof d === 'object') {
+                if (typeof d.quota_display === 'string' && d.quota_display !== '') {
+                    state.balance = d.quota_display;
+                }
+                state.avatar_url = d.avatar_url || d.avatar || state.avatar_url;
+                renderCard();
+                if (isOpen()) refreshView();
+            }
+        }, function () {
+            verifying = false;
+            i.authStatus().then(applyStatus, function () {
+                // 状态也读不到：保留现状，下一轮轮询再试。
+            });
+        });
     }
 
     /* authSelf → invoke('auth_self') → authorized_get → parse_api_response
@@ -759,7 +817,13 @@
             applyStatus({ signed_in: false, username: '', display_name: '' });
             return Promise.resolve();
         }
-        return ipc().authStatus().then(applyStatus, function () {
+        return ipc().authStatus().then(function (s) {
+            applyStatus(s);
+            /* 本地说已登录才值得问服务端：借 authSelf 真发一次鉴权请求校验
+               会话是否仍被服务端认可（节流 5 分钟），terminal 时壳已清本地、
+               回拉即翻态。 */
+            if (s && s.signed_in) verifyAgainstServer();
+        }, function () {
             // 后台/模块暂不可用：保留上次状态，不把入口误显示成已登录。
         });
     }
@@ -826,11 +890,10 @@
         call.then(function (s) {
             setBusy(false);
             authMode = 'login';
-            applyStatus(s);   // 内部会收起登录弹框
-            /* 官方模型源面板依赖此事件重载登录态与官方模型列表。
+            /* applyStatus 检测到登录态翻转会派发 gwork:auth-changed：
                壳在 auth_login/auth_register 之后已把用户 key 与 /v1/models
-               写进内核进程内存；这里只通知 UI 刷新，不接触任何凭据。 */
-            try { $(document).trigger('gwork:auth-changed'); } catch (_) {}
+               写进内核进程内存，官方模型面板与聊天下拉据此重载。 */
+            applyStatus(s);   // 内部会收起登录弹框
         }, function (e) {
             setBusy(false);
             setHint('modal', errText(e), 'error');
@@ -849,11 +912,11 @@
         i.authLogout().then(function (s) {
             setBusy(false);
             authMode = 'login';
+            /* applyStatus 的翻转派发会通知模型设置页回到「未登录」引导、
+               聊天下拉摘掉官方模型（内核已清掉官方凭据内存态）。 */
             applyStatus(s);
             /* 退出后弹层重建为未登录设置菜单（参考图语义：退出即回未登录态） */
             if (isOpen()) show();
-            /* 内核已清掉官方凭据内存态；通知模型设置页回到「未登录」引导。 */
-            try { $(document).trigger('gwork:auth-changed'); } catch (_) {}
         }, function (e) {
             setBusy(false);
             setHint('pop', errText(e), 'error');

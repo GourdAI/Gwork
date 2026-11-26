@@ -660,3 +660,144 @@ test('★ refreshWindowsIn：盖子 open 且成员超限 → 无窗也重建限�
     assert.ok(h._winOverflow > 0, '重建后 overflow 恢复正值');
     assert.ok(layoutSpanOf(rows) <= WIN + 1, '重建后批次占位受视窗约束');
 });
+
+/* ═══ 滚动几何新鲜度（2026-11-25 用户报「内层没滚到顶/底外部就联动滚动 +
+   上滑时元素闪现超出折叠框」）═══
+   真因：wheel/拖动快速路径只消费 refreshWindow 秒级缓存的 _winOverflow/
+   _winMetrics/_winGeom，流式内容增长后缓存陈旧：
+     ① overflow 陈旧 → 提前判底放行（真机实锤：末卡体增长后内部还有 295px
+        余量，wheel 仍按旧 overflow 放行，外部页面开始联动滚动）；
+     ② metrics 陈旧 → paintWindow 按旧行位画 clip（真机实锤：clip 只裁 118px，
+        增长的末成员底超出视窗底 415px，闪现到批次外直到 ticker 自愈）。
+   修复：windowExtentLive 末成员底差分实测（单探针对消 translateY），
+   |d|>0.5px 先全量重算再消费；wheel 一律 follow=false（贴底追赶交 ticker）。
+   桩环境：_layoutVer 折叠几何桩让 getBoundingClientRect 现算布局位，
+   改末成员 _h 即可模拟「缓存陈旧」——差分探针必须感知并触发重算。 */
+test('★ 陈旧缓存消费：内容增长后 wheel 必须先重算再滚，不得提前判底放行', () => {
+    const b = mkLayoutBubble();
+    const sess = mkSess(b);
+    let h = null;
+    const rows = [];
+    for (let i = 0; i < 12; i++) { const r = addRow(b, sess); rows.push(r.card); h = r.header; }
+    assert.ok(h._classes.has('turn-batch-windowed'), '前置：已建窗');
+    assert.equal(h._winPos, h._winOverflow, '前置：running 贴底');
+
+    /* 模拟流式增长：末成员卡体长高 100px，但【不】走 refreshWindow（缓存陈旧态） */
+    rows[rows.length - 1]._h += 100;
+    const staleOverflow = h._winOverflow;
+
+    /* 贴底态下滑（用户继续往下滚新内容）：真实内部还有 ~100px 余量，
+       修复前 wheel 按陈旧 overflow 判到底、放行外部（联动滚动铁证）；
+       修复后差分感知增长 → 全量重算 → 内部消费、preventDefault。 */
+    const ev = b.wheel(rows[5], 60);
+    assert.ok(ev && ev.prevented, '内部还有余量时 wheel 必须接管，不得放行外部');
+    assert.ok(h._winOverflow > staleOverflow, '消费前必须重算：overflow 计入增长');
+    assert.equal(h._winPos, staleOverflow + 60, '按重算后的 overflow 继续内部滚动');
+
+    /* 真正滚到重算后的底部：下一次 wheel 才放行（边界语义不变） */
+    const evBottom = b.wheel(rows[5], 100000);
+    assert.equal(h._winPos, h._winOverflow, '滚到真实底部');
+    const evPass = b.wheel(rows[5], 50);
+    assert.ok(evPass && !evPass.prevented, '真到边界必须放行给外部（不回退）');
+});
+
+test('★ 陈旧缓存消费：上滑时 clip 必须按重算后行位裁剪，内容不得溢出视窗', () => {
+    const b = mkLayoutBubble();
+    const sess = mkSess(b);
+    let h = null;
+    const rows = [];
+    for (let i = 0; i < 12; i++) { const r = addRow(b, sess); rows.push(r.card); h = r.header; }
+
+    /* 末成员长高 100px 且缓存陈旧 → 上滑（负 delta）触发差分重算。
+       断言核心：重算后的 metrics/geom 已吸收增长，paintWindow 按新行位
+       画 clip —— 末成员底（视觉位 rect.bottom，含 translateY）不得超出
+       视窗底（首成员布局顶 + WIN）。修复前 clip 按旧行位只裁旧高度，
+       增长内容闪现到折叠框外（真机实锤 415px）。 */
+    rows[rows.length - 1]._h += 100;
+    const ev = b.wheel(rows[5], -60);
+    assert.ok(ev && ev.prevented, '上滑在内部余量内必须接管');
+
+    /* 精确断言（与实现/真机探针同口径）：clip 下裁量必须等于
+       【重算后】末行底超出视窗底的部分 —— rowBottom(新) - (pos + WIN)。
+       修复前按陈旧行位只裁旧高度，增长内容闪现到折叠框外。 */
+    const lastRow = rows[rows.length - 1];
+    const idx = h._winVisible.indexOf(lastRow);
+    const lastM = h._winMetrics[idx];
+    const rowBottom = h._winGeom.rows[idx] + lastM.h;
+    const expectClip = Math.max(0, rowBottom - (h._winPos + WIN));
+    const cp = lastRow.style.clipPath || '';
+    const m = /inset\(([\d.]+)px 0 ([\d.]+)px 0\)/.exec(cp);
+    assert.ok(m, '末成员必须有 clip（增长后按新行位裁）: ' + cp);
+    assert.ok(Math.abs(parseFloat(m[2]) - expectClip) < 1,
+        'clip 下裁量必须按重算后行位：got ' + m[2] + ' expect ' + expectClip);
+
+    /* 重算吸收：metrics 缓存的末行高度必须已含增长量 */
+    assert.equal(lastM.h, 125, 'metrics 必须重算（含增长后的末行高）');
+});
+
+/* ═══ code review 回归（2026-11-25）：差分探针必须与缓存 metrics【同纲】═══
+   真机实锤：缓存 lastM.top 是 offsetTop 换算的纯布局位（内容坐标，不随外层
+   滚动变）；旧探针直接拿 rect.top（视口坐标）差分 —— 外层滚过 N px 后 d 恒
+   偏 N（纯外层 scrollTop=40、零增长，wheel 仍触发全量重算 remeasured=true）。
+   后果：ticker「静态批零成本跳过」失效每秒盲刷复活；外层滚动中每个 wheel/
+   拖动 move 都强制同步布局（清补偿→flush→重量），高频滚动卡顿。
+   修复：探针复用 memberMetrics 同一换算式（offsetTop + offsetParent.rect.top
+   + inset - scrollTop），两侧同纲、外层滚动恒对消。
+   本桩把气泡挂进【真实滚动容器模型】：offsetParent.rect.top 随 scrollTop 变、
+   offsetTop 是内容坐标 —— 与真浏览器 .messages-wrap 行为一致。 */
+test('★ 差分探针同纲：纯外层滚动（零增长）不得触发 wheel 全量重算', () => {
+    const b = mkLayoutBubble();
+    const sess = mkSess(b);
+    let h = null;
+    const rows = [];
+    for (let i = 0; i < 12; i++) { const r = addRow(b, sess); rows.push(r.card); h = r.header; }
+    assert.ok(h._classes.has('turn-batch-windowed'), '前置：已建窗');
+
+    /* 滚动容器模型（与真浏览器 .messages-wrap 行为一致）：
+       wrap 是【固定视口框】（rect.top 恒 0，滚动只动内容不动框），
+       scrollTop 表示内容上移量；成员 offsetTop = 内容坐标（折叠布局现算，
+       不随 scrollTop 变）；成员视口 rect = 内容布局位 - scrollTop + translateY。
+       实现换算式 offsetTop + op.rect.top + inset - op.scrollTop 恰好把
+       rect 侧的 -scrollTop 加回来 → 缓存与探针两侧恒同纲（真机 d_new=0 实证）。 */
+    const wrap = el('div', ['messages-wrap'], 0);
+    wrap.scrollTop = 0;
+    wrap.getBoundingClientRect = () => ({ top: 0, height: 600, bottom: 600 });
+    b.parentNode = wrap;   /* 只挂父链供 offsetParent 换算，children 结构不动 */
+    const attach = () => {
+        for (const r of rows) {
+            r.offsetParent = wrap;
+            Object.defineProperty(r, 'offsetTop', { get: () => layoutTopOf(b, r), configurable: true });
+            /* 视口 rect：内容布局位 - 外层滚动量 + 自身 translateY（与真 DOM 同构） */
+            r.getBoundingClientRect = () => {
+                let ty = 0;
+                const m = /translateY\((-?[\d.]+)px\)/.exec(r.style.transform || '');
+                if (m) ty = parseFloat(m[1]);
+                const top = layoutTopOf(b, r) - wrap.scrollTop + ty;
+                return { top, height: r._h, bottom: top + r._h };
+            };
+        }
+    };
+    attach();
+    batch.refreshWindow(h, true);   /* 让缓存 metrics 走 offsetTop 换算纲（内容坐标） */
+    assert.ok(h._winMetrics[0].top >= 0, '前置：缓存已是内容坐标纲');
+
+    /* 纯外层滚动 40px、零内容增长 → wheel 上滑：
+       修复前 d=-40 → 误判漂移 → 全量重算（metrics 引用更换）；
+       修复后 d≈0 → 零重算快速路径，pos 精确 -60。 */
+    wrap.scrollTop = 40;
+    const metricsRef = h._winMetrics;
+    const posBefore = h._winPos;
+    const ovBefore = h._winOverflow;
+    const ev = b.wheel(rows[5], -60);
+    assert.ok(ev && ev.prevented, '内部余量内 wheel 必须接管');
+    assert.equal(h._winMetrics, metricsRef, '纯外层滚动不得触发全量重算（探针必须同纲对消）');
+    assert.equal(h._winPos, posBefore - 60, 'pos 按快速路径精确位移');
+    assert.equal(h._winOverflow, ovBefore, 'overflow 不变（零增长）');
+
+    /* 对照：同纲探针不得变瞎 —— 外层滚动 + 真实增长 100px 仍必须感知重算 */
+    rows[rows.length - 1]._h += 100;
+    const ev2 = b.wheel(rows[5], -60);
+    assert.ok(ev2 && ev2.prevented);
+    assert.notEqual(h._winMetrics, metricsRef, '真实增长必须触发重算（探针不得因同纲修复变瞎）');
+    assert.equal(h._winOverflow, ovBefore + 100, '重算吸收增长量');
+});

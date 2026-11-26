@@ -327,6 +327,14 @@
            减掉 scrollTop 后两坐标同纲，滚动到任何位置量测都稳定。
            桩 DOM 无 offsetTop/offsetParent → 回落 rect.top（零布局兼容）。 */
         var top = r.top;
+        /* 【冻结量测基准 · 2026-11-25 code review】把本次换算用的 offsetParent
+           基准（rect.top + inset - scrollTop）记在元素上：windowExtentLive 差分
+           探针必须用【同一冻结基准】重建 top，而不是读当前基准 —— 缓存 top 是
+           量测时刻的视口坐标，外层滚动后当前基准已平移，直接差分会把纯外层
+           滚动误判为几何漂移（真机实锤 scrollTop 40→120 时 d=-79.75）。
+           冻结后：探针 top = 当前 offsetTop + 冻结基准，外层滚动两侧恒对消，
+           只有真实布局变化（offsetTop/高度变）才产生非零差分。 */
+        el._winOpBase = null;
         if (typeof el.offsetTop === 'number' && el.offsetParent
                 && typeof el.offsetParent.getBoundingClientRect === 'function') {
             var op = el.offsetParent;
@@ -334,7 +342,8 @@
             var ost = el.ownerDocument.defaultView.getComputedStyle
                 ? el.ownerDocument.defaultView.getComputedStyle(op) : null;
             var inset = ost ? (parseFloat(ost.borderTopWidth) || 0) + (parseFloat(ost.paddingTop) || 0) : 0;
-            top = el.offsetTop + opr.top + inset - (op.scrollTop || 0);
+            el._winOpBase = opr.top + inset - (op.scrollTop || 0);
+            top = el.offsetTop + el._winOpBase;
         }
         return { h: r.height, mt: el._winMt, mb: el._winMb, top: top };
     }
@@ -371,6 +380,80 @@
            就超 232px）首末是同一节点恒等，被误判 additive ⇒ comp 多扣 mt0（2px），
            后续内容整体上提 2px。单一事实来源，杜绝两处判定分叉。 */
         return { rows: rows, total: total, additive: additive };
+    }
+
+    /* 【滚动几何新鲜度 · 2026-11-25 用户报「内层没滚到顶/底外部就联动滚动 +
+       上滑时元素闪现超出折叠框」】wheel/拖动走【零量测快速路径】（只消费
+       refreshWindow 秒级缓存的 _winOverflow/_winMetrics/_winGeom）——缓存是
+       【上一次量测的快照】，流式内容增长后它就是陈旧的：
+         · overflow 陈旧 → 提前判底放行（真实 Chromium 实测：末卡体增长后内部
+           明明还有 295px 余量，wheel 仍按旧 overflow 判到底、不 preventDefault，
+           外部页面开始联动滚动 —— 正是「内部还没到底外部就滚」）；
+         · metrics/geom 陈旧 → paintWindow 按旧行位画 clip（实测 clip 只裁 118px，
+           而增长的末成员底已超出视窗底 415px，溢出内容闪现到批次外，直到 ticker
+           下一秒重算才自愈 —— 正是「上滑时元素闪现超出折叠框」）。
+       修复：消费缓存前做【末成员底差分实测】——只读一个 getBoundingClientRect
+       （末成员），与缓存几何对消出增量 d：
+         d = (r.top + pos + r.height) - (lastM.top + lastM.h)
+       r.top 含 translateY(-pos)，加回 pos 即纯布局底；与缓存的 (lastM.top+lastM.h)
+       差分即批次总高增量。批次顶不动（增长只往下推），中段成员位移对「总高」
+       不可见 —— 单探针恰好完备。clip-path 不影响 rect、transform 已对消。
+       d 超阈值（0.5px 亚像素容差）→ 全量 refreshWindow 重建后再消费；未超 →
+       快速路径照走（保持零量测，不引入每 wheel 强制 reflow）。
+       返回 null 表示不可差分（无缓存/成员被删/隐藏会话）——调用方按需全量重算
+       或直接跳过（隐藏态重算是垃圾值，维持隐藏守卫语义）。
+       【code review 修复 2026-11-25 · 探针必须与 memberMetrics 同纲】缓存
+       lastM.top 是 offsetTop 换算的【纯布局位】（内容坐标，不随外层滚动变）；
+       旧探针直接拿 rect.top（视口坐标，随 .messages-wrap 滚动变）去差分 ——
+       外层滚过 N px 后 d 恒偏 N（真机实锤：纯外层 scrollTop=40、零增长，
+       wheel 仍触发全量重算 remeasured=true）。后果：
+         · ticker「静态批零成本跳过」在页面滚过后完全失效，每秒每批盲刷复活；
+         · 外层滚动中每个 wheel/拖动 move 都全量重算（清补偿→flush→重量），
+           wheel handler 内强制同步布局 → 高频滚动卡顿风险；
+         · follow=false 重算会按陈旧 pos 重画一帧再被本次滚动覆盖，无谓写放大。
+       修复：探针复用 memberMetrics 的同一换算式（offsetTop + offsetParent.rect.top
+       + border/padding inset - offsetParent.scrollTop），与缓存严格同纲 ——
+       外层滚动在两侧同时出现、差分恒对消；transform 仍由 +pos 对消。
+       桩 DOM 无 offsetTop/offsetParent → 回落 rect.top（契约测试零布局兼容）。 */
+    function windowExtentLive(header) {
+        var ms = header._winVisible, metrics = header._winMetrics;
+        if (!ms || !ms.length || !metrics || !metrics.length) return null;
+        if (hiddenFromRoot(header)) return null;   /* 隐藏会话 rect 全 0，差分即垃圾 */
+        var last = ms[ms.length - 1];
+        var lastM = metrics[metrics.length - 1];
+        if (!last || !last.parentNode || typeof last.getBoundingClientRect !== 'function') return null;
+        var pos = typeof header._winPos === 'number' ? header._winPos : 0;
+        var r = last.getBoundingClientRect();
+        /* 【探针必须重建【量测时刻】的同纲 top —— 用冻结基准，不读当前基准】
+           真机实锤（2026-11-25 code review，两组对照实验）：
+             · 缓存 lastM.top = 量测时 offsetTop + (op.rect.top + inset - op.scrollTop)，
+               是【量测时刻的视口坐标】（scrollTop=40 时量测 cachedTop=825=865-40）；
+             · 外层滚动后 rect.top 与 op 基准一起平移，但缓存停在量测时刻 ——
+               无论拿「当前 rect.top+pos」还是「当前 offsetTop+当前基准」去差分，
+               纯外层滚动都会产生 d=-N 的假漂移（实测 scrollTop 40→120，d=-79.75），
+               wheel/拖动/ticker 陷入全量重算风暴（每秒盲刷复活 + 高频强制布局）。
+           修复：memberMetrics 量测时把基准冻结在 el._winOpBase；探针用
+           【当前 offsetTop + 冻结基准】重建 —— 外层滚动不改 offsetTop（内容
+           坐标）、不改冻结基准，两侧恒同纲；只有真实布局变化（成员长高/
+           增删/折叠）才动 offsetTop 或高度，差分恰好完备。
+           无冻结基准（桩 DOM / rect 回落路径）→ rect.top+pos 对消 translateY
+           （桩 rect 即布局位，契约测试零布局兼容）。 */
+        var top;
+        if (typeof last._winOpBase === 'number' && typeof last.offsetTop === 'number') {
+            top = last.offsetTop + last._winOpBase;
+        } else {
+            top = r.top + pos;   /* 桩 DOM 回落：对消 translateY(-pos) 回到布局位 */
+        }
+        return (top + r.height) - (lastM.top + lastM.h);
+    }
+
+    /* 消费点共用：几何已漂移（|d|>0.5px）就先全量重算再消费。
+       follow 语义随方向：向下滚/常规跟随用 true（贴底态跟随增长）；
+       向上滚用 false（用户在读历史位置，不得把 pos 拽到新底部）。 */
+    function ensureWindowFresh(header, follow) {
+        var d = windowExtentLive(header);
+        if (d !== null && Math.abs(d) > 0.5) refreshWindow(header, follow);
+        return d;
     }
 
     /* inline 样式写入助手：margin-bottom 补偿必须带 !important（压过 app.css
@@ -677,11 +760,22 @@
             var doc = h.ownerDocument;
             function onMove(e) {
                 if (travel > 0) {
-                    var dy = (e.clientY - startY);
-                    var next = Math.max(0, Math.min(overflow, startPos + dy * overflow / travel));
-                    h._winPos = next;
-                    paintWindow(h, h._winVisible || [], h._winMetrics || [], next, overflow, h._winGeom);
-                    moveWindowScrollbar(h, next, overflow);
+                    /* 拖动高频：消费前差分实测几何新鲜度（与 wheel 同源修复，
+                       陈旧 metrics 画 clip 会把溢出内容闪现到折叠框外）。
+                       follow=false：拖动是用户主动定位，不拽贴底。
+                       travel 同步重取：thumb 高随 overflow 变化，down 时捕获的
+                       travel 过期会把拖动比例算错。 */
+                    ensureWindowFresh(h, false);
+                    var g2 = h._winSbGeom;
+                    if (!g2 || !(h._winOverflow > 0)) return;
+                    var travel2 = WINDOW_MAX_PX - g2.thumbH;
+                    if (travel2 > 0) {
+                        var dy2 = (e.clientY - startY);
+                        var next = Math.max(0, Math.min(h._winOverflow, startPos + dy2 * h._winOverflow / travel2));
+                        h._winPos = next;
+                        paintWindow(h, h._winVisible || [], h._winMetrics || [], next, h._winOverflow, h._winGeom);
+                        moveWindowScrollbar(h, next, h._winOverflow);
+                    }
                 }
                 bubble._winSbDragUntil = Date.now() + 250;
                 if (e.preventDefault) e.preventDefault();
@@ -811,8 +905,6 @@
             if (!ev || typeof ev.deltaY !== 'number') return;
             var h = windowHeaderForEvent(bubble, ev);
             if (!h) return;
-            var overflow = typeof h._winOverflow === 'number' ? h._winOverflow : 0;
-            if (overflow <= 0) return;
             /* deltaMode 归一化：Firefox 滚轮默认 DOM_DELTA_LINE（deltaY≈±3），
                直接当 px 用每格只滚 3px，窗内滚动近乎不可用。 */
             var dy = ev.deltaY;
@@ -820,6 +912,18 @@
             else if (ev.deltaMode === 2) dy *= WINDOW_MAX_PX; /* 页 → 视窗高 */
             /* ㉔ 内部滚动体优先：还有余量就整个让位（不 preventDefault、不动窗） */
             if (innerScrollerForWheel(ev.target, dy)) return;
+            /* 【几何新鲜度 · 2026-11-25】缓存 overflow 是上一次量测的秒级快照：
+               流式内容增长后 wheel 按陈旧 overflow 提前判底放行（外部联动滚动）、
+               按陈旧 metrics 画 clip（溢出内容闪现到折叠框外）。消费前差分实测，
+               漂移超阈值先全量重算再滚。
+               【follow 必须 false —— 用户语义「内部真正到边界外部才联动」】若用
+               follow=true，贴底态会在 wheel 事件内先瞬移到新底部、同事件随即放行，
+               用户视角仍是「内部没滚到底外部就动了」；follow=false 让本次 wheel
+               先消费新长出的内容（preventDefault），滚到真实底部后才放行。
+               贴底自动追赶交给秒级 ticker（那里保留 follow=true）。 */
+            ensureWindowFresh(h, false);
+            var overflow = typeof h._winOverflow === 'number' ? h._winOverflow : 0;
+            if (overflow <= 0) return;
             var pos = typeof h._winPos === 'number' ? h._winPos : 0;
             var next = Math.max(0, Math.min(overflow, pos + dy));
             if (next === pos) return;   /* 已在边界：放行给页面 */
@@ -2010,17 +2114,31 @@
                 setLabel(hs[i], windowTranslate());
                 /* 运行窗随内容长高：思考/工具正文流式增长不触发 noteProcessInsert
                    （同一节点内追加），只有周期重量才能把新高度算进 overflow。
-                   贴底跟随/上滑暂停语义由 refreshWindow 内部维护。 */
+                   贴底跟随/上滑暂停语义由 refreshWindow 内部维护。
+                   【盲刷 → 差分变化驱动 · 2026-11-25】旧实现每秒无条件 refreshWindow：
+                   清光全部补偿再重量，即使几何一像素未变。paintWindow 写放大已抑制
+                   （值未变跳过写入），真正没抑制的是【清补偿 → flush → 重量】这段
+                   读写链本身：每秒一次强制同步 reflow（真机实测 Chromium layout
+                   计数随秒线性上涨，长会话多批并行时 CPU 空转），且隐藏/压缩恢复等
+                   边缘路径若量出与缓存相同的 total，全部成员的 clip 会按【平铺零位移】
+                   重画一遍（视觉无感但 transform 缓存被重写）。改为 windowExtentLive
+                   差分实测：批次总高漂移超 0.5px 才真刷（流式增长场景天然满足，
+                   静态历史批零成本跳过）。差分 null（隐藏/无缓存）时维持旧全量刷，
+                   隐藏会话 refreshWindow 有 hiddenFromRoot 守卫自兜底。 */
                 if (hs[i].classList && hs[i].classList.contains('turn-batch-windowed')) {
-                    refreshWindow(hs[i], true);
+                    var d = windowExtentLive(hs[i]);
+                    if (d === null || Math.abs(d) > 0.5) refreshWindow(hs[i], true);
                 }
             }
             /* 【code review 修复 2026-11】历史（closed）展开窗也要周期重量：
                用户点开窗内工具卡/思考卡看结果（+320px 卡体）不经过任何批次入口，
                旧实现 metrics/overflow 一次定格 → 展开内容被裁/后续内容重叠且永不自愈。
-               follow=false：历史回顾不强制贴底，只更新几何。 */
+               follow=false：历史回顾不强制贴底，只更新几何。同上差分降频。 */
             var cs = document.querySelectorAll('.turn-batch-header.turn-batch-windowed[data-batch-state="closed"]');
-            for (var j = 0; j < cs.length; j++) refreshWindow(cs[j], false);
+            for (var j = 0; j < cs.length; j++) {
+                var dc = windowExtentLive(cs[j]);
+                if (dc === null || Math.abs(dc) > 0.5) refreshWindow(cs[j], false);
+            }
         }, 1000);
         /* 窗口 resize：宽度变化改换行高度，所有 open 窗强制重量（防抖 200ms）。 */
         if (typeof window !== 'undefined' && window.addEventListener) {
@@ -2083,3 +2201,4 @@
         refreshTurnCompact: refreshTurnCompact
     };
 });
+

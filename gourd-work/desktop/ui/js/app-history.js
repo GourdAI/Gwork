@@ -5543,6 +5543,17 @@ document.addEventListener('i18n:localeChanged', function () {
 initModelSelector('chatModelSelector', 'chatModelCurrent', 'chatModelDropdown');
 initModelSelector('welcomeModelSelector', 'welcomeModelCurrent', 'welcomeModelDropdown');
 
+/* 登录态翻转（侧栏登录成功 / 登出 / 会话被服务端判死）后官方模型在
+   settings.models 里被内核增删：任务对话框的模型下拉必须同帧跟上，
+   否则「侧栏登录后任务对话框看不到官方模型」要等用户进出模型配置页
+   （closeModelSettings 才会 reloadModels）才自愈。reloadModels 幂等且
+   失败保留旧列表（degradeModelLoad），重复触发无副作用。 */
+if (window.$ && window.$(document).on) {
+    $(document).on('gwork:auth-changed', function () {
+        try { reloadModels(); } catch (e) { console.error('[auth] reload models after auth change failed:', e); }
+    });
+}
+
 window.reloadModels = reloadModels;
 window.loadModels = loadModels;
 window.getSelectedContext = getSelectedContext;

@@ -79,7 +79,7 @@
         });
         // 登录/登出后壳会刷新内核内存态；账号模块派发的事件让本页即时同步，
         // 语言切换后重绘官方模型列表里的静态文案。
-        $(document).on('gwork:auth-changed', function () { loadOfficialState(); });
+        $(document).on('gwork:auth-changed', function () { loadOfficialState(maybeSelfHealOfficial); });
         $(document).on('i18n:localeChanged', function () {
             renderProviderList();
             renderOfficialModels();
@@ -602,7 +602,7 @@
     }
 
     /** 只取状态（signedIn/username/modelCount/baseUrl），响应体保证不含 key。 */
-    function loadOfficialState() {
+    function loadOfficialState(onDone) {
         $.ajax({
             url: '/web/settings/official/status',
             method: 'GET',
@@ -617,12 +617,41 @@
                 renderOfficialPanel();
                 renderOfficialList();
                 if (selectedName === OFFICIAL_NAME) loadOfficialModels();
+                if (onDone) onDone();
             },
             error: function () {
                 officialState = { signedIn: false, username: '', modelCount: 0, baseUrl: '' };
                 renderOfficialPanel();
                 renderOfficialList();
+                if (onDone) onDone();
             }
+        });
+    }
+
+    /** 官方源自愈：壳已登录但内核官方凭据未就绪（登录时 prime 被网络抖动
+        跳过 / 取 key 失败只记 warn）时，面板会一直停在「尚未登录 / 0 个模型」，
+        用户只能手动点刷新。这里在登录态变化后补一次强制重取；prime 成功过
+        （officialState.signedIn=true）则什么都不做，绝不重复打后台。
+        【后端就绪门闸】/web/settings/official/status 走内核 HTTP；后端未就绪
+        时 loadOfficialState 的 error 分支会把 officialState 伪造成 signedIn=false，
+        此时自愈会对一个根本没起来的内核白发强制重取。与 init 的预载同口径：
+        等 __whenBackendReady 放行后再判定（ready 后同步回调，无额外延迟）。 */
+    function maybeSelfHealOfficial() {
+        var gate = window.__whenBackendReady;
+        if (typeof gate === 'function') { gate(doSelfHealOfficial); } else { doSelfHealOfficial(); }
+    }
+
+    function doSelfHealOfficial() {
+        var ipc = window.__GOURD_IPC__;
+        var acct = window.GourdAccount;
+        var shellSignedIn = !!(acct && typeof acct.state === 'function' && acct.state() && acct.state().signed_in);
+        if (!shellSignedIn || officialState.signedIn) return;
+        if (!ipc || typeof ipc.authOfficialRefresh !== 'function') return;
+        ipc.authOfficialRefresh().then(function () {
+            loadOfficialState();
+            refreshModelsEverywhere();
+        }, function () {
+            // 重取仍失败：保留内核旧缓存与当前面板态，用户仍可手动刷新。
         });
     }
 

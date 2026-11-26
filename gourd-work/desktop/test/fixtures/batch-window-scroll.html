@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>批次限高窗滚动链复现 fixture</title>
+<link rel="stylesheet" href="../../ui/css/app.css">
+<style>
+  html, body { height: 100%; overflow: hidden; }
+  body { margin: 0; display: flex; }
+  #chatView { display: flex; flex-direction: column; height: 100vh; flex: 1; min-width: 0; }
+  .messages-shell { flex: 1; min-height: 0; position: relative; }
+  .messages-wrap { flex: 1; overflow-y: auto; overflow-x: hidden; }
+  .messages-shell > .messages-wrap { position: absolute; inset: 0; }
+  .msg-row { max-width: 800px; margin: 0 auto; padding: 0 24px; }
+  .msg-row.assistant { display: flex; justify-content: flex-start; margin: 10px 0; }
+  .msg-row.assistant .msg-bubble { background: var(--bg-input-box); border-radius: 12px; padding: 10px 14px; max-width: 100%; }
+</style>
+</head>
+<body>
+<div id="chatView">
+  <div class="messages-shell">
+    <div id="messagesWrap" class="messages-wrap">
+      <div class="msg-row assistant"><div class="msg-bubble">
+        <div class="md-content">前置正文占位。Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.</div>
+      </div></div>
+      <div class="msg-row assistant"><div class="msg-bubble" id="hostBubble">
+        <div class="md-content">批次前的正文锚点。</div>
+        <button class="turn-batch-header turn-batch-open" type="button" aria-expanded="true"
+                data-batch-state="running" data-batch-open="true" data-batch-start="0">
+          <span class="turn-batch-chevron"></span><span class="turn-batch-label">正在执行中</span>
+        </button>
+      </div></div>
+      <div class="msg-row assistant"><div class="msg-bubble">
+        <div class="md-content">批次后的正文。Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur. Excepteur sint occaecat cupidatat non proident.</div>
+      </div></div>
+      <div class="msg-row assistant"><div class="msg-bubble">
+        <div class="md-content">末尾正文二。Nemo enim ipsam voluptatem quia voluptas sit aspernatur aut odit aut fugit, sed quia consequuntur magni dolores eos.</div>
+      </div></div>
+      <div class="msg-row assistant"><div class="msg-bubble">
+        <div class="md-content">末尾正文三。Neque porro quisquam est, qui dolorem ipsum quia dolor sit amet, consectetur adipisci velit sed quia non numquam.</div>
+      </div></div>
+    </div>
+  </div>
+</div>
+<script src="../../ui/js/app-turn-display.js"></script>
+<script>
+(function () {
+  var api = window.GourdTurnDisplay;
+  var bubble = document.getElementById('hostBubble');
+  var header = bubble.querySelector('.turn-batch-header');
+  var members = [];
+  for (var i = 0; i < 20; i++) {
+    var t = document.createElement('div');
+    t.className = 'tool-card' + (i === 19 ? ' expanded' : '');
+    t.setAttribute('data-turn-batch', '1');
+    t.innerHTML = '<div class="tool-card-header"><span class="tool-name">工具 #' + (i + 1) + '</span></div>'
+      + '<div class="tool-card-body"><pre>短输出</pre></div>';
+    bubble.appendChild(t);
+    members.push(t);
+  }
+  api.refreshWindow(header, true);
+
+  window.__wheelOn = function (el, dy) {
+    var ev = new WheelEvent('wheel', { deltaY: dy, bubbles: true, cancelable: true });
+    el.dispatchEvent(ev);
+    return ev;
+  };
+  /* 全量窗口状态快照（几何、clip、成员 rect、外层 scrollTop） */
+  window.__probe = function () {
+    var vis = header._winVisible || [];
+    var first = vis[0], last = vis[vis.length - 1];
+    var hr = header.getBoundingClientRect();
+    var g = header._winSbGeom || {};
+    var fr = first ? first.getBoundingClientRect() : null;
+    var lr = last ? last.getBoundingClientRect() : null;
+    return JSON.stringify({
+      windowed: header.classList.contains('turn-batch-windowed'),
+      overflow: header._winOverflow, pos: header._winPos, extent: header._winExtent,
+      visCount: vis.length, trackTop: g.trackTop, headerTop: hr.top, headerH: hr.height,
+      firstTop: fr ? fr.top : null, lastBottom: lr ? lr.bottom : null, lastH: lr ? lr.height : null,
+      lastClip: last ? last.style.clipPath : null, lastTf: last ? last.style.transform : null,
+      wrapScrollTop: document.getElementById('messagesWrap').scrollTop
+    });
+  };
+  /* 复现：模拟流式增长（不等秒级 ticker）→ 下滑 → 上滑，记录 wheel 接管与 clip 覆盖 */
+  window.__repro = function () {
+    var vis = header._winVisible || [];
+    var last = vis[vis.length - 1];
+    var pre = last.querySelector('.tool-card-body pre');
+    var grow = [];
+    for (var i = 0; i < 60; i++) grow.push('grown line ' + i);
+    pre.textContent = grow.join('\n');            /* 卡体增长（max-height 320 截断） */
+    var before = JSON.parse(window.__probe());
+    var evDown = window.__wheelOn(vis[0], 200);    /* 下滑：真实内部还有大量余量 */
+    var afterDown = JSON.parse(window.__probe());
+    var evUp = window.__wheelOn(vis[0], -120);     /* 上滑 */
+    var afterUp = JSON.parse(window.__probe());
+    var winBottom = afterUp.headerTop + (afterUp.trackTop || afterUp.headerH) + 232;
+    var realTotal = afterUp.lastBottom - afterUp.firstTop;
+    return JSON.stringify({
+      before: { overflow: before.overflow, pos: before.pos, extent: before.extent, lastH: before.lastH },
+      down: {
+        prevented: evDown.defaultPrevented,
+        posAfter: afterDown.pos, overflowAfter: afterDown.overflow,
+        wrapMoved: afterDown.wrapScrollTop - before.wrapScrollTop,
+        realRemaining: (afterDown.lastBottom - afterDown.firstTop - 232) - afterDown.pos
+      },
+      up: {
+        prevented: evUp.defaultPrevented,
+        posAfter: afterUp.pos, overflowAfter: afterUp.overflow,
+        clip: afterUp.lastClip,
+        lastBottomBeyondWindow: afterUp.lastBottom - winBottom,
+        realOverflowNow: realTotal - 232
+      }
+    });
+  };
+})();
+</script>
+</body>
+</html>

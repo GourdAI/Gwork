@@ -146,6 +146,12 @@ pub struct AuthState {
     /// 竞速探测只真正跑一次；并发调用一起等同一个结果，杜绝「用户在竞速
     /// 完成前登录 → 先在默认站建会话、随后 host 被切走」的竞态。
     host_ready: tokio::sync::OnceCell<String>,
+    /// 会话被服务端判定不可恢复（terminal）后、本地清理由后台任务异步执行
+    /// 期间的标记位。keeper / 启动恢复的清理是 spawn 出去的，`status()` 在
+    /// 清理落地前仍会读到旧快照而报「已登录」；UI 的登录态校验（auth_refresh）
+    /// 拿到 terminal 错误后先置位本标记，让同一轮校验立刻看到 signed_in=false，
+    /// 侧栏与官方模型面板得以同帧翻成未登录，而不是等下一次 60s 轮询。
+    session_dead: std::sync::atomic::AtomicBool,
 }
 
 /// 站点健康探测：`GET {host}/api/status` 必须是 2xx + `success:true` +
@@ -194,6 +200,7 @@ impl AuthState {
                 base_url.into().trim_end_matches('/').to_string(),
             ),
             host_ready: tokio::sync::OnceCell::new(),
+            session_dead: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -304,8 +311,15 @@ impl AuthState {
     }
 
     fn store(&self, s: Option<StoredSession>) {
+        let has_session = s.is_some();
         if let Ok(mut g) = self.session.lock() {
             *g = s;
+        }
+        // 新会话落地（登录/refresh 成功）即解除 dead 标记：标记只对「被判定
+        // 不可恢复的那一份会话」负责，不能把后续成功登录压成未登录。
+        if has_session {
+            self.session_dead
+                .store(false, std::sync::atomic::Ordering::Release);
         }
     }
 }
@@ -1400,9 +1414,7 @@ impl AuthState {
                 // 网络类错误保留凭据等保活任务重试，不能误清。
                 if is_session_terminal_error(&e) {
                     tracing::warn!(error = %e, "stored session is no longer valid; clearing");
-                    self.store(None);
-                    keyring_clear().await;
-                    gourd_work_core::official::clear();
+                    self.mark_session_dead();
                 } else {
                     tracing::warn!(error = %e, "startup refresh failed (transient); will retry");
                 }
@@ -1416,7 +1428,29 @@ impl AuthState {
         self.status()
     }
 
+    /// 会话被服务端判定不可恢复时调用：置位 dead 标记（[`status`] 立即报
+    /// 未登录）并就地清本地凭据。
+    ///
+    /// 内存快照 / 官方凭据 / 设备中转的清理都是同步操作，直接做；只有 keyring
+    /// 的 blocking 删除 spawn 出去。调用方（keeper / authorized_get /
+    /// auth_refresh）可能正持有 `session_lock`，本函数不碰它，绝不引入自锁。
+    /// 标记位保证「判定」与「UI 可见」同帧，keyring 清理保证重启后不复活。
+    fn mark_session_dead(&self) {
+        self.session_dead
+            .store(true, std::sync::atomic::Ordering::Release);
+        self.store(None);
+        gourd_work_core::official::clear();
+        crate::device_link::stop();
+        async_runtime::spawn(async { keyring_clear().await });
+    }
+
     pub fn status(&self) -> AuthStatus {
+        // 会话已被判定不可恢复但后台清理任务尚未落地：立即按未登录报，
+        // 否则 UI 的校验轮（auth_refresh → status）会拿到过期的「已登录」，
+        // 侧栏与官方模型面板要再等一个轮询周期才翻态。
+        if self.session_dead.load(std::sync::atomic::Ordering::Acquire) {
+            return AuthStatus::default();
+        }
         match self.snapshot() {
             Some(s) => AuthStatus {
                 signed_in: !s.access_token.is_empty() && s.access_expires_at > now_secs(),
@@ -1482,9 +1516,10 @@ impl AuthState {
             .unwrap_or(true)
         {
             if let Err(e) = self.refresh().await {
-                // 会话被判定不可恢复：官方 key 必须跟着会话一起失效。
+                // 会话被判定不可恢复：官方 key 必须跟着会话一起失效，本地
+                // 登录态同步翻成未登录（UI 校验轮同帧可见）。
                 if is_session_terminal_error(&e) {
-                    gourd_work_core::official::clear();
+                    self.mark_session_dead();
                 }
                 return Err(e);
             }
@@ -1504,9 +1539,10 @@ impl AuthState {
         let body = resp.text().await.map_err(|e| format!("读取响应失败: {}", e))?;
         let result = parse_api_response(status, &body);
         if let Err(ref e) = result {
-            // 任何鉴权请求若被服务端判定「会话已死」，都不能继续留着模型 key。
+            // 任何鉴权请求若被服务端判定「会话已死」，都不能继续留着模型 key，
+            // 本地登录态也必须立即翻成未登录。
             if is_session_terminal_error(e) {
-                gourd_work_core::official::clear();
+                self.mark_session_dead();
             }
         }
         result
@@ -1554,12 +1590,7 @@ impl AuthState {
                         // 会话被服务端撤销（绝对上限/改密码）时才真正清本地状态；
                         // 网络错误保留凭据，下次重试。
                         if is_session_terminal_error(&e) {
-                            state.store(None);
-                            keyring_clear().await;
-                            gourd_work_core::official::clear();
-                            // 会话已死：设备中转一并停掉（否则 link_loop 还会
-                            // 拿着旧凭据反复打后台）。重新登录时 start 会重启。
-                            crate::device_link::stop();
+                            state.mark_session_dead();
                         }
                         false
                     }
@@ -1785,9 +1816,10 @@ pub async fn auth_refresh(app: tauri::AppHandle) -> Result<AuthStatus, String> {
         Ok(status) => Ok(status),
         Err(e) => {
             // 会话已被服务端判定不可恢复：模型 key 必须与会话一起失效，
-            // 否则「账号已掉线但官方模型仍能用旧 key 调」的安全残留。
+            // 否则「账号已掉线但官方模型仍能用旧 key 调」的安全残留；
+            // 本地登录态同步翻成未登录，侧栏不再显示假登录态。
             if is_session_terminal_error(&e) {
-                gourd_work_core::official::clear();
+                state.mark_session_dead();
             }
             Err(e)
         }
@@ -2302,5 +2334,83 @@ mod tests {
         // 网络类失败 + 旧 token 已过期：上抛（Transient），退避后重试。
         assert_eq!(refresh_failure_action(0, false), Propagate);
         assert_eq!(refresh_failure_action(-5, false), Propagate);
+    }
+
+    // ── 会话判死后的即时翻态（侧栏假登录态真因的护栏）──
+
+    fn live_session() -> StoredSession {
+        StoredSession {
+            sid: "s-dead".into(),
+            refresh_token: "s-dead.secret".into(),
+            access_token: "jwt-still-fresh".into(),
+            // access token 仍在有效期内：本地 status() 单看快照会报「已登录」，
+            // 这正是服务端已撤销但侧栏仍显示登录态的窗口。
+            access_expires_at: now_secs() + 3600,
+            session_expires_at: now_secs() + 86400,
+            username: "alice".into(),
+            display_name: "Alice".into(),
+            user_id: 7,
+        }
+    }
+
+    /// 服务端判定会话不可恢复后，status() 必须**同帧**报未登录：UI 的校验轮
+    /// （auth_refresh 失败 → authStatus）就靠这一帧把侧栏翻成未登录，而不是
+    /// 等 keeper 的下一轮清理或 60s 轮询。
+    #[test]
+    fn terminal_session_flips_status_to_signed_out_immediately() {
+        let state = AuthState::with_base_url("http://127.0.0.1:1");
+        state.store(Some(live_session()));
+        assert!(state.status().signed_in, "fixture must start signed in");
+
+        state.mark_session_dead();
+        let s = state.status();
+        assert!(!s.signed_in, "dead session must report signed_out in the same frame");
+        assert_eq!(s.username, "", "dead session must not leak the username");
+        assert!(!state.is_signed_in(), "in-memory snapshot must be cleared too");
+    }
+
+    /// dead 标记只对「被判定不可恢复的那一份会话」负责：随后的成功登录
+    /// （store(Some)）必须解除标记，否则用户重新登录仍被压成未登录。
+    #[test]
+    fn a_successful_login_clears_the_dead_flag() {
+        let state = AuthState::with_base_url("http://127.0.0.1:1");
+        state.store(Some(live_session()));
+        state.mark_session_dead();
+        assert!(!state.status().signed_in);
+
+        state.store(Some(live_session()));
+        assert!(
+            state.status().signed_in,
+            "a fresh session must lift the dead flag"
+        );
+    }
+
+    /// 判定口径护栏：只有服务端明确的四类会话死亡码才算 terminal；网络/
+    /// 限流/5xx/Origin 配置错误一律不算——误判会在网络抖动时把用户登出。
+    #[test]
+    fn terminal_error_codes_are_exactly_the_server_session_death_set() {
+        for code in [
+            "AUTH_SESSION_REVOKED",
+            "AUTH_UNAUTHORIZED",
+            "AUTH_TOKEN_EXPIRED",
+            "AUTH_SESSION_MISMATCH",
+        ] {
+            assert!(
+                is_session_terminal_error(&format!("Unauthorized [{}]", code)),
+                "{code} must be terminal"
+            );
+        }
+        for benign in [
+            "无法连接后台: tcp connect error",
+            "后台返回 HTTP 503",
+            "后台返回 HTTP 429 [AUTH_RATE_LIMITED]",
+            "origin forbidden [AUTH_ORIGIN_FORBIDDEN]",
+            "后台刷新未返回访问令牌",
+        ] {
+            assert!(
+                !is_session_terminal_error(benign),
+                "{benign} must NOT clear the local session"
+            );
+        }
     }
 }
