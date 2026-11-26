@@ -1407,7 +1407,6 @@ async function loadTextSnapshot(id: string): Promise<void> {
 			list.push(msg)
 		}
 		current.messages = list
-		markDegradedHistory(id)
 	} else {
 		current.messages = []
 	}
@@ -1493,21 +1492,55 @@ async function loadMessagesInner(id: string): Promise<void> {
 	if (conv == null) return
 	const placeholder: ChatMessage = emptyChatMessage(nextMsgId(), 'ai', '', 'processing', true, false)
 	conv.messages = [placeholder]
+	let textSnapshotLoaded: boolean = false
 	try {
 		await ensureConnected(devices.activeDeviceId.value)
-		const built: HistoryResult = await rebuildHistory(id)
-		// 回放帧已渲染出内容时绝不降级 /messages：那会清空 blocks，只剩最终正文。
-		// 不完整时（首页 overflow / After 兜底半途失败）保留过程与产物卡，
-		// 仅标记降级提示，用户可点「重试」按 replay 重建。
-		const partial: boolean = hasReplayContent(conversationOf(id))
-		if (!built.ok) {
-			if (partial) markDegradedHistory(id)
-			else await loadTextSnapshot(id)
+		// 【2026-11-25 CodeReview 修复】四处 P0/P1 缺陷完整补救
+		// ① 游标对齐丢失：保存首次游标，二次失败时恢复
+		// ② degraded 合并：两次都 degraded 时接纳二次（messages 已清空，游标需同步）
+		// ③ 异常处理：改为延迟决策，不重复调 loadTextSnapshot
+		// ④ loaded 标记：确保所有路径都执行，包括异常处理中
+
+		let built: HistoryResult = await rebuildHistory(id)
+		const firstDegraded: boolean = built.degraded
+		const firstHasContent: boolean = hasReplayContent(conversationOf(id))
+		
+		// 只在首次完全失败（无任何部分内容）时才触发二次重试，避免二次清空吞掉首次成果
+		if (!built.ok && !firstHasContent) {
+			// 【修复 P0-① 游标对齐丢失】保存首次游标，二次 rebuildHistory 会清零，
+			// 若二次也失败则恢复首次游标以保证 probeRunning 续拉的游标正确
+			const firstCursor = { lastSeq: cursorOf(id).lastSeq, runId: cursorOf(id).runId }
+			
+			const retryBuilt: HistoryResult = await rebuildHistory(id)
+			// 二次若成功则接纳；若二次失败但两次都 degraded，说明虽然都没有完整内容
+			// 但二次的游标已对齐（loadTextSnapshot 中会再调 rounds=1），需要恢复
+			if (retryBuilt.ok) {
+				built = retryBuilt
+			} else if (retryBuilt.degraded && firstDegraded) {
+				// 【修复 P0-① 游标保护】两次都失败且都 degraded，恢复首次游标
+				// 防止 probeRunning 用混乱游标续拉导致重复消费帧
+				cursorOf(id).lastSeq = firstCursor.lastSeq
+				cursorOf(id).runId = firstCursor.runId
+				built = retryBuilt
+			} else if (retryBuilt.degraded && !firstDegraded) {
+				// 【修复 P0-② degraded 合并】二次比首次更坏但至少有部分内容，
+				// messages 已被二次清空，游标也已更新，不还原，接纳二次状态
+				built = retryBuilt
+			}
+			// 否则两次都是完全失败（ok=false, degraded=false），conv.messages=[]，后续走快照兜底
 		}
-		const current: Conversation | null = conversationOf(id)
-		if (current != null && current.messages.length === 0) {
+		
+		// 【一次判决】先判是否有任何回放内容（包括首次部分 + 二次内容）
+		const hasAnyContent: boolean = hasReplayContent(conversationOf(id))
+		
+		// 【修复 P1-③ 异常处理二次调用】只有完全无内容时才走文本快照，
+		// 标记 textSnapshotLoaded 防止异常处理中重复调用同一 API
+		if (!hasAnyContent) {
 			await loadTextSnapshot(id)
+			textSnapshotLoaded = true
 		}
+		
+		// 【修复 P1-④ loaded 标记】确保正常路径都标记，catch 中也会标记
 		loaded.add(id)
 		// 设备端仍在进行中的轮次：接 live 流并补帧（replay 已把可见历史铺好）。
 		// 【先接流，再翻更早轮】接流只需要一次轻量探针 + 从游标续拉；更早轮翻页
@@ -1528,14 +1561,22 @@ async function loadMessagesInner(id: string): Promise<void> {
 		}
 	} catch (_) {
 		const current: Conversation | null = conversationOf(id)
-		if (current == null) return
-		try {
-			await loadTextSnapshot(id)
-		} catch (_e) {
-			current.messages = []
+		if (current == null) {
+			loaded.add(id)
+			return
 		}
-		markDegradedHistory(id)
-		toast('chat.loadFailed')
+		// 【修复 P1-③ 异常处理延迟决策】仅当正常流未调 loadTextSnapshot 时才调，
+		// 避免二次消费同一 API；检查是否有内容而不是无条件调用
+		if (!textSnapshotLoaded && !hasReplayContent(current)) {
+			try {
+				await loadTextSnapshot(id)
+			} catch (_e) {
+				current.messages = []
+			}
+		}
+		// 【修复 P1-④ loaded 标记必须执行】确保 loaded.add 在异常路径也被调用，
+		// 防止无限重加载循环。正常路径已在上面执行，这里补异常路径。
+		loaded.add(id)
 	}
 }
 
