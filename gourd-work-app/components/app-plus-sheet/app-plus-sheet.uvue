@@ -5,17 +5,20 @@
 			<!-- 附件三入口（v1.1 真实链路）：拍照/相册/文件 → 压缩 → base64 内联进 input，
 				 由内核走与桌面 multipart 相同的落盘+注入；不再写假 tag -->
 			<view class="app-plus__tiles">
+				<!-- 图标/文字色必须用 theme.scss 里真实存在的 token（--color-text 系）：
+					 曾写 --color-text-primary（未定义）→ 原生 var() 解析失败落默认黑，
+					 暗色深底上隐形（用户报障真因）。图标随 PC .plus-menu-item svg 用二级灰。 -->
 				<view class="app-plus__tile" @click="emit('attach', 'camera')">
-					<rice-icon name="camera" size="24px" color="var(--color-text-primary)"></rice-icon>
+					<rice-icon name="camera" size="24px" color="var(--color-text-secondary)"></rice-icon>
 					<text class="app-plus__tile-text">{{ t('home.plus.camera') }}</text>
 				</view>
 				<view class="app-plus__tile" @click="emit('attach', 'album')">
-					<rice-icon name="photo" size="24px" color="var(--color-text-primary)"></rice-icon>
+					<rice-icon name="photo" size="24px" color="var(--color-text-secondary)"></rice-icon>
 					<text class="app-plus__tile-text">{{ t('home.plus.album') }}</text>
 				</view>
 				<!-- UCSS 不支持 :last-child，末位块用修饰类去右边距 -->
 			<view class="app-plus__tile app-plus__tile--last" @click="emit('attach', 'file')">
-					<rice-icon name="upload" size="24px" color="var(--color-text-primary)"></rice-icon>
+					<rice-icon name="upload" size="24px" color="var(--color-text-secondary)"></rice-icon>
 					<text class="app-plus__tile-text">{{ t('home.plus.file') }}</text>
 				</view>
 			</view>
@@ -304,6 +307,11 @@
 			padding: 20px 0;
 			border-radius: 16px;
 			background-color: var(--color-bg-card);
+			// 描边对齐 PC .attachment-item-file 的 1px --border-color：暗色下卡片底
+			// (#1c1c20) 与弹层底 (#17171a) 仅差 5 个灰阶，无描边时磁贴近乎隐形
+			border-width: 1px;
+			border-style: solid;
+			border-color: var(--color-border);
 			margin-right: 10px;
 		}
 
@@ -313,7 +321,9 @@
 
 		&__tile-text {
 			font-size: 13px;
-			color: var(--color-text-primary);
+			// --color-text-primary 不存在（theme.scss 一级文本叫 --color-text），
+			// 未定义 token 在原生端解析失败落默认黑 → 暗色隐形
+			color: var(--color-text);
 			margin-top: 10px;
 		}
 

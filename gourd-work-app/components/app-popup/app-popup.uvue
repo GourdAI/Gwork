@@ -3,7 +3,7 @@
 	<view v-if="maskMounted" class="app-popup__mask" :class="animOn ? 'app-popup__mask--on' : ''"
 		:style="maskStyle" @click="onOverlayClick"></view>
 
-	<view v-if="panelMounted" class="app-popup" :class="animOn ? 'app-popup--on' : ''" :style="panelStyle">
+	<view v-if="panelMounted" class="app-popup" :class="panelClass" :style="panelStyle">
 		<view v-if="closeable" class="app-popup__close" @click.stop="requestClose">
 			<rice-icon name="cross" size="20px" color="var(--color-text-secondary)"></rice-icon>
 		</view>
@@ -19,6 +19,7 @@
 	import { computed, ref, watch, onUnmounted } from 'vue'
 	import type { ComputedRef, Ref } from 'vue'
 	import { useViewport, SHEET_MAX_WIDTH } from '@/hooks/useViewport'
+	import { useTheme } from '@/hooks/useTheme'
 
 	defineOptions({
 		name: 'app-popup',
@@ -143,6 +144,15 @@
 		if (shouldClose) requestClose()
 	}
 
+	// 【暗色阴影 · 复合类直挂元素】官方文档：App 蒸汽模式不支持关系（后代）选择器，
+	// `.theme-dark .app-popup--on` 真机永不命中（app-md-text 第三轮核实同款真因）。
+	// 面板类由 animOn + isDark 合成：--on 驱动滑入与亮色阴影，--dark 直挂翻暗色阴影。
+	const { isDark } = useTheme()
+	const panelClass: ComputedRef<string> = computed((): string => {
+		if (!animOn.value) return ''
+		return isDark.value ? 'app-popup--on app-popup--on--dark' : 'app-popup--on'
+	})
+
 	const maskStyle: ComputedRef<Map<string, string | number>> = computed((): Map<string, string | number> => {
 		const css = new Map<string, string | number>()
 		css.set('z-index', props.zIndex - 1)
@@ -214,8 +224,11 @@
 		}
 	}
 
-	/* 暗色阴影经页面根节点的 themeClass 命中（fixed 元素仍是 DOM 后代） */
-	.theme-dark .app-popup--on {
+	/* 暗色阴影：--on--dark 双修饰复合类直挂面板（蒸汽模式不支持后代选择器，
+	   旧 `.theme-dark .app-popup--on` 真机永不命中）。复合选择器 (0,2,0) 稳定
+	   压过单类 --on (0,1,0)，与定义/书写顺序无关；关闭动画期（--on 摘除）
+	   阴影随之消失，与亮色档行为一致。 */
+	.app-popup--on.app-popup--on--dark {
 		box-shadow: 0 -12px 40px map-get(map-get($theme-palette, 'dark'), 'sheet-shadow');
 	}
 

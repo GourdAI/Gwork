@@ -663,7 +663,13 @@
 		&__attach {
 			flex-direction: row;
 			align-items: center;
-			background-color: var(--color-fill-secondary);
+			// --color-fill-secondary 在 theme.scss 里根本不存在：var() 解析失败 →
+			// 底色丢失，chips 裸贴在输入框底上。改用真实 token，几何对齐 PC
+			// .attachment-item-file（--bg-hover 底 + 1px --border-color 描边）
+			background-color: var(--color-bg-hover);
+			border-width: 1px;
+			border-style: solid;
+			border-color: var(--color-border);
 			border-radius: 8px;
 			padding: 4px 8px;
 			margin: 0 6px 6px 0;

@@ -1,0 +1,273 @@
+<template>
+	<!-- 工具/思考展开明细：PC app-message.js window._toolRenderers 的移动端等价物。
+		 【2026-11-27 用户报障「编辑等展开展示的内容和 PC 全都不一样」】此前把结果
+		 body 整段 dump 成一个纯文本 text（截断 2400）——PC 是 edit diff 逐行着色+行号、
+		 bash $命令+stdout 浅底块、grep 归组行号、glob/ls 文件列表、read/write/todo
+		 浅底等宽文件体。本组件按 utils/tool-detail.ts 的结构化行数组渲染原生节点
+		 （rich-text 不渲染底色几何，逐行原生 view/text 是唯一可靠路径）。 -->
+	<view class="app-tool-detail" :class="boxed ? 'app-tool-detail--boxed' : ''">
+		<template v-for="(r, ri) in rows" :key="ri.toString() + '-' + r.kind">
+			<!-- edit diff 行：双列行号 + 符号文本（PC .git-line/.git-line-num/.git-line-text） -->
+			<view v-if="r.kind === 'diff-add' || r.kind === 'diff-del' || r.kind === 'diff-ctx'"
+				class="app-tool-detail__dline" :class="diffLineClass(r.kind)">
+				<text class="app-tool-detail__dnum">{{ r.num }}</text>
+				<text class="app-tool-detail__dnum">{{ r.num2 }}</text>
+				<text class="app-tool-detail__dtext" :class="diffTextClass(r.kind)" :user-select="true">{{ r.text }}</text>
+			</view>
+			<!-- hunk/文件头行：无行号、通栏底色 -->
+			<view v-else-if="r.kind === 'diff-hunk' || r.kind === 'diff-head'"
+				class="app-tool-detail__dline" :class="r.kind === 'diff-hunk' ? 'app-tool-detail__dline--hunk' : 'app-tool-detail__dline--head'">
+				<text class="app-tool-detail__dtext app-tool-detail__dtext--meta" :user-select="true">{{ r.text }}</text>
+			</view>
+			<!-- bash $ 命令行（PC .bash-cmd） -->
+			<text v-else-if="r.kind === 'bash-cmd'" class="app-tool-detail__bash-cmd" :user-select="true">{{ '$ ' + r.text }}</text>
+			<!-- grep 归组：路径头 / 行号+内容 / 未完提示 -->
+			<text v-else-if="r.kind === 'grep-file'" class="app-tool-detail__grep-file">{{ r.text }}</text>
+			<view v-else-if="r.kind === 'grep-hit'" class="app-tool-detail__grep-hit">
+				<text class="app-tool-detail__grep-ln">{{ r.num }}</text>
+				<text class="app-tool-detail__grep-text" :user-select="true">{{ r.text }}</text>
+			</view>
+			<text v-else-if="r.kind === 'grep-note'" class="app-tool-detail__grep-note">{{ r.text }}</text>
+			<!-- glob/ls 文件列表（PC .file-entry/[DIR]） -->
+			<view v-else-if="r.kind === 'file' || r.kind === 'file-dir'" class="app-tool-detail__file">
+				<text class="iconfont app-tool-detail__file-icon"
+					:class="r.kind === 'file-dir' ? 'app-tool-detail__file-icon--dir' : ''">{{ r.kind === 'file-dir' ? '&#xe67c;' : '&#xe69f;' }}</text>
+				<text class="app-tool-detail__file-name" :user-select="true">{{ r.text }}</text>
+			</view>
+			<!-- 汇总行（PC .tool-summary）/ 结果段（.edit-result / 失败红字） -->
+			<text v-else-if="r.kind === 'summary'" class="app-tool-detail__summary">{{ r.text }}</text>
+			<text v-else-if="r.kind === 'result'" class="app-tool-detail__result" :user-select="true">{{ r.text }}</text>
+			<text v-else-if="r.kind === 'result-error'" class="app-tool-detail__result-error" :user-select="true">{{ r.text }}</text>
+			<!-- plain / bash-out：等宽原文行（容器决定底色：file 视图浅底 / bash 输出浅底 / 思考透明） -->
+			<text v-else class="app-tool-detail__plain"
+				:class="r.kind === 'bash-out' ? 'app-tool-detail__plain--out' : ''" :user-select="true">{{ r.text.length > 0 ? r.text : ' ' }}</text>
+		</template>
+		<!-- 行封顶截断提示（PC 卡体内滚全量；移动端行数封顶防节点爆炸，明示截断） -->
+		<text v-if="detail.truncated" class="app-tool-detail__truncated">…</text>
+	</view>
+</template>
+
+<script setup lang="ts">
+	import { computed } from 'vue'
+	import type { ComputedRef } from 'vue'
+	import type { ChatBlock } from '@/data/app-data'
+	import { toolDetailOf } from '@/utils/tool-detail'
+	import type { ToolDetail, ToolDetailRow } from '@/utils/tool-detail'
+	import { i18n } from '@/locale/i18n.ts'
+
+	defineOptions({
+		name: 'app-tool-detail',
+		styleIsolation: 'app-and-page'
+	})
+
+	const props = defineProps<{
+		item: ChatBlock
+	}>()
+
+	function t(key: string): string {
+		return i18n.global.t(key)
+	}
+
+	/** 结构化投影（PC renderToolBody 同序）：ANSI 削离 → 专用渲染 → plain 兜底。
+	 *  文案全部走词条（与 PC locales 同源同值），本组件与 hook/verify 无耦合。 */
+	const detail: ComputedRef<ToolDetail> = computed<ToolDetail>((): ToolDetail => {
+		const item: ChatBlock = props.item
+		return toolDetailOf(item.bareTool, item.body, item.diffRaw, item.oldRaw, item.newRaw,
+			item.commandRaw, item.todosRaw, item.failed,
+			t('chat.detail.no_output'), t('chat.detail.edit_failed'),
+			(files: number, hits: number): string => {
+				return files.toString() + ' ' + t('chat.detail.files') + ' / ' + hits.toString() + ' ' + t('chat.detail.matches')
+			},
+			(n: number): string => {
+				return n.toString() + ' ' + t('chat.detail.items')
+			})
+	})
+
+	const rows: ComputedRef<ToolDetailRow[]> = computed<ToolDetailRow[]>((): ToolDetailRow[] => detail.value.rows)
+
+	/** 浅底容器（PC --bg-code）：edit diff/bash 输出/文件体/兜底都有浅底。
+	 *  【codereview 修复 · 2026-11-27】thinking/agent 同样有灰底——此前注释断言
+	 *  「PC 思考展开无底色卡」是错的：app.css .thinking-inner-out { padding:8px 14px;
+	 *  background:var(--bg-code) }（与 .tool-plain-out 同族），app-message.js
+	 *  createThinkingBlockEl 把思考体包进 thinking-inner-out（2026-11 PC 已修
+	 *  「工具展开有阴影块，思考没有」的同款报障）。移动端保持透明就是又一次
+	 *  「和 PC 不一致」，此处对齐灰底。 */
+	const boxed: ComputedRef<boolean> = computed<boolean>((): boolean => true)
+
+	function diffLineClass(kind: string): string {
+		if (kind === 'diff-add') return 'app-tool-detail__dline--add'
+		if (kind === 'diff-del') return 'app-tool-detail__dline--del'
+		return ''
+	}
+	function diffTextClass(kind: string): string {
+		if (kind === 'diff-add') return 'app-tool-detail__dtext--add'
+		if (kind === 'diff-del') return 'app-tool-detail__dtext--del'
+		return ''
+	}
+</script>
+
+<style lang="scss">
+	/* 色值一律 var(--color-*)（theme.scss 色板 = PC theme.css 逐字同源）：
+	   暗色翻转由全局变量表承担，组件内零写死色值、零后代选择器（vapor 禁令）。 */
+	.app-tool-detail {
+		align-self: stretch;
+		flex-direction: column;
+		margin-top: 2px;
+		margin-bottom: 6px;
+
+		/* 浅底等宽容器（PC .tool-file-pre / .tool-plain-out / .bash-stdout：
+		   --bg-code 底 + 8/14 内距，【直角无圆角】——app.css 过程卡体契约②明令
+		   「不得加 border-top/圆角/竖条」，diff 行自带通栏底色同底兜住 hunk/上下文行） */
+		&--boxed {
+			background-color: var(--color-bg-code);
+			padding-top: 8px;
+			padding-bottom: 8px;
+			padding-left: 14px;
+			padding-right: 14px;
+		}
+
+		/* diff 行（PC .git-line：双列 32px 行号 + 等宽文本） */
+		&__dline {
+			flex-direction: row;
+			align-self: stretch;
+			align-items: flex-start;
+		}
+		&__dline--add { background-color: var(--color-git-add-bg); }
+		&__dline--del { background-color: var(--color-git-del-bg); }
+		&__dline--hunk { background-color: var(--color-bg-code); }
+		&__dline--head { background-color: var(--color-bg-code); }
+
+		&__dnum {
+			flex-shrink: 0;
+			width: 32px;
+			font-family: monospace;
+			font-size: 11px;
+			line-height: 18px;
+			text-align: right;
+			padding-right: 6px;
+			color: var(--color-text-tertiary);
+		}
+		&__dtext {
+			flex: 1;
+			min-width: 0;
+			font-family: monospace;
+			font-size: 12px;
+			line-height: 18px;
+			color: var(--color-text);
+			word-break: break-all;
+		}
+		&__dtext--add { color: var(--color-git-add-text); }
+		&__dtext--del { color: var(--color-git-del-text); }
+		&__dtext--meta { color: var(--color-git-hunk-text); }
+
+		/* bash（PC .bash-cmd：$ 前缀等宽；.bash-stdout：浅底等宽输出） */
+		&__bash-cmd {
+			font-family: monospace;
+			font-size: 12px;
+			line-height: 18px;
+			color: var(--color-text);
+			word-break: break-all;
+			margin-bottom: 4px;
+		}
+
+		/* grep（PC .grep-file 路径头 / .grep-hit 行号+内容 / .grep-note 灰提示） */
+		&__grep-file {
+			font-family: monospace;
+			font-size: 12px;
+			line-height: 18px;
+			color: var(--color-text);
+			word-break: break-all;
+			margin-top: 4px;
+		}
+		&__grep-hit {
+			flex-direction: row;
+			align-self: stretch;
+			align-items: flex-start;
+		}
+		&__grep-ln {
+			flex-shrink: 0;
+			width: 36px;
+			font-family: monospace;
+			font-size: 11px;
+			line-height: 18px;
+			text-align: right;
+			padding-right: 6px;
+			color: var(--color-text-tertiary);
+		}
+		&__grep-text {
+			flex: 1;
+			min-width: 0;
+			font-family: monospace;
+			font-size: 12px;
+			line-height: 18px;
+			color: var(--color-text-secondary);
+			word-break: break-all;
+		}
+		&__grep-note {
+			font-size: 11px;
+			line-height: 16px;
+			color: var(--color-text-tertiary);
+		}
+
+		/* 文件列表（PC .file-entry：图标 + 等宽文件名） */
+		&__file {
+			flex-direction: row;
+			align-self: stretch;
+			align-items: center;
+		}
+		&__file-icon {
+			flex-shrink: 0;
+			font-size: 12px;
+			margin-right: 6px;
+			color: var(--color-text-tertiary);
+		}
+		&__file-icon--dir { color: var(--color-warning); }
+		&__file-name {
+			flex: 1;
+			min-width: 0;
+			font-family: monospace;
+			font-size: 12px;
+			line-height: 18px;
+			color: var(--color-text-secondary);
+			word-break: break-all;
+		}
+
+		/* 汇总/结果（PC .tool-summary / .edit-result） */
+		&__summary {
+			font-size: 11px;
+			line-height: 16px;
+			color: var(--color-text-tertiary);
+			margin-bottom: 4px;
+		}
+		&__result {
+			font-size: 12px;
+			line-height: 18px;
+			color: var(--color-text-secondary);
+			margin-top: 4px;
+			word-break: break-all;
+		}
+		&__result-error {
+			font-size: 12px;
+			line-height: 18px;
+			color: var(--color-error);
+			margin-top: 4px;
+			word-break: break-all;
+		}
+
+		/* plain/bash-out 行（PC .tool-file-pre 12px/1.5 等宽） */
+		&__plain {
+			font-family: monospace;
+			font-size: 12px;
+			line-height: 18px;
+			color: var(--color-text);
+			word-break: break-all;
+		}
+		&__plain--out { color: var(--color-text-secondary); }
+
+		&__truncated {
+			font-size: 12px;
+			line-height: 18px;
+			color: var(--color-text-tertiary);
+		}
+	}
+</style>

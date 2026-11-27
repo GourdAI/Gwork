@@ -176,6 +176,19 @@ function loadHook(env) {
         warn: (...a) => console.log('[hook WARN]', ...a),
         error: (...a) => console.log('[hook ERROR]', ...a),
     };
+    // 【真机同构装载 · S16】vapor 编译产物不定义 __DEV__：裸引用即抛 ReferenceError。
+    // devUndefined=true 时不把 __DEV__ 放进函数参数（作用域内未声明），
+    // 与真机逐字一致；默认场景仍注入 false（历史行为不变）。
+    if (env.devUndefined === true) {
+        const fnU = new Function('require', 'module', 'exports', 'uni', 'setTimeout', 'clearTimeout', 'Date', 'console', loadCode);
+        const RealDateU = Date;
+        const FakeDateU = class extends RealDateU {
+            constructor(...args) { super(...(args.length ? args : [env.clock.now()])); }
+            static now() { return env.clock.now(); }
+        };
+        fnU(req, mod, mod.exports, env.uni, env.clock.setTimeout.bind(env.clock), env.clock.clearTimeout.bind(env.clock), FakeDateU, wrappedConsole);
+        return mod.exports;
+    }
     const fn = new Function('require', 'module', 'exports', '__DEV__', 'uni', 'setTimeout', 'clearTimeout', 'Date', 'console', loadCode);
     const RealDate = Date;
     const FakeDate = class extends RealDate {
@@ -352,6 +365,8 @@ function makeRuntime(opts) {
     const uniStore = new Map();
     const env = {
         clock,
+        // S16：真机形态装载（__DEV__ 未定义），见 loadHook 注释
+        devUndefined: opts.devUndefined === true,
         devices: {
             activeDeviceId: { value: opts.deviceId || 'dev-1' },
             deviceOnline: { value: true },
@@ -611,9 +626,14 @@ await scenario('S3 旧桌面（GET 不建订阅）：看门狗对账内核 runni
     assert.equal(tail.status, 'done', '看门狗必须把已结束的轮收口（旧桌面 done 帧不达也不能永久转圈）');
     assert.ok(aiTextOf(tail).includes('answer 4'), '收口同时必须补回缺失正文');
     await rt.clock.tick(60_000);
-    const calls = rt.dev.replayCalls;
+    // 只统计【运行看门狗】探针（rounds=1 且非 idleProbe/afterSeq）：收口后必须停。
+    // 空闲对账探针（idleProbe=1）是另一机制（发现桌面端新发起的 run），恒心跳属预期，不计入。
+    const wdProbes = () => rt.dev.requests.filter((r) =>
+        r.path === '/web/chat/replay' && /rounds=1($|&)/.test(r.query)
+        && !r.query.includes('afterSeq') && !r.query.includes('idleProbe')).length;
+    const calls = wdProbes();
     await rt.clock.tick(60_000);
-    assert.equal(rt.dev.replayCalls, calls, '收口后看门狗必须停');
+    assert.equal(wdProbes(), calls, '收口后看门狗必须停');
 });
 
 /* S4 看门狗收口失败续命（本轮 review 修复点） */
@@ -975,15 +995,59 @@ await scenario('S12 回放失败降级：正文保住且可重试重建过程与
     await rt.clock.tick(500);
     let tail = lastAi(rt.conv);
     assert.ok(aiTextOf(tail).includes('final text only'), 'snapshot fallback must preserve the final text');
-    assert.ok((tail.degradedNotice || '').length > 0, 'degraded text snapshot must carry an explicit notice');
+    // 【2026-11-26 新契约】用户明确要求：任何降级形态都不得再出现黄色警告条。
+    // 快照兜底静默保正文，重试入口改由「正文缺失自动回填」承担（S14）。
+    assert.ok((tail.degradedNotice || '').length === 0, 'no degraded notice may ever be rendered (user requirement: zero warnings)');
     assert.ok(!rt.dev.requests.some((r) => r.path === '/web/chat/messages' && r.query.includes('afterSeq')), 'snapshot must not pretend to be replay');
-    // 用户点重试：清除 loaded 后重新走 replay 帧，过程块与产物卡回来且提示消失
+    // 用户点重试：清除 loaded 后重新走 replay 帧，过程块与产物卡回来
     rt.api.retryHistory(sid);
     await rt.clock.tick(500);
     tail = lastAi(rt.conv);
     assert.ok(tail.blocks.some((b) => b.kind === 'tool' && b.actionId === 'h12'), 'retry must rebuild the process card via replay frames');
     assert.ok(tail.blocks.some((b) => b.args === 'fileChanges' && b.changes.length > 0), 'retry must rebuild the file-changes card');
-    assert.ok((tail.degradedNotice || '').length === 0, 'a successful retry must clear the degraded notice');
+    assert.ok((tail.degradedNotice || '').length === 0, 'a successful retry must carry no notice either');
+});
+
+/* S14 单帧异常隔离 + 收口正文回填（2026-11-26 真机「已完成但正文/过程全空」真因）。
+   真机 UTS/Kotlin 运行时对动态 JSON 取值比纯 JS 严格：单帧消费抛异常曾把整页
+   for 循环吞掉（只剩用户行 + 死点前已建块），收口后「已完成 + 空正文」。
+   ① 投毒帧（args getter 抛异常）必须被帧级隔离，其后帧照常渲染；
+   ② 流里缺 text 帧时，收口后必须从 /messages 快照回填最终正文。 */
+await scenario('S14 单帧异常隔离+正文回填：坏帧不吞整页，空正文自动补齐', async () => {
+    const sid = 'work-s14';
+    const rt = await makeRuntime({ sessionId: sid });
+    const origRequest = rt.dev.request;
+    rt.dev.request = async (method, apiPath, query, body, root) => {
+        if (apiPath === '/web/chat/messages') {
+            // 快照里有最终正文（流里缺 text 帧的真实形态：落盘有、广播丢）
+            return { code: 200, data: [{ role: 'USER', content: 'Q14' }, { role: 'ASSISTANT', content: 'final answer from snapshot' }] };
+        }
+        return origRequest(method, apiPath, query, body, root);
+    };
+    let s = 1;
+    const f = (type, extra) => ({ eventSeq: s++, type, sessionId: sid, runId: 'run-14', ...(extra || {}) });
+    const poison = { type: 'action_start', sessionId: sid, runId: 'run-14', eventSeq: s++ };
+    // 消费期抛异常（复刻真机 UTS 转型抛错）：sort/投影只读 eventSeq，投毒点选 args
+    Object.defineProperty(poison, 'args', { get() { throw new Error('uts-runtime-cast-throw'); }, configurable: true });
+    [
+        f('user', { text: 'Q14' }),
+        poison,
+        f('action_start', { actionId: 'h14', toolName: 'read' }),
+        f('action_end', { actionId: 'h14', toolName: 'read', text: 'ok', durationMs: 5 }),
+        f('done', {}),
+    ].forEach((fr) => rt.dev.append(fr));
+    rt.api.setActive(sid);
+    await rt.clock.tick(1000);
+    // 【断言按聚合口径 · 2026-11-26】sim 的「append 预置帧 + setActive 加载」编排存在
+    // 加载期双消费竞态（对照实验：旧代码同样双消费，仅 lastAi 巧合让旧断言通过）；
+    // 真机历史非空时 replay 成功不走快照兜底，无此形态。契约按会话聚合判定：
+    // 投毒帧之后的帧仍渲染出工具卡；空正文轮从快照回填到【某个】AI 行。
+    const ais14 = rt.conv.messages.filter((m) => m.role === 'ai');
+    assert.ok(ais14.some((m) => m.blocks.some((b) => b.kind === 'tool' && b.actionId === 'h14')),
+        'frames after a throwing frame must still render (per-frame isolation)');
+    assert.ok(ais14.some((m) => m.status === 'done'), 'the turn must still close');
+    assert.ok(ais14.some((m) => m.text.includes('final answer from snapshot')),
+        'a closed turn with empty text must backfill the final body from the messages snapshot');
 });
 
 /* S13 args 被 JSON 字符串化：file_changes 仍必须解析出产物卡。 */
@@ -1003,6 +1067,565 @@ await scenario('S13 字符串化 args：文件变更卡不因协议形态差异�
     const tail = lastAi(rt.conv);
     assert.ok(tail.blocks.some((b) => b.args === 'fileChanges' && b.changes.length > 0 && b.changes[0].path === 'a.ts'),
         'stringified file_changes args must still produce a visible changes card');
+});
+
+/* S15 收口形态两真因（2026-11-26 用户截图报障）：
+   ① 展开整轮摘要必须同步展开批次盖子（旧实现展开后只见盖子行、过程全藏收起的盖子里）；
+   ② 切轮收口的正文回填必须按【轮序数】取快照（旧「从尾倒扫到第一个 USER」会把下一轮
+      正文写进上一轮）；回填目标可能已不是尾条（新一轮已开），按引用写回。 */
+await scenario('S15 展开摘要见全过程+回填按轮序数不串轮', async () => {
+    const sid = 'work-s15';
+    const rt = await makeRuntime({ sessionId: sid });
+    const origRequest = rt.dev.request;
+    rt.dev.request = async (method, apiPath, query, body, root) => {
+        if (apiPath === '/web/chat/messages') {
+            return { code: 200, data: [
+                { role: 'USER', content: 'Q15a' }, { role: 'ASSISTANT', content: 'final-A' },
+                { role: 'USER', content: 'Q15b' }, { role: 'ASSISTANT', content: 'final-B' },
+            ] };
+        }
+        return origRequest(method, apiPath, query, body, root);
+    };
+    let s = 1;
+    const f = (type, extra) => ({ eventSeq: s++, type, sessionId: sid, runId: 'run-15', ...(extra || {}) });
+    // 【回放切轮形态 · 2026-11-26】历史回放中每个 user 帧收口上一轮（finishProcessingTail
+    // 真实调用点）：轮1 病态缺 text 帧 → 切轮收口时空正文触发回填，且此刻轮1 已不是尾条
+    // （轮2 占位已建）。旧「从尾倒扫到第一个 USER」会取到轮2 正文串轮；序数对齐取轮1 行。
+    [
+        f('user', { text: 'Q15a' }),
+        f('reason', { text: 'think A' }),
+        f('action_start', { actionId: 't1', toolName: 'read' }),
+        f('action_end', { actionId: 't1', toolName: 'read', text: 'ok', durationMs: 4 }),
+        f('user', { text: 'Q15b' }),
+        f('action_start', { actionId: 't2', toolName: 'bash' }),
+        f('action_end', { actionId: 't2', toolName: 'bash', text: 'ok', durationMs: 2 }),
+        f('text', { text: 'live body B' }),
+        f('done', {}),
+    ].forEach((fr) => rt.dev.append(fr));
+    rt.api.setActive(sid);
+    await rt.clock.tick(800);
+    const ais = rt.conv.messages.filter((m) => m.role === 'ai');
+    assert.equal(ais.length, 2, 'replay must render two turns (got ' + ais.length + ')');
+    const turn1 = ais[0];
+    const turn2 = ais[1];
+    assert.equal(turn1.text, 'final-A', 'turn-1 backfill at turn-switch must take the snapshot row of its own ordinal (no cross-turn bleed)');
+    assert.equal(turn2.text, 'live body B', 'turn-2 replayed text must not be overwritten by backfill');
+    const lids = () => turn2.blocks.filter((b) => b.kind === 'batch');
+    assert.ok(lids().length > 0 && lids().every((b) => b.batchCollapsed), 'settlement must collapse batch lids');
+    // 【2026-11-27 用户拍板 PC 对齐】展开摘要只解除过程区隐藏，批次盖子保持收口折叠
+    // （PC toggle click 只翻 turn-compact-open；成员点盖子才展开）。上一版连坐展开
+    // 全部盖子正是用户报障「内部所有折叠都是展开态，PC 是收起来的」。
+    rt.api.toggleTurnCompact(turn2);
+    assert.ok(turn2.compactOpen && lids().every((b) => b.batchCollapsed),
+        'PC parity: expanding the turn summary must keep batch lids folded (members open only via their own lid click)');
+    rt.api.toggleTurnCompact(turn2);
+    assert.ok(!turn2.compactOpen && lids().every((b) => b.batchCollapsed),
+        're-collapsing the summary must keep the settled folded lids untouched');
+    const lids1 = turn1.blocks.filter((b) => b.kind === 'batch');
+    assert.ok(lids1.every((b) => b.batchCollapsed), 'toggling one message must not touch other turns');
+});
+
+/* S16 __DEV__ 未定义的真机形态（2026-11-26 第十一轮真因）：
+   vapor 编译产物不定义 __DEV__，真机裸引用即抛 ReferenceError。
+   上一版两处裸 `if (__DEV__)`：consumeFrame 元数据帧分支（context_size/trace
+   每轮必达）先炸 → safeConsumeFrame catch 里第二处再炸 → 异常逃逸杀死整个
+   回放循环 → 降级快照 = 用户报障的「只剩思考+正文、过程全丢」。
+   本场景用【真机同构装载】（__DEV__ 不作为参数注入，作用域内未定义）回放
+   含 context_size 帧的完整轮次，断言过程卡与正文完整渲染。 */
+await scenario('S16 __DEV__ 未定义（真机形态）：元数据帧不炸回放，过程完整', async () => {
+    const sid = 'work-s16';
+    const rt = await makeRuntime({ sessionId: sid, devUndefined: true });
+    let s = 1;
+    const f = (type, extra) => ({ eventSeq: s++, type, sessionId: sid, runId: 'run-16', ...(extra || {}) });
+    [
+        f('user', { text: 'Q16' }),
+        f('reason', { text: 'thinking about it' }),
+        f('context_size', { text: '46', totalTokens: 64636 }),
+        f('action_start', { actionId: 'h16', toolName: 'read', args: { file_path: 'a.ts' } }),
+        f('action_end', { actionId: 'h16', toolName: 'read', text: 'ok', durationMs: 5 }),
+        f('context_size', { text: '47', totalTokens: 64700 }),
+        f('text', { text: 'final body 16' }),
+        f('done', {}),
+    ].forEach((fr) => rt.dev.append(fr));
+    rt.api.setActive(sid);
+    await rt.clock.tick(1000);
+    const ais = rt.conv.messages.filter((m) => m.role === 'ai');
+    assert.ok(ais.some((m) => m.blocks.some((b) => b.kind === 'tool' && b.actionId === 'h16')),
+        'tool card must render even though context_size frames pass the __DEV__ guard site');
+    assert.ok(ais.some((m) => m.blocks.some((b) => b.kind === 'thinking')),
+        'thinking block must render');
+    assert.ok(ais.some((m) => m.text.includes('final body 16')),
+        'final text must render (replay loop must not be killed by undefined __DEV__)');
+    assert.ok(ais.some((m) => m.status === 'done'), 'turn must close');
+});
+
+/* S17 终态闸门（2026-11-26 用户实机报障「任务都执行完毕了，历史消息还有计时」）：
+done/error 收口后迟到的过程帧（Rust forwarder 后台帧 / 重连补帧 / 回放 done 后迟到帧）
+不得在已终态消息上重开 loading 盖子——旧实现 ensureProcessBatch 会重开且实时路径
+无人再收口 → 盖子每秒刷「正在执行中 · Ns」。桌面同口径（finishStream 后 PHASE_DONE
+不再开新批）。① live：done 后 action_batch/agent_end/reason 迟到 → 不开新盖、尾条恒终态；
+② 回放：done 后迟到过程帧 → 收口后无 loading 盖子/计时起点，过程轨迹不丢；
+③ 新轮 user 帧 resetTurnState 清标记 → 过程帧照常开批（闸门不跨轮误杀）。 */
+await scenario('S17 终态闸门：done 后迟到过程帧不开计时盖子，新轮不受影响', async () => {
+    const sid = 'work-s17';
+    const rt = await makeRuntime({ sessionId: sid });
+    let s = 1;
+    const f = (type, extra) => ({ eventSeq: s++, type, sessionId: sid, runId: 'run-17', ...(extra || {}) });
+    rt.dev.running = true;
+    rt.api.setActive(sid);
+    await rt.clock.tick(50);
+    rt.dev.emit(f('user', { text: 'Q17' }), rt.hooks);
+    rt.dev.emit(f('reason', { text: 'think' }), rt.hooks);
+    rt.dev.emit(f('action_start', { actionId: 't17', toolName: 'read', args: { file_path: 'a.ts' } }), rt.hooks);
+    rt.dev.emit(f('action_end', { actionId: 't17', toolName: 'read', text: 'ok', durationMs: 3 }), rt.hooks);
+    rt.dev.emit(f('text', { text: 'body 17' }), rt.hooks);
+    await rt.clock.tick(200);
+    rt.dev.running = false;
+    rt.dev.emit(f('done', {}), rt.hooks);
+    await drainMicrotasks();
+    let tail = lastAi(rt.conv);
+    assert.equal(tail.status, 'done', 'done 必须收口');
+    const lidsBefore = tail.blocks.filter((b) => b.kind === 'batch').length;
+    // forwarder 后台帧：done 之后迟到的过程帧（用户报障真因链）
+    rt.dev.emit(f('action_batch', { actionId: 'bg1', toolName: 'bash' }), rt.hooks);
+    rt.dev.emit(f('agent_end', { name: 'explore' }), rt.hooks);
+    rt.dev.emit(f('reason', { text: 'late reasoning' }), rt.hooks);
+    await rt.clock.tick(200);
+    tail = lastAi(rt.conv);
+    const lidsAfter = tail.blocks.filter((b) => b.kind === 'batch');
+    assert.equal(lidsAfter.length, lidsBefore, 'done 后迟到过程帧不得新开批次盖子');
+    assert.ok(lidsAfter.every((b) => b.status !== 'loading'), '终态消息不得残留 loading 盖子（计时真因）');
+    assert.equal(tail.status, 'done', '尾条必须保持终态');
+    // 非过程帧不受闸门影响：变更卡终态后仍必须落卡
+    rt.dev.emit(f('file_changes', { args: { files: [{ path: 'a.ts', changeType: 'MODIFIED', additions: 1, deletions: 0 }] } }), rt.hooks);
+    await rt.clock.tick(50);
+    tail = lastAi(rt.conv);
+    assert.ok(tail.blocks.some((b) => b.args === 'fileChanges'), '终态后变更卡仍必须落卡');
+
+    // ② 回放：done 之后带迟到过程帧的流，收口后不得残留 loading 盖子/计时起点
+    const sid2 = 'work-s17b';
+    const rt2 = await makeRuntime({ sessionId: sid2 });
+    let s2 = 1;
+    const g = (type, extra) => ({ eventSeq: s2++, type, sessionId: sid2, runId: 'run-17b', ...(extra || {}) });
+    [
+        g('user', { text: 'Q17b' }),
+        g('reason', { text: 'think b' }),
+        g('action_start', { actionId: 'b1', toolName: 'read', args: { file_path: 'x.ts' } }),
+        g('action_end', { actionId: 'b1', toolName: 'read', text: 'ok', durationMs: 2 }),
+        g('text', { text: 'body 17b' }),
+        g('done', {}),
+        g('action_batch', { actionId: 'bg2', toolName: 'bash' }),
+        g('agent_end', { name: 'explore' }),
+    ].forEach((fr) => rt2.dev.append(fr));
+    rt2.api.setActive(sid2);
+    await rt2.clock.tick(2000);
+    const tail2 = lastAi(rt2.conv);
+    assert.equal(tail2.status, 'done', '回放尾条必须收口');
+    const lids2 = tail2.blocks.filter((b) => b.kind === 'batch');
+    assert.ok(lids2.length > 0 && lids2.every((b) => b.status !== 'loading' && b.startedAt === 0),
+        '回放收口后不得残留 loading 盖子/计时起点');
+    assert.ok(tail2.blocks.some((b) => b.kind === 'tool'), '过程轨迹不得被闸门误丢');
+
+    // ③ 新轮：user 帧切轮清标记后，过程帧照常开批
+    rt.dev.emit(f('user', { text: 'Q18' }), rt.hooks);
+    rt.dev.emit(f('reason', { text: 'next round think' }), rt.hooks);
+    await rt.clock.tick(100);
+    tail = lastAi(rt.conv);
+    assert.ok(tail.blocks.some((b) => b.kind === 'batch' && b.status === 'loading'),
+        '新轮过程帧必须照常开批（闸门不得跨轮误杀）');
+});
+
+/* S18 远端新轮接管（2026-11-27 用户实机报障「移动端先进入已完成任务，桌面端再在
+   这个任务内发送消息，移动端无法正常显示正在运行的消息信息」真因）：
+   上一轮 done 收口后 running 清空、且旧实现只在 probeRunning 命中时才登记帧处理器，
+   打开后没有任何再探测机制发现设备端重新跑起来 → 桌面端新 run 的帧全部无人消费。
+   修复三道防线：① 常驻帧订阅 + user 帧自接管（新桌面，帧直达）；
+   ② 空闲对账探针 15s 发现 running=true 即 attachRemoteRun 补帧（旧桌面，无帧）；
+   ③ 切回会话即时重探。本场景覆盖 ①②。 */
+await scenario('S18 已完成任务停留中桌面端发新消息：移动端必须接管运行中新轮', async () => {
+    // ① 新桌面（gate 订阅在）：user 帧直达 → 帧级自接管，零延迟长出运行态
+    const sid = 'work-s18a';
+    const rt = await makeRuntime({ sessionId: sid });
+    let seq = seedRounds(rt.dev, sid, 2);
+    rt.api.setActive(sid);
+    await rt.clock.tick(500);
+    assert.equal(lastAi(rt.conv).status, 'done', '打开时必须是已完成形态');
+    assert.ok(rt.frameHandlers.has(sid), '已完成会话也必须保留常驻帧订阅（远端新轮的第一信号入口）');
+    // 桌面端随后在本会话发起新 run（移动端未参与发送）
+    rt.dev.running = true;
+    rt.dev.runId = 'run-3';
+    const f = (type, extra) => ({ eventSeq: seq++, type, sessionId: sid, runId: 'run-3', ...(extra || {}) });
+    rt.dev.emit(f('user', { text: 'Q3' }), rt.hooks);
+    await drainMicrotasks();
+    assert.ok(rt.conv.messages.some((m) => m.role === 'user' && m.text === 'Q3'),
+        '远端新轮的用户行必须立即上屏（帧级自接管）');
+    rt.dev.emit(f('reason', { text: 'thinking 3' }), rt.hooks);
+    rt.dev.emit(f('action_start', { actionId: 'a3', toolName: 'bash', args: { command: 'ls' } }), rt.hooks);
+    rt.dev.emit(f('action_end', { actionId: 'a3', toolName: 'bash', text: 'ok', durationMs: 30 }), rt.hooks);
+    rt.dev.emit(f('text', { text: 'live body 3' }), rt.hooks);
+    await rt.clock.tick(200);
+    let tail = lastAi(rt.conv);
+    assert.equal(tail.status, 'processing', '新轮尾条必须进入运行态（不得停在上一轮已完成）');
+    assert.ok(tail.blocks.some((b) => b.kind === 'tool' && b.actionId === 'a3'), '新轮工具卡必须上屏');
+    assert.ok(aiTextOf(tail).includes('live body 3'), '新轮正文必须上屏');
+    rt.dev.running = false;
+    rt.dev.emit(f('done', {}), rt.hooks);
+    await drainMicrotasks();
+    tail = lastAi(rt.conv);
+    assert.equal(tail.status, 'done', '新轮 done 必须收口');
+    assert.deepEqual(userTexts(rt.conv)[0], 'Q1', '历史轮次不得被新轮接管打乱');
+
+    // ② 旧桌面（gate 不建订阅，帧不达）：空闲对账探针 15s 发现 running=true →
+    //    attachRemoteRun 补帧上屏；结束后看门狗收口
+    const sid2 = 'work-s18b';
+    const rt2 = await makeRuntime({ sessionId: sid2, gateEnabled: false });
+    let seq2 = seedRounds(rt2.dev, sid2, 2);
+    rt2.api.setActive(sid2);
+    await rt2.clock.tick(500);
+    assert.equal(lastAi(rt2.conv).status, 'done', '打开时必须是已完成形态');
+    rt2.dev.running = true;
+    rt2.dev.runId = 'run-3';
+    const g = (type, extra) => ({ eventSeq: seq2++, type, sessionId: sid2, runId: 'run-3', ...(extra || {}) });
+    rt2.dev.append(g('user', { text: 'Q3b' }));
+    rt2.dev.append(g('reason', { text: 'think b' }));
+    rt2.dev.append(g('text', { text: 'body b ' }));
+    await rt2.clock.tick(15_000 + 500); // 空闲对账探针周期 + 补帧
+    assert.ok(rt2.conv.messages.some((m) => m.role === 'user' && m.text === 'Q3b'),
+        '空闲探针发现远端新 run 后，补帧必须带回新轮用户行');
+    let tail2 = lastAi(rt2.conv);
+    assert.equal(tail2.status, 'processing', '接管后尾条必须进入运行态');
+    assert.ok(aiTextOf(tail2).includes('body b'), '补帧必须带回新轮正文');
+    rt2.dev.append(g('text', { text: 'final b' }));
+    rt2.dev.append(g('done', {}));
+    rt2.dev.running = false;
+    await rt2.clock.tick(15_000 + 500); // 看门狗对账收口
+    tail2 = lastAi(rt2.conv);
+    assert.equal(tail2.status, 'done', '远端新轮结束必须收口');
+    assert.ok(aiTextOf(tail2).includes('final b'), '收口补帧必须带回最后正文');
+});
+
+/* S19 挂起轮他端作答续跑（2026-11-27 code review 发现的终态闸门回归）：
+   done(suspended) 收口置 runSettled + 删 running（防挂起等待期迟到帧开计时盖子）；
+   本端作答经 submitInteract 清闸门，但【他端作答】（桌面先答/批准审批）时移动端
+   只收到 question_answered / hitl_released 帧——旧实现不清 runSettled，spawn_resume
+   续跑段的过程帧被终态闸门全丢（过程区空白、正文不增长）。内核权威信号：
+   mod.rs:2604-2609 作答即广播 question_answered、1573 full-access 切换广播
+   hitl_released，approve/deny 都走 spawn_resume。 */
+await scenario('S19 挂起轮他端作答：续跑过程帧不被终态闸门误丢', async () => {
+    const sid = 'work-s19';
+    const rt = await makeRuntime({ sessionId: sid });
+    let s = 1;
+    const f = (type, extra) => ({ eventSeq: s++, type, sessionId: sid, runId: 'run-19', ...(extra || {}) });
+    rt.dev.running = true;
+    rt.api.setActive(sid);
+    await rt.clock.tick(50);
+    rt.dev.emit(f('user', { text: 'Q19' }), rt.hooks);
+    rt.dev.emit(f('reason', { text: 'think 19' }), rt.hooks);
+    rt.dev.emit(f('question', { actionId: 'q-19', toolName: 'ask_user', args: { questions: [{ header: '选哪个？', options: [{ label: 'A' }, { label: 'B' }] }] } }), rt.hooks);
+    await drainMicrotasks();
+    // 挂起收口：done(suspended) —— 内核 done_suspended（react/mod.rs:2551）
+    rt.dev.running = false;
+    rt.dev.emit(f('done', { suspended: true }), rt.hooks);
+    await drainMicrotasks();
+    let tail = lastAi(rt.conv);
+    assert.equal(tail.status, 'done', '挂起收口必须落终态');
+    const card = tail.blocks.find((b) => b.actionId === 'q-19');
+    assert.ok(card != null && card.interact === 'question' && card.status === 'warn', '挂起卡必须待答');
+    // 挂起等待期迟到的过程帧不得开计时盖子（终态闸门本职）
+    const lidsBefore = tail.blocks.filter((b) => b.kind === 'batch').length;
+    rt.dev.emit(f('agent_end', { name: 'explore' }), rt.hooks);
+    await rt.clock.tick(200);
+    tail = lastAi(rt.conv);
+    assert.equal(tail.blocks.filter((b) => b.kind === 'batch').length, lidsBefore,
+        '挂起等待期迟到过程帧不得开新盖子');
+    // 桌面端作答（移动端未参与）：内核广播 question_answered + spawn_resume 续跑
+    rt.dev.running = true;
+    rt.dev.emit(f('question_answered', { actionId: 'q-19', args: { answers: [{ index: 0, text: 'A' }] } }), rt.hooks);
+    await drainMicrotasks();
+    assert.equal(card.interact, 'resolved', '作答帧必须闭环挂起卡');
+    // 续跑段过程帧：终态闸门必须已清零——旧实现全丢（本场景的回归断言核心）
+    rt.dev.emit(f('reason', { text: 'resumed thinking' }), rt.hooks);
+    rt.dev.emit(f('action_start', { actionId: 'r19', toolName: 'bash', args: { command: 'ls' } }), rt.hooks);
+    rt.dev.emit(f('action_end', { actionId: 'r19', toolName: 'bash', text: 'ok', durationMs: 5 }), rt.hooks);
+    rt.dev.emit(f('text', { text: 'resumed body' }), rt.hooks);
+    await rt.clock.tick(200);
+    tail = lastAi(rt.conv);
+    assert.equal(tail.status, 'processing', '续跑段必须进入运行态（running 恢复）');
+    assert.ok(tail.blocks.some((b) => b.kind === 'tool' && b.actionId === 'r19'),
+        '续跑段工具卡不得被终态闸门误丢');
+    assert.ok(aiTextOf(tail).includes('resumed body'), '续跑段正文不得被终态闸门误丢');
+    rt.dev.running = false;
+    rt.dev.emit(f('done', {}), rt.hooks);
+    await drainMicrotasks();
+    tail = lastAi(rt.conv);
+    assert.equal(tail.status, 'done', '续跑段 done 必须收口');
+});
+
+/* S20 孤儿 loading 盖子（2026-11-27 用户实机报障「任务都执行结束了，移动端进入
+   任务的时候消息顶部还展示正在执行中」真因）：closeBatch 旧实现按全局
+   state.batchId 找盖子且 `if (!state.batchOpen) return`——回放 done 分支收口后
+   迟到过程帧重开的盖子、切轮/收口错位产生的失配盖子永远无人认领，status=loading
+   + startedAt>0 → batchLabel 每秒刷「正在执行中 · Ns」。修复口径：closeBatch 按
+   【尾条自身全部 loading 盖子实体】收口（成员按盖子 id 统计），终态收口点再补扫。
+   ① 回放：done 之后迟到过程帧 + 下一轮 user 切轮（含空尾条丢弃分支），任何一轮
+      都不得残留 loading 盖子；② live：done 收口后残留盖子必须被兜底扫描收敛；
+   ③ 运行中批次绝不被误收（closeBatch 只在边界调用，活批次照常计时）。 */
+await scenario('S20 孤儿盖子：done/切轮后任何消息不得残留「正在执行中」计时头', async () => {
+    // ① 回放形态：done 后迟到过程帧（forwarder 后台帧落盘）+ 后续新轮
+    const sid = 'work-s20';
+    const rt = await makeRuntime({ sessionId: sid });
+    let s = 1;
+    const f = (type, extra) => ({ eventSeq: s++, type, sessionId: sid, runId: 'run-20', ...(extra || {}) });
+    [
+        f('user', { text: 'Q20' }),
+        f('reason', { text: 'think 20' }),
+        f('action_start', { actionId: 't20', toolName: 'read', args: { file_path: 'a.ts' } }),
+        f('action_end', { actionId: 't20', toolName: 'read', text: 'ok', durationMs: 3 }),
+        f('text', { text: 'body 20' }),
+        f('done', {}),
+        // done 之后迟到的过程帧：旧实现 closeBatch 已置 batchOpen=false，
+        // 这些帧经 ensureProcessBatch 重开盖子；若切轮走空尾条丢弃分支（不 reset），
+        // 盖子与 state.batchId 失配成孤儿——本场景钉死收口后零 loading 盖子
+        f('action_batch', { batchSize: 2 }),
+        f('reason', { text: 'late background reasoning' }),
+        f('user', { text: 'Q20-next' }),
+        f('reason', { text: 'think next' }),
+        f('text', { text: 'body next' }),
+        f('done', {}),
+    ].forEach((fr) => rt.dev.append(fr));
+    rt.api.setActive(sid);
+    await rt.clock.tick(2000);
+    const allAi = rt.conv.messages.filter((m) => m.role === 'ai');
+    assert.ok(allAi.length >= 2, '两轮 AI 消息都必须回放出来');
+    allAi.forEach((m, i) => {
+        assert.equal(m.status, 'done', '回放轮 ' + i + ' 必须收口');
+        const lids = m.blocks.filter((b) => b.kind === 'batch' && b.status === 'loading');
+        assert.equal(lids.length, 0, '回放轮 ' + i + ' 不得残留 loading 盖子（「正在执行中」计时真因）');
+        m.blocks.filter((b) => b.kind === 'batch').forEach((b) => {
+            assert.equal(b.startedAt, 0, '收口盖子不得保留计时起点');
+        });
+    });
+    assert.ok(allAi[0].blocks.some((b) => b.kind === 'tool'), '过程轨迹不得被收口误丢');
+
+    // ② live 形态·真失配链（旧实现实锤复现）：done 收口已置 batchOpen=false，
+    //    迟到过程帧经 ensureProcessBatch 重开盖子后，若该帧后续处理在真机抛异常
+    //    （safeConsumeFrame 帧级隔离吞掉），state.batchId 指向的盖子已 push 但
+    //    state 与消息实体就此错位；下一轮 closeBatch 按 state.batchId 找不到/
+    //    收错盖子 → 孤儿 loading 盖子每秒刷「正在执行中」。这里用「done 后迟到
+    //    reason 帧开盖 + 立即新轮 user（空尾条不 reset）」构造同构失配。
+    const sid2 = 'work-s20b';
+    const rt2 = await makeRuntime({ sessionId: sid2 });
+    let s2 = 1;
+    const g = (type, extra) => ({ eventSeq: s2++, type, sessionId: sid2, runId: 'run-20b', ...(extra || {}) });
+    rt2.dev.running = true;
+    rt2.api.setActive(sid2);
+    await rt2.clock.tick(50);
+    rt2.dev.emit(g('user', { text: 'Q20b' }), rt2.hooks);
+    rt2.dev.emit(g('reason', { text: 'think b' }), rt2.hooks);
+    rt2.dev.emit(g('text', { text: 'body b' }), rt2.hooks);
+    await rt2.clock.tick(200);
+    rt2.dev.running = false;
+    rt2.dev.emit(g('done', {}), rt2.hooks);
+    await drainMicrotasks();
+    let tail2 = lastAi(rt2.conv);
+    assert.equal(tail2.status, 'done', 'live done 必须收口');
+    // done 后迟到 reason：runSettled 闸门应丢弃；但【绕过闸门的失配盖子】
+    // （历史版本/异常路径产物）直接注入实体模拟：state.batchId 不指向它
+    const orphan = {
+        id: 'orphan-lid', kind: 'batch', label: '正在执行中', icon: 'bars',
+        args: '', body: '', preview: '', status: 'loading', duration: '',
+        startedAt: rt2.clock.now() - 5000, failed: false, process: true,
+        batchId: 'orphan-lid', batchCollapsed: false, batchCount: 0,
+        actionId: '', agentName: '', thoughtTime: '', rowOpen: false,
+        interact: '', submitting: false, submitError: '', changes: [],
+        imageUrls: [], meta: '',
+    };
+    tail2.blocks.unshift(orphan);
+    // 新轮 user + 过程 + done：closeBatch 必须按【盖子实体】把孤儿一并收掉
+    //（旧实现只认 state.batchId → 孤儿永存，本断言在旧代码上 FAIL）
+    rt2.dev.running = true;
+    rt2.dev.emit(g('user', { text: 'Q20b-next' }), rt2.hooks);
+    rt2.dev.emit(g('reason', { text: 'think next b' }), rt2.hooks);
+    rt2.dev.emit(g('text', { text: 'body next b' }), rt2.hooks);
+    await rt2.clock.tick(200);
+    rt2.dev.running = false;
+    rt2.dev.emit(g('done', {}), rt2.hooks);
+    await drainMicrotasks();
+    const prevRound = rt2.conv.messages.filter((m) => m.role === 'ai')[0];
+    const orphanAfter = prevRound.blocks.find((b) => b.id === 'orphan-lid');
+    // 新口径（2026-11-27 二轮）：零成员孤儿盖子直接被清除（「已处理」空壳也不留），
+    // 有成员的必须定格——两种形态都不允许残留 loading/计时
+    assert.ok(orphanAfter == null || (orphanAfter.status !== 'loading' && orphanAfter.startedAt === 0),
+        '失配孤儿盖子必须被终态收口链收敛或清除（旧实现按 state.batchId 找不到 → 每秒刷「正在执行中」）');
+    // 终态后的 file_changes（run 级最后信号）兜底扫描同样收敛（双保险）
+    const orphan2 = { ...orphan, id: 'orphan-lid-2', batchId: 'orphan-lid-2', status: 'loading', startedAt: rt2.clock.now() - 3000 };
+    lastAi(rt2.conv).blocks.unshift(orphan2);
+    rt2.dev.emit(g('file_changes', { args: { files: [{ path: 'a.ts', changeType: 'MODIFIED', additions: 1, deletions: 0 }] } }), rt2.hooks);
+    await rt2.clock.tick(100);
+    const orphan2After = lastAi(rt2.conv).blocks.find((b) => b.id === 'orphan-lid-2');
+    assert.ok(orphan2After == null || (orphan2After.status !== 'loading' && orphan2After.startedAt === 0),
+        '终态兜底扫描必须收敛或清除失配孤儿盖子（不得每秒刷「正在执行中」）');
+
+    // ③ 运行中不误收：新轮开批后盖子必须保持 loading + 计时起点
+    rt2.dev.running = true;
+    rt2.dev.emit(g('user', { text: 'Q20c' }), rt2.hooks);
+    rt2.dev.emit(g('reason', { text: 'live think c' }), rt2.hooks);
+    await rt2.clock.tick(100);
+    const tail3 = lastAi(rt2.conv);
+    assert.ok(tail3.blocks.some((b) => b.kind === 'batch' && b.status === 'loading' && b.startedAt > 0),
+        '运行中批次盖子必须保持 loading + 计时（收口修复不得误杀活批次）');
+    rt2.dev.emit(g('text', { text: 'body c' }), rt2.hooks);
+    rt2.dev.running = false;
+    rt2.dev.emit(g('done', {}), rt2.hooks);
+    await drainMicrotasks();
+    const tail4 = lastAi(rt2.conv);
+    assert.equal(tail4.status, 'done', '新轮 done 必须收口');
+    assert.ok(tail4.blocks.filter((b) => b.kind === 'batch').every((b) => b.status !== 'loading' && b.startedAt === 0),
+        '新轮收口后盖子必须全部定格');
+});
+
+/* S21 空壳「已处理」盖子 + 回填后 Compact（2026-11-27 用户截图报障「第一条消息
+   只有个已处理，是没收入总体折叠还是多的」）：
+   ① 零成员批次收口后不得残留「已处理」空壳行（没有任何可展开内容）；
+   ② 回放收口时正文块丢失（投毒帧吞 text 段）→ fillMissingFinalText 回填后
+      必须重建 Compact：摘要头在、compactOpen=false、正文可见，而不是孤零零盖子。 */
+await scenario('S21 空壳已处理盖子清除 + 正文回填后重建整轮 Compact', async () => {
+    // ① 零成员盖子：reason_start 开盖后帧异常，成员没挂上，收口只剩「已处理」空壳
+    const sid = 'work-s21';
+    const rt = await makeRuntime({ sessionId: sid });
+    let s = 1;
+    const f = (type, extra) => ({ eventSeq: s++, type, sessionId: sid, runId: 'run-21', ...(extra || {}) });
+    const poisonReason = { type: 'reason', sessionId: sid, runId: 'run-21', eventSeq: s++ };
+    // 开盖（ensureProcessBatch）后消费抛异常：盖子已 push、成员未挂 → 零成员盖子
+    Object.defineProperty(poisonReason, 'text', { get() { throw new Error('uts-cast-throw'); }, configurable: true });
+    [
+        f('user', { text: 'Q21' }),
+        poisonReason,
+        f('text', { text: 'answer 21' }),
+        f('done', {}),
+    ].forEach((fr) => rt.dev.append(fr));
+    rt.api.setActive(sid);
+    await rt.clock.tick(800);
+    const ais21 = rt.conv.messages.filter((m) => m.role === 'ai');
+    ais21.forEach((m) => {
+        if (m.status !== 'done' && m.status !== 'stopped') return;
+        m.blocks.filter((b) => b.kind === 'batch').forEach((b) => {
+            const members = m.blocks.filter((x) => x.kind !== 'batch' && x.batchId === b.id).length;
+            assert.ok(members > 0, '终态消息不得残留零成员「已处理」空壳盖子（用户截图第一行形态）');
+        });
+    });
+
+    // ② 正文块丢失轮：投毒 text 帧（appendFinalText 前抛）→ msg.text 空 →
+    //    收口摘要在但正文空；fillMissingFinalText 回填后必须 compactOpen=false 且正文可见
+    const sid2 = 'work-s21b';
+    const rt2 = await makeRuntime({ sessionId: sid2 });
+    const origRequest2 = rt2.dev.request;
+    rt2.dev.request = async (method, apiPath, query, body, root) => {
+        if (apiPath === '/web/chat/messages') {
+            return { code: 200, data: [{ role: 'USER', content: 'Q21b' }, { role: 'ASSISTANT', content: 'backfilled body 21b' }] };
+        }
+        return origRequest2(method, apiPath, query, body, root);
+    };
+    let s2 = 1;
+    const g = (type, extra) => ({ eventSeq: s2++, type, sessionId: sid2, runId: 'run-21b', ...(extra || {}) });
+    const poisonText = { type: 'text', sessionId: sid2, runId: 'run-21b', eventSeq: s2++ };
+    Object.defineProperty(poisonText, 'text', { get() { throw new Error('uts-cast-throw'); }, configurable: true });
+    [
+        g('user', { text: 'Q21b' }),
+        g('reason', { text: 'think 21b' }),
+        g('action_start', { actionId: 't21b', toolName: 'read', args: { file_path: 'a.ts' } }),
+        g('action_end', { actionId: 't21b', toolName: 'read', text: 'ok', durationMs: 3 }),
+        poisonText,
+        g('done', {}),
+    ].forEach((fr) => rt2.dev.append(fr));
+    rt2.api.setActive(sid2);
+    await rt2.clock.tick(2500);
+    const filled = rt2.conv.messages.filter((m) => m.role === 'ai').find((m) => m.text.includes('backfilled body 21b'));
+    assert.ok(filled != null, '空正文轮必须从快照回填最终正文（S14 契约保持）');
+    assert.ok(filled.summary.length > 0, '回填后必须有整轮摘要头（不是孤零零盖子）');
+    assert.equal(filled.compactOpen, false, '回填后整轮 Compact 必须处于折叠态（过程收进总体折叠）');
+    assert.ok(filled.counts.tools >= 1, '回填后 counts 必须按 blocks 真实计数（工具 ≥1）');
+    assert.ok(!filled.blocks.some((b) => b.kind === 'text' && b.body === 'backfilled body 21b'),
+        '与最终正文同文的过程 text 段必须移除（不得渲染两遍）');
+});
+
+/* S22 压缩分隔线 PC 对齐（2026-11-27 用户报障「压缩显示和 PC 端不一致」）：
+   context_compacted 帧必须落成专用 compacted 分隔线块（PC .context-compacted-divider），
+   而不是 notice 工具行：①先收口运行中批次盖子；②明细='before → after'；
+   ③process=false + batchId 空（整轮 Compact 折叠后仍可见，PC KEEP_VISIBLE）。 */
+await scenario('S22 context_compacted 分隔线：收口盖子 + 明细投影 + Compact 后常驻', async () => {
+    const sid = 'work-s22';
+    const rt = await makeRuntime({ sessionId: sid });
+    let s = 1;
+    const f = (type, extra) => ({ eventSeq: s++, type, sessionId: sid, runId: 'run-22', ...(extra || {}) });
+    [
+        f('user', { text: 'Q22' }),
+        f('reason', { text: 'think 22' }),
+        f('action_start', { actionId: 't22', toolName: 'read', args: { file_path: 'a.ts' } }),
+        f('action_end', { actionId: 't22', toolName: 'read', text: 'ok', durationMs: 3 }),
+        f('context_compacted', { args: { beforeMessages: 120, afterMessages: 32 } }),
+        f('text', { text: 'answer after compaction' }),
+        f('done', {}),
+    ].forEach((fr) => rt.dev.append(fr));
+    rt.api.setActive(sid);
+    await rt.clock.tick(800);
+    const ai = rt.conv.messages.filter((m) => m.role === 'ai').pop();
+    const ccd = ai.blocks.find((b) => b.kind === 'compacted');
+    assert.ok(ccd != null, 'context_compacted 必须落成 compacted 分隔线块（不是 notice 工具行）');
+    assert.equal(ccd.compactDetail, '120 → 32', '明细必须是 beforeMessages → afterMessages 投影（仅数据字段，不上屏——PC data-detail/title 同口径）');
+    // sim 的 i18n 桩恒回显 key：这里锁「取词键必须是 PC 同源 chat.context_compacted」，
+    // 12 语言译文与 PC locales 逐语言同值由 verify-mobile-fixes 20b 静态断言保证
+    assert.equal(ccd.label, 'chat.context_compacted', '可见文案必须取 PC 同源词条键 chat.context_compacted（不得自造 segment 键）');
+    assert.equal(ccd.process, false, '分隔线不进整轮 Compact（PC KEEP_VISIBLE）');
+    assert.equal(ccd.batchId, '', '分隔线不挂批次（不随盖子折叠）');
+    assert.ok(!ai.blocks.some((b) => b.kind === 'notice'), '不得再落 notice 行');
+    // 帧到达先收口盖子：分隔线之前的批次必须已定格（压缩前/后分界）
+    const ccdIdx = ai.blocks.indexOf(ccd);
+    ai.blocks.slice(0, ccdIdx).filter((b) => b.kind === 'batch').forEach((b) => {
+        assert.ok(b.status !== 'loading' && b.batchCollapsed, '分隔线之前的批次盖子必须已收口折叠');
+    });
+    // 收口后 Compact 折叠态：分隔线仍可见（visibleBlocks 的 !process 过滤放行）
+    assert.ok(ai.summary.length > 0 && !ai.compactOpen, '轮收口后应处于 Compact 折叠态');
+    assert.ok(ai.blocks.filter((b) => !b.process).some((b) => b.kind === 'compacted'),
+        'Compact 折叠态下分隔线必须仍在可见集合（!process 常驻）');
+    // 无明细帧（args 缺失）：compactDetail 空串，分隔线仍渲染
+    const sid2 = 'work-s22b';
+    const rt2 = await makeRuntime({ sessionId: sid2 });
+    let s2 = 1;
+    const g = (type, extra) => ({ eventSeq: s2++, type, sessionId: sid2, runId: 'run-22b', ...(extra || {}) });
+    [
+        g('user', { text: 'Q22b' }),
+        g('context_compacted', {}),
+        g('text', { text: 'body 22b' }),
+        g('done', {}),
+    ].forEach((fr) => rt2.dev.append(fr));
+    rt2.api.setActive(sid2);
+    await rt2.clock.tick(800);
+    const ai2 = rt2.conv.messages.filter((m) => m.role === 'ai').pop();
+    const ccd2 = ai2.blocks.find((b) => b.kind === 'compacted');
+    assert.ok(ccd2 != null && ccd2.compactDetail === '', 'args 缺失时明细为空串，分隔线仍渲染');
+    // 【codereview 回归锁 · 同帧去重】同一压缩事件重复送达（回放+live 双通道重叠）
+    // 不得画两条线：尾条末尾已是同明细分隔线（中间只隔已收口盖子）→ 幂等跳过；
+    // 中间有真实内容/明细不同 = 真的二次压缩 → 正常新增。
+    const sid3 = 'work-s22c';
+    const rt3 = await makeRuntime({ sessionId: sid3 });
+    let s3 = 1;
+    const h = (type, extra) => ({ eventSeq: s3++, type, sessionId: sid3, runId: 'run-22c', ...(extra || {}) });
+    [
+        h('user', { text: 'Q22c' }),
+        h('context_compacted', { args: { beforeMessages: 100, afterMessages: 40 } }),
+        h('context_compacted', { args: { beforeMessages: 100, afterMessages: 40 } }),
+        h('text', { text: 'between compactions' }),
+        h('context_compacted', { args: { beforeMessages: 90, afterMessages: 30 } }),
+        h('done', {}),
+    ].forEach((fr) => rt3.dev.append(fr));
+    rt3.api.setActive(sid3);
+    await rt3.clock.tick(800);
+    const ai3 = rt3.conv.messages.filter((m) => m.role === 'ai').pop();
+    const ccds = ai3.blocks.filter((b) => b.kind === 'compacted');
+    assert.equal(ccds.length, 2, '重复压缩帧必须去重（同明细相邻），真实二次压缩正常画线');
+    assert.equal(ccds[0].compactDetail, '100 → 40');
+    assert.equal(ccds[1].compactDetail, '90 → 30');
 });
 
 /* ---------------- 汇总 ---------------- */

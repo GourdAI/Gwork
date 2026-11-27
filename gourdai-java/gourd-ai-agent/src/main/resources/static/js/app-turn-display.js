@@ -488,6 +488,11 @@
         for (var i = 0; i < visible.length; i++) {
             var el = visible[i];
             var m = metrics[i];
+            /* 【㉖ 并列让位】建窗成员打类（不写 inline 几何）：CSS 据此给卡体
+               两个轨道宽的内距、把卡体自绘 thumb 内移一列，最右一列留给窗滚条。
+               类跨 tick 恒定 ⇒ 量测宽度与绘制宽度同纲（㉕ inline margin 走廊
+               每轮被清补偿清掉，量整宽画窄宽，每秒一次全宽↔窄宽重排）。 */
+            if (el.classList) el.classList.add('turn-win-member');
             var rowTop = g.rows[i];
             var rowBottom = rowTop + m.h;
             var clipTop = Math.max(0, pos - rowTop);
@@ -519,6 +524,8 @@
     function clearWindowPaint(ms) {
         for (var i = 0; i < ms.length; i++) {
             var el = ms[i];
+            /* 摘并列让位类：拆窗后卡体回到单轨道宽，thumb 回到最右缘 */
+            if (el.classList) el.classList.remove('turn-win-member');
             if (el.style) {
                 /* margin 一律清空交还样式表：写死基值会把样式表后续变更
                    （主题/紧凑层）钉死；清 inline 才是真还原。 */
@@ -650,6 +657,8 @@
         paintBatchGuide(header);
         bindWindowWheel(header);
         bindScrollbarDrag(header);
+        /* 成员卡体自绘 thumb 随窗几何同轮刷新（让位类刚写入，轨道位/视口高须重量） */
+        refreshInnerScrollbars(header.parentNode);
     }
 
     /* ===== 自绘滚动条（2026-11 用户报「收缩折叠固定高度，滚动条没显示」）=====
@@ -673,7 +682,21 @@
        读不到变量（桩 DOM / 变量缺失）时回落到与 theme.css 同值的字面量，
        保证 Node 契约测试与极端环境下的行为不变。 */
     var SB_MIN_THUMB_FALLBACK = 36;
+    var SB_SIZE_FALLBACK = 12;  /* 轨道宽回落值 = theme.css --scrollbar-size */
     var SB_HIT = 16;           /* 盖子右缘拖动命中区宽度（视觉 6px，命中 16px） */
+
+    /* 【㉖ 2026-11-27 用户拍板「不能使用原生滚动条，我们的滚动条都是统一样式的」】
+       ㉕ 的「几何让位」只是把两条轨道错开 1px，第二条（浏览器绘制的卡体滚条）依旧
+       存在，两套管线必然两套时序 —— 不满足规约，已整体撤销（不再有 margin-right 走廊，
+       也不再有「把内层 gutter 让给浏览器」的命中分支）。
+       终态：卡体的浏览器滚条完全不绘制（app.css ㉖ 块 ::-webkit-scrollbar{display:none}），
+       滚动仍走原生 scrollTop（滚轮 / overscroll-behavior / 流式置底跟随语义零改动），
+       可见 thumb 由【与限高窗同一条 CSS 规则】画在外层卡片的 ::after 上：
+         · 宿主是【不滚动的卡片】（.tool-card / .thinking-block / .agent-card），
+           伪元素若是滚动体自身的后代会随内容滚走 —— 挂卡片才恒定；
+         · 几何全部经同一组 --win-sb-* 变量下发，与盖子共用 paintScrollbar 一个函数；
+         · 静息只留一条：卡体 thumb 常态 opacity:0，hover / 拖动 / 滚动中才浮现，
+           常驻可见的始终是外层限高窗那条（用户静息视野里永远只有一条滚条）。 */
 
     /* 读 :root 上的滚动条规范变量（一次量测，缓存；主题切换不改这组几何值）。 */
     function scrollbarVar(header, name, fallback) {
@@ -685,7 +708,29 @@
         return (isFinite(n) && n > 0) ? n : fallback;
     }
 
-    /* 量测/重绘滚动条几何。metrics 是 refreshWindow 清补偿后、paintWindow 之前
+    /* 【㉖ 唯一一处 thumb 几何算式】两种宿主共用：批次限高窗（盖子）与过程卡体（卡片）。
+       入参是纯数值，函数只写 4 个 CSS 变量 + 返回命中几何 —— 没有第二套比例/圆角/
+       最小长度算法可漂移。轨道宽/圆角/内衬在 CSS 里直接引用 --scrollbar-*。
+         host     画 ::after 的元素（盖子 / 卡片，必须 position:relative）
+         trackTop 轨道顶相对 host 顶的距离
+         viewH    视口高（窗恒 WINDOW_MAX_PX；卡体 = clientHeight）
+         pos      当前滚动位；overflow 可滚总量 */
+    function paintScrollbar(host, trackTop, viewH, pos, overflow) {
+        if (!host || !host.style || !host.style.setProperty) return null;
+        var total = overflow + viewH;
+        var minThumb = scrollbarVar(host, '--scrollbar-thumb-min', SB_MIN_THUMB_FALLBACK);
+        var thumbH = Math.max(minThumb, Math.round(viewH * viewH / total));
+        if (thumbH > viewH) thumbH = viewH;   /* 极短视口：thumb 不得超出轨道 */
+        var thumbTop = overflow > 0 ? Math.round((viewH - thumbH) * pos / overflow) : 0;
+        var size = scrollbarVar(host, '--scrollbar-size', SB_SIZE_FALLBACK);
+        host.style.setProperty('--win-sb-top', px(trackTop));
+        host.style.setProperty('--win-sb-h', px(viewH));
+        host.style.setProperty('--win-sb-thumb-h', px(thumbH));
+        host.style.setProperty('--win-sb-thumb-y', px(thumbTop));
+        return { trackTop: trackTop, viewH: viewH, thumbH: thumbH, size: size };
+    }
+
+    /* 量测/重绘限高窗滚动条。metrics 是 refreshWindow 清补偿后、paintWindow 之前
        量的纯布局位（top 不含 translateY），首成员 mt 上缘即成员区顶。 */
     function paintWindowScrollbar(header, pos, overflow) {
         if (!header || !header.style || !header.style.setProperty || !measurable(header)) return;
@@ -699,15 +744,8 @@
            margin 折叠间隙（探针实测 gap 模型与真实布局差 2px）。 */
         var trackTop = metrics[0].top - hr.top;
         if (!(trackTop >= 0)) trackTop = hr.height;   /* 防御：异常几何回落盖子高 */
-        var total = overflow + WINDOW_MAX_PX;
-        var minThumb = scrollbarVar(header, '--scrollbar-thumb-min', SB_MIN_THUMB_FALLBACK);
-        var thumbH = Math.max(minThumb, Math.round(WINDOW_MAX_PX * WINDOW_MAX_PX / total));
-        var thumbTop = overflow > 0 ? Math.round((WINDOW_MAX_PX - thumbH) * pos / overflow) : 0;
-        header.style.setProperty('--win-sb-top', px(trackTop));
-        header.style.setProperty('--win-sb-h', px(WINDOW_MAX_PX));
-        header.style.setProperty('--win-sb-thumb-h', px(thumbH));
-        header.style.setProperty('--win-sb-thumb-y', px(thumbTop));
-        header._winSbGeom = { trackTop: trackTop, thumbH: thumbH, headH: hr.height };
+        var g = paintScrollbar(header, trackTop, WINDOW_MAX_PX, pos, overflow);
+        if (g) header._winSbGeom = { trackTop: g.trackTop, thumbH: g.thumbH, headH: hr.height, size: g.size };
     }
 
     /* wheel / 拖动共用：只更新 thumb 位移变量（纯算术，不读布局）。 */
@@ -718,22 +756,278 @@
         header.style.setProperty('--win-sb-thumb-y', px(thumbTop));
     }
 
-    /* 拖动命中：盖子右缘 SB_HIT 宽、纵向落在轨道区间内。
-       clientX/Y 与盖子 rect 差分；rect 每次 down 读一次（低频）。 */
+    /* 拖动命中：宿主右缘 SB_HIT 宽、纵向落在轨道区间内（窗与卡体同一判定）。
+       clientX/Y 与宿主 rect 差分；rect 每次 down 读一次（低频）。
+       【㉖】不再有「交还浏览器拖原生 thumb」的分支 —— 浏览器根本不画滚条，
+       归属天然唯一：命中谁的轨道就拖谁，内层优先（见 scrollbarTargetFor）。 */
     function scrollbarHit(header, ev) {
         var g = header._winSbGeom;
         if (!g || typeof ev.clientX !== 'number' || typeof ev.clientY !== 'number') return false;
         var hr = header.getBoundingClientRect();
         var x = ev.clientX - hr.left, y = ev.clientY - hr.top;
-        return x >= hr.width - SB_HIT && x <= hr.width
-            && y >= g.trackTop && y <= g.trackTop + WINDOW_MAX_PX;
+        return (x >= hr.width - SB_HIT && x <= hr.width
+                && y >= g.trackTop && y <= g.trackTop + WINDOW_MAX_PX);
+    }
+
+    /* ===== ㉖ 过程卡体自绘滚条（唯一一套，与限高窗共用 CSS 规则与几何算式）=====
+       卡体的浏览器滚条已在 CSS 里彻底不绘制（::-webkit-scrollbar{display:none}），
+       但滚动本身仍是原生 scrollTop —— 滚轮、overscroll-behavior:contain、
+       app-message.js 的流式置底跟随 / 用户上翻停跟随判据全部零改动（这是本方案
+       刻意保留原生滚动语义的原因：换成合成游标要重写跟随判据，风险面大得多）。
+       本节只负责「把不可见的滚动位置画成统一样式的 thumb」+「让它可拖动」。
+         · 宿主 = 外层卡片（不滚动），伪元素才不会随内容滚走；
+         · 轨道顶 = 卡体 rect.top - 卡片 rect.top（标题头高度 + 边框，实测量）；
+         · 轨道高 = 卡体 clientHeight（真实视口，扣掉 padding 后的可见高）；
+         · 内容增长 / 展开收起 / resize 由秒级 ticker 与 ResizeObserver 双路刷新。 */
+    var INNER_BODY_CLASSES = ['tool-card-body', 'thinking-block-body', 'agent-card-body'];
+
+    /* 滚动体 → 画 thumb 的宿主卡片。只认【直接父级】：卡体与卡片是固定父子结构
+       （createToolCardShell / createThinkingBlockEl / 子代理卡三处建卡皆然），
+       上溯会误把嵌套外层卡当宿主（子代理卡体里还有工具卡体）。 */
+    function scrollbarHostOf(body) {
+        var host = body && body.parentNode;
+        if (!host || !host.classList || !host.style) return null;
+        if (!(host.classList.contains('tool-card') || host.classList.contains('thinking-block')
+                || host.classList.contains('agent-card'))) return null;
+        return host;
+    }
+
+    function innerBodyOf(node) {
+        var n = node;
+        while (n && n.nodeType === 1) {
+            var cls = n.classList;
+            if (cls) {
+                for (var i = 0; i < INNER_BODY_CLASSES.length; i++) {
+                    if (cls.contains(INNER_BODY_CLASSES[i])) return n;
+                }
+            }
+            n = n.parentNode;
+        }
+        return null;
+    }
+
+    /* 【㉖ code review 修复】展开态判定：收起的卡体是 display:none，但 clientHeight /
+       scrollHeight 在隐藏子树上【仍返回上次布局的旧值】（Chromium 实测非 0），
+       于是「不可滚 → 不画」这条判据拦不住它 —— 收起后 thumb 仍留在卡片右缘。
+       真机探针实证：子代理卡收起后 .gourd-sb 仍在、::after 仍占位。
+       口径：直接读【计算后 display】，none 即不画（不依赖 offsetParent，
+       桩 DOM 无 getComputedStyle(el) 时跳过此判定，契约测试零感知）。 */
+    function innerBodyVisible(body) {
+        var view = body.ownerDocument && body.ownerDocument.defaultView;
+        if (!view || !view.getComputedStyle) return true;
+        var st = view.getComputedStyle(body);
+        if (st && st.display === 'none') return false;
+        if (hiddenFromRoot(body)) return false;
+        /* 祖先收起同样要判：子代理卡收起时卡内工具卡体的 computed display 仍是
+           block（display:none 不继承），只有 rect 全 0 —— 不补这一条，外层收起后
+           内层 thumb 会留在原处（真机探针实证）。
+           【必须先判祖先卡体】隐藏子树里【后代的 rect 也全 0，但后代自己的卡体
+           display 仍是 block】，只查自身会漏判；沿父链把每一层卡体都过一遍。 */
+        var n = body.parentNode;
+        while (n && n.nodeType === 1) {
+            var cls = n.classList;
+            if (cls) {
+                for (var i = 0; i < INNER_BODY_CLASSES.length; i++) {
+                    if (cls.contains(INNER_BODY_CLASSES[i])) {
+                        var s2 = view.getComputedStyle(n);
+                        if (s2 && s2.display === 'none') return false;
+                        break;
+                    }
+                }
+            }
+            n = n.parentNode;
+        }
+        var r = body.getBoundingClientRect();
+        return !(r && r.height === 0 && r.width === 0);
+    }
+
+    /* 卡体滚动几何（纯读）。不可滚 / 隐藏 / 零布局桩 → null（不画 thumb）。 */
+    function innerScrollGeom(body) {
+        if (!body || typeof body.getBoundingClientRect !== 'function') return null;
+        if (!innerBodyVisible(body)) return null;
+        var viewH = body.clientHeight;
+        var overflow = body.scrollHeight - viewH;
+        if (!(viewH > 0) || !(overflow > 1)) return null;
+        var host = scrollbarHostOf(body);
+        if (!host || !measurable(host)) return null;
+        var br = body.getBoundingClientRect(), hr = host.getBoundingClientRect();
+        if (!(br.height > 0) || !(hr.height > 0)) return null;
+        return { host: host, body: body, trackTop: br.top - hr.top, viewH: viewH,
+                 overflow: overflow, pos: body.scrollTop };
+    }
+
+    /* 画/更新一个卡体的 thumb。返回是否处于「有滚条」态（供类增删）。 */
+    function paintInnerScrollbar(body) {
+        var g = innerScrollGeom(body);
+        var host = scrollbarHostOf(body);
+        if (!host) return false;
+        if (!g) {
+            clearInnerScrollbar(body);
+            /* 自身不可见（含祖先收起）时，后代卡体的条一并清掉 */
+            if (!innerBodyVisible(body)) clearHiddenDescendants(host);
+            return false;
+        }
+        var geom = paintScrollbar(g.host, g.trackTop, g.viewH, g.pos, g.overflow);
+        if (!geom) return false;
+        host._sbGeom = { trackTop: geom.trackTop, viewH: geom.viewH, thumbH: geom.thumbH,
+                         size: geom.size, body: body, right: laneOffset(host) };
+        if (host.classList) host.classList.add('gourd-sb');
+        bindInnerScrollbar(body);
+        /* 拖动入口：批次窗存在时由 bindScrollbarDrag 统一接管；平铺态（历史展开、
+           批次偏好关闭）没有窗，也必须能拖 —— 这里补一次同入口绑定（幂等）。 */
+        bindInnerDragHost(body);
+        return true;
+    }
+
+    function clearInnerScrollbar(body) {
+        var host = scrollbarHostOf(body);
+        if (!host) return;
+        if (host.classList) { host.classList.remove('gourd-sb'); host.classList.remove('sb-active'); }
+        host._sbGeom = undefined;
+        host._sbFp = undefined;
+        if (host.style && host.style.removeProperty) {
+            host.style.removeProperty('--win-sb-top');
+            host.style.removeProperty('--win-sb-h');
+            host.style.removeProperty('--win-sb-thumb-h');
+            host.style.removeProperty('--win-sb-thumb-y');
+        }
+    }
+
+    /* 只更新 thumb 位移（滚轮/滚动事件高频路径，零布局读取）。 */
+    function moveInnerScrollbar(body) {
+        var host = scrollbarHostOf(body);
+        var g = host && host._sbGeom;
+        if (!g || !host.style || !host.style.setProperty) return;
+        var overflow = body.scrollHeight - body.clientHeight;
+        if (!(overflow > 0)) return;
+        var y = Math.round((g.viewH - g.thumbH) * body.scrollTop / overflow);
+        host.style.setProperty('--win-sb-thumb-y', px(y));
+    }
+
+    /* 滚动/拖动中让 thumb 显形（静息态由 CSS :hover 决定），静止 900ms 后交还。 */
+    function flashInnerScrollbar(body) {
+        var host = scrollbarHostOf(body);
+        if (!host || !host.classList) return;
+        host.classList.add('sb-active');
+        if (host._sbFlashTimer) clearTimeout(host._sbFlashTimer);
+        var view = host.ownerDocument && host.ownerDocument.defaultView;
+        var later = (view && view.setTimeout) ? view.setTimeout : setTimeout;
+        host._sbFlashTimer = later(function () {
+            host._sbFlashTimer = null;
+            if (host.classList) host.classList.remove('sb-active');
+        }, 900);
+    }
+
+    /* 卡体滚动监听：原生 scrollTop 变化（滚轮 / 键盘 / 程序置底跟随）→ 同步 thumb。
+       绑在卡体自身（scroll 不冒泡），一元素一监听。 */
+    function bindInnerScrollbar(body) {
+        if (!body || body._sbBound || typeof body.addEventListener !== 'function') return;
+        body._sbBound = true;
+        body.addEventListener('scroll', function () {
+            moveInnerScrollbar(body);
+            flashInnerScrollbar(body);
+        }, { passive: true });
+    }
+
+    /* 祖先卡片收起时，其后代卡体一并清条（子代理卡体内的工具/思考卡）。
+       hiddenFromRoot 只看 inline display 与 offsetParent 链，类驱动的
+       `.agent-card:not(.expanded) > .agent-card-body{display:none}` 它看不见，
+       故这里按【宿主卡片是否仍展开】显式判定，与 CSS 的展开口径同源。 */
+    function clearHiddenDescendants(host) {
+        if (!host || !host.querySelectorAll) return;
+        var sel = INNER_BODY_CLASSES.map(function (c) { return '.' + c; }).join(', ');
+        var inner = host.querySelectorAll(sel);
+        for (var i = 0; i < inner.length; i++) {
+            if (!innerBodyVisible(inner[i])) clearInnerScrollbar(inner[i]);
+        }
+    }
+
+    /* 容器内全部卡体重算（展开/收起、流式增长、resize、会话切回）。 */
+    function refreshInnerScrollbars(container) {
+        if (!container || !container.querySelectorAll || !measurable(container)) return;
+        var sel = INNER_BODY_CLASSES.map(function (c) { return '.' + c; }).join(', ');
+        var bodies = container.querySelectorAll(sel);
+        for (var i = 0; i < bodies.length; i++) paintInnerScrollbar(bodies[i]);
+    }
+
+    /* 秒级兜底：指纹差分驱动，几何真变了才重画（静态历史零写入）。
+       指纹取「视口高 + 内容高 + 滚动位 + 轨道顶」四元组：任一变化都会让 thumb
+       长度/位置/轨道位失真，正是需要重画的全部情形。 */
+    function tickInnerScrollbars() {
+        if (typeof document === 'undefined' || !document.querySelectorAll) return;
+        var sel = INNER_BODY_CLASSES.map(function (c) { return '.gourd-sb > .' + c; }).join(', ');
+        var live = document.querySelectorAll(sel);
+        for (var i = 0; i < live.length; i++) {
+            var body = live[i];
+            var host = scrollbarHostOf(body);
+            var g = host && host._sbGeom;
+            if (!g || hiddenFromRoot(host)) continue;
+            /* 收起（display:none）必须立即清条：隐藏子树的 clientHeight/scrollHeight
+               仍是旧布局值，指纹差分永远「没变」，thumb 会一直挂在卡片右缘。 */
+            if (!innerBodyVisible(body)) { clearInnerScrollbar(body); continue; }
+            var br = body.getBoundingClientRect(), hr = host.getBoundingClientRect();
+            var fp = body.clientHeight + '/' + body.scrollHeight + '/' + Math.round(body.scrollTop)
+                + '/' + Math.round(br.top - hr.top);
+            if (host._sbFp !== fp) { host._sbFp = fp; paintInnerScrollbar(body); }
+        }
+        /* 新出现的可滚卡体（平铺态展开、流式长过限高）尚未打类，需补建一次。
+           只扫未打类的卡体，命中即建；已打类的走上面差分路径，不重复量。 */
+        var fresh = document.querySelectorAll(INNER_BODY_CLASSES.map(function (c) { return '.' + c; }).join(', '));
+        for (var j = 0; j < fresh.length; j++) {
+            var b = fresh[j];
+            var h = scrollbarHostOf(b);
+            if (!h || (h.classList && h.classList.contains('gourd-sb'))) continue;
+            if (hiddenFromRoot(h)) continue;
+            if (!innerBodyVisible(b)) continue;   /* 收起卡体的 scrollHeight 是旧布局值，不能据此建条 */
+            if (b.scrollHeight - b.clientHeight > 1) paintInnerScrollbar(b);
+        }
+    }
+
+    /* 轨道右内移量：建窗成员的卡体 thumb 让到左一列（最右列归批次窗）。
+       读 CSS 实际生效的 right（而不是自己再算一遍类名条件）—— 样式表是唯一真源，
+       JS 只消费结果，杜绝「CSS 让位了、JS 命中判定还按 right:0」的两处口径分叉
+       （真机实测：漏同步时拖卡体轨道会被判成窗轨道，内层滚不动）。 */
+    function laneOffset(host) {
+        var view = host.ownerDocument && host.ownerDocument.defaultView;
+        if (!view || !view.getComputedStyle) return 0;
+        var v = view.getComputedStyle(host, '::after').right;
+        var n = parseFloat(v);
+        return (isFinite(n) && n > 0) ? n : 0;
+    }
+
+    /* 拖动命中：宿主右缘 SB_HIT 宽 + 纵向落在轨道区间内（卡体版，与窗同口径）。 */
+    function innerScrollbarHit(host, ev) {
+        var g = host && host._sbGeom;
+        if (!g || typeof ev.clientX !== 'number' || typeof ev.clientY !== 'number') return false;
+        if (!(g.body && g.body.scrollHeight - g.body.clientHeight > 1)) return false;
+        var hr = host.getBoundingClientRect();
+        var x = ev.clientX - hr.left, y = ev.clientY - hr.top;
+        var right = g.right || 0;
+        return (x >= hr.width - right - SB_HIT && x <= hr.width - right
+                && y >= g.trackTop && y <= g.trackTop + g.viewH);
+    }
+
+    /* 落点归属：从事件目标上溯，先遇到的宿主优先（内层卡体 > 外层限高窗）。
+       返回 {host, body} 表示拖卡体；返回 {header} 表示拖窗；null = 不接管。 */
+    function scrollbarTargetFor(bubble, ev) {
+        var node = ev && ev.target;
+        while (node && node.nodeType === 1 && node !== bubble) {
+            if (node._sbGeom && innerScrollbarHit(node, ev)) return { host: node, body: node._sbGeom.body };
+            node = node.parentNode;
+        }
+        var hs = childHeadersOf(bubble);
+        for (var i = 0; i < hs.length; i++) {
+            if (hs[i].classList && hs[i].classList.contains('turn-batch-windowed')
+                    && scrollbarHit(hs[i], ev)) return { header: hs[i] };
+        }
+        return null;
     }
 
     /* 拖动绑在【宿主容器】上（与 wheel 同策略）：::after 伪元素 pointer-events:none，
-       轨道区的 pointerdown 实际命中的是【成员行】而不是盖子 —— 绑盖子收不到事件。
-       按 clientX/Y 几何判定落在哪个 windowed 盖子的轨道区（scrollbarHit），
-       命中才接管；其余落点零干预（成员卡自己的展开 click 不受影响）。
-       接管后 document 级 pointermove/up + header.setPointerCapture 双保险，
+       轨道区的 pointerdown 实际命中的是【成员行/卡体】而不是画滚条的那个元素 ——
+       绑盖子/卡片都收不到事件。按几何判定归属（scrollbarTargetFor），命中才接管；
+       其余落点零干预（成员卡自己的展开 click 不受影响）。
+       接管后 document 级 pointermove/up/cancel + setPointerCapture 双保险，
        拖动越出轨道也不丢手；click 吞掉用「容器 capture + 近期拖动标记」，
        防止松手时误触成员卡/盖子的 click。 */
     function bindScrollbarDrag(header) {
@@ -742,15 +1036,17 @@
         bubble._winSbDragBound = true;
         bubble.addEventListener('pointerdown', function (ev) {
             if (!ev) return;
-            var hs = childHeadersOf(bubble);
-            var h = null;
-            for (var i = 0; i < hs.length; i++) {
-                if (hs[i].classList && hs[i].classList.contains('turn-batch-windowed')
-                        && scrollbarHit(hs[i], ev)) { h = hs[i]; break; }
-            }
-            if (!h) return;
+            var hit = scrollbarTargetFor(bubble, ev);
+            if (!hit) return;
             if (ev.stopPropagation) ev.stopPropagation();
             if (ev.preventDefault) ev.preventDefault();
+            /* 卡体分支：直接写原生 scrollTop（滚动语义与滚轮完全一致，
+               app-message 的跟随判据照常按 scroll 事件工作）。 */
+            if (hit.body) {
+                dragInnerScrollbar(hit.host, hit.body, ev, bubble);
+                return;
+            }
+            var h = hit.header;
             var overflow = h._winOverflow;
             var g = h._winSbGeom;
             if (!(overflow > 0) || !g) return;
@@ -812,6 +1108,77 @@
         }, true);
     }
 
+    /* 卡体 thumb 拖动：几何比例与窗同一算式（travel = 轨道高 - thumb 高），
+       写入目标是原生 scrollTop —— 浏览器随即派发 scroll，thumb 位移与
+       「用户上翻停跟随」判据都由既有 scroll 监听处理，不另立状态。
+       点击轨道空白区（落点不在 thumb 上）按「翻页」语义跳一屏，与平台一致。 */
+    function dragInnerScrollbar(host, body, ev, bubble) {
+        var g = host._sbGeom;
+        if (!g) return;
+        var doc = host.ownerDocument;
+        var overflow = body.scrollHeight - body.clientHeight;
+        if (!(overflow > 0)) return;
+        var hr = host.getBoundingClientRect();
+        var travel = g.viewH - g.thumbH;
+        if (!(travel > 0)) return;
+        var thumbTopNow = Math.round(travel * body.scrollTop / overflow);
+        var localY = ev.clientY - hr.top - g.trackTop;
+        var grabOffset;
+        if (localY >= thumbTopNow && localY <= thumbTopNow + g.thumbH) {
+            grabOffset = localY - thumbTopNow;           /* 抓住滑块：保持抓取点 */
+        } else {
+            grabOffset = g.thumbH / 2;                   /* 轨道空白：滑块中心跳到落点 */
+            var jump = Math.max(0, Math.min(overflow, (localY - grabOffset) * overflow / travel));
+            body.scrollTop = jump;
+            flashInnerScrollbar(body);
+        }
+        var startY = ev.clientY;
+        var startPos = body.scrollTop;
+        function onMove(e) {
+            var ov = body.scrollHeight - body.clientHeight;
+            var gm = host._sbGeom;
+            var tv = gm ? (gm.viewH - gm.thumbH) : travel;
+            if (ov > 0 && tv > 0) {
+                var next = Math.max(0, Math.min(ov, startPos + (e.clientY - startY) * ov / tv));
+                body.scrollTop = next;
+                flashInnerScrollbar(body);
+            }
+            bubble._winSbDragUntil = Date.now() + 250;
+            if (e.preventDefault) e.preventDefault();
+        }
+        function onUp() {
+            bubble._winSbDragUntil = Date.now() + 250;
+            if (doc && doc.removeEventListener) {
+                doc.removeEventListener('pointermove', onMove, true);
+                doc.removeEventListener('pointerup', onUp, true);
+                doc.removeEventListener('pointercancel', onUp, true);
+            }
+        }
+        bubble._winSbDragUntil = Date.now() + 250;
+        if (doc && doc.addEventListener) {
+            doc.addEventListener('pointermove', onMove, true);
+            doc.addEventListener('pointerup', onUp, true);
+            doc.addEventListener('pointercancel', onUp, true);
+        }
+        if (host.setPointerCapture && ev.pointerId !== undefined) {
+            try { host.setPointerCapture(ev.pointerId); } catch (e) { /* 桩 DOM */ }
+        }
+    }
+
+    /* 卡体滚条的拖动入口：即使该批次没有建限高窗（平铺态 / 历史展开态）也必须可拖。
+       与 bindScrollbarDrag 共用 bubble 上的同一个 _winSbDragBound 标记与 click 吞噬，
+       两者谁先绑谁生效，绝不叠两个 pointerdown 监听。 */
+    function bindInnerDragHost(body) {
+        var host = scrollbarHostOf(body);
+        var bubble = host && host.parentNode;
+        if (!bubble || typeof bubble.addEventListener !== 'function') return;
+        if (bubble._winSbDragBound) return;
+        /* 借用同一入口：造一个「零成员盖子」不现实，直接复用实现 ——
+           bindScrollbarDrag 只依赖 header.parentNode 取 bubble，这里传宿主卡片即可
+           （childHeadersOf(卡片) 为空 ⇒ 窗分支自然不命中，卡体分支照常工作）。 */
+        bindScrollbarDrag(host);
+    }
+
     /* ===== 层级引导线（⑳ Qoder 缩进对齐，2026-11 用户「每个层级缩进一目了然」）=====
        盖子 ::before 画一条 1px 竖线贯穿成员区左列（CSS 见 app.css ⑳ 块），
        高度经 --batch-guide-h 下发。量测口径与滚动条同源：
@@ -861,6 +1228,8 @@
         header._winMetrics = undefined;
         header._winGeom = undefined;
         header._winSbGeom = undefined;
+        /* 拆窗后卡体自绘 thumb 需按新宽度/新轨道位重画（让位类已摘） */
+        if (header.parentNode) refreshInnerScrollbars(header.parentNode);
         return had;
     }
 
@@ -958,6 +1327,8 @@
         for (var i = 0; i < hs.length; i++) {
             if (hs[i].getAttribute('data-batch-open') === 'true') refreshWindow(hs[i], true);
         }
+        /* 平铺态（无窗）卡体同样要有统一滚条：容器级补一次，覆盖历史展开/偏好关闭 */
+        refreshInnerScrollbars(container);
     }
 
     /* 成员被回滚/purge 删除后的残窗清扫：refreshWindow 只认识还挂在 DOM 上的
@@ -2139,6 +2510,11 @@
                 var dc = windowExtentLive(cs[j]);
                 if (dc === null || Math.abs(dc) > 0.5) refreshWindow(cs[j], false);
             }
+            /* 【㉖】卡体自绘 thumb 的兜底刷新：流式增长 / 展开收起 / 主题切换都不
+               经过批次窗入口（平铺态根本没有窗）。这里按【几何指纹】差分，只有
+               scrollHeight / clientHeight / scrollTop / 轨道位真变了才重画，
+               静态历史零写入（与窗的 windowExtentLive 降频同哲学）。 */
+            tickInnerScrollbars();
         }, 1000);
         /* 窗口 resize：宽度变化改换行高度，所有 open 窗强制重量（防抖 200ms）。 */
         if (typeof window !== 'undefined' && window.addEventListener) {
@@ -2149,6 +2525,9 @@
                     rzTimer = null;
                     var ws = document.querySelectorAll('.turn-batch-header.turn-batch-windowed');
                     for (var k = 0; k < ws.length; k++) refreshWindow(ws[k], false);
+                    /* 平铺态卡体同样随宽度改换行高度 */
+                    var wraps = document.querySelectorAll('.messages-wrap, .agent-card-body');
+                    for (var w = 0; w < wraps.length; w++) refreshInnerScrollbars(wraps[w]);
                 }, 200);
             });
         }
@@ -2181,6 +2560,9 @@
         refreshWindow: refreshWindow,
         refreshWindowsIn: refreshWindowsIn,
         detachInteractiveMember: detachInteractiveMember,
+        /* ㉖ 过程卡体统一自绘滚条（与限高窗共用一条 CSS 规则 + 一套几何算式） */
+        refreshInnerScrollbars: refreshInnerScrollbars,
+        paintInnerScrollbar: paintInnerScrollbar,
         /* 历史重建（新增） */
         rebuildBatches: rebuildBatches,
         rebuildBatchesIn: rebuildBatchesIn,

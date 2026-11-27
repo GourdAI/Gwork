@@ -93,7 +93,7 @@ export type ChatMsgStatus = 'processing' | 'done' | 'stopped'
 
 /** 桌面端过程行的类型；气泡内按帧时序平铺，不与最终正文混成一个文本框。
  *  text 是过程中的 Markdown/正文增量块，最终态只保留最后一个 text 块常驻。 */
-export type ChatBlockKind = 'text' | 'thinking' | 'tool' | 'agent' | 'batch' | 'error' | 'retry' | 'notice' | 'qa'
+export type ChatBlockKind = 'text' | 'thinking' | 'tool' | 'agent' | 'batch' | 'error' | 'retry' | 'notice' | 'qa' | 'compacted'
 
 /** 状态点口径（桌面端 .tool-status-icon）：loading/done/warn/reject 四态 */
 export type ChatBlockStatus = 'loading' | 'done' | 'warn' | 'reject'
@@ -204,6 +204,21 @@ export type ChatBlock = {
 	diffDel: string
 	/** 思考行收口耗时（PC「已思考 (Ns)」的 Ns）；运行中为空串 */
 	thoughtTime: string
+	/** 压缩分隔线的消息数明细（'120 → 32'，PC .context-compacted-divider data-detail 同口径）：
+	 *  仅 kind=compacted 使用，来自 context_compacted 帧 args.beforeMessages/afterMessages；无则空串。
+	 *  【不上屏】PC 只把它写进 data-detail/title 悬停提示，可见文案恒为词条本身；
+	 *  原生端无 title 能力，明细仅留数据字段（2026-11-27 第二轮报障：明细被当可见文本渲染） */
+	compactDetail: string
+	/** 工具展开明细的原始入参（PC args 同源，2026-11-27 第三轮报障「编辑展开内容
+	 *  和 PC 全都不一样」根因之一：明细渲染缺完整参数——args 是预览截断 160 不能用）：
+	 *  edit 需要完整 old_str/new_str/diff 合成 diff；bash 需要完整 command；
+	 *  todowrite/todoread 取 todos 原文（PC renderTodoMarkdown 同口径）。
+	 *  单字段上限 4000 防消息膨胀；空串=无此参数。非工具块恒为空串。 */
+	diffRaw: string
+	oldRaw: string
+	newRaw: string
+	commandRaw: string
+	todosRaw: string
 }
 
 /** 文件变更卡的一行（summary.files[i] 的展示投影，只取 UI 需要的字段） */

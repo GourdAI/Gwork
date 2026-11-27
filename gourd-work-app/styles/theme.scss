@@ -58,10 +58,22 @@ $theme-palette: (
 		/* 产物弹层：图片类文件图标（与品牌色区分的内容色，参照设计稿） */
 		'file-image-bg': #e6f2fb,
 		'file-image': #2f8fd6,
+		/* 代码块（= 桌面端 --bg-code-block #f6f6f7 / --text-code #24292e）：
+		   亮色浅灰底深字——此前移动端钉死深底 #111827，与 PC 完全不一致（用户报障） */
+		'code-block-bg': #f6f6f7,
+		'code-block-text': #24292e,
 		/* 阴影：原生端 box-shadow 颜色不支持 var()，仅供 SCSS map-get 使用（= 桌面端 shadow/shadow-lg 的黑灰系） */
 		'shadow': rgba(0, 0, 0, 0.06),
 		'shadow-strong': rgba(0, 0, 0, 0.08),
 		'sheet-shadow': rgba(0, 0, 0, 0.12),
+		/* 工具展开明细（= 桌面端 --bg-code #f4f4f5 / --git-line-* 逐字同源）：
+		   edit diff 行底色/字色、hunk 行字色。PC pre 无阴影（代码阴影块已按用户拍板删除） */
+		'bg-code': #f4f4f5,
+		'git-add-bg': rgba(46, 160, 67, 0.15),
+		'git-add-text': #22863a,
+		'git-del-bg': rgba(248, 81, 73, 0.15),
+		'git-del-text': #cb2431,
+		'git-hunk-text': #032f62,
 		/* 首页主视觉（欢迎语标题 = 桌面端 text-primary，副文案 = text-secondary） */
 		'hero-title': #18181b,
 		'hero-sub': #71717a,
@@ -109,10 +121,20 @@ $theme-palette: (
 		/* 产物弹层：图片类文件图标 */
 		'file-image-bg': #16303f,
 		'file-image': #63b7e8,
+		/* 代码块（= 桌面端暗色 --bg-code-block #0f0f11 / --text-code #d4d4d4） */
+		'code-block-bg': #0f0f11,
+		'code-block-text': #d4d4d4,
 		/* 阴影（暗色底色近黑，阴影加重才可见，= 桌面端暗色 shadow 系） */
 		'shadow': rgba(0, 0, 0, 0.55),
 		'shadow-strong': rgba(0, 0, 0, 0.55),
 		'sheet-shadow': rgba(0, 0, 0, 0.55),
+		/* 工具展开明细（= 桌面端暗色 --bg-code rgba(255,255,255,0.07) / --git-line-* 暗色档） */
+		'bg-code': rgba(255, 255, 255, 0.07),
+		'git-add-bg': rgba(46, 160, 67, 0.2),
+		'git-add-text': #56d364,
+		'git-del-bg': rgba(248, 81, 73, 0.2),
+		'git-del-text': #f87171,
+		'git-hunk-text': #8b949e,
 		/* 首页主视觉 */
 		'hero-title': #e4e4e7,
 		'hero-sub': #8f8f96,

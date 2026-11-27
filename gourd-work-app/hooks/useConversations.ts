@@ -51,6 +51,7 @@ export type Conversations = {
 	refresh: () => Promise<void>
 	/** 历史回放降级后重试：幂等清掉本次快照并重新走 replay 帧重建 */
 	retryHistory: (id: string) => void
+	toggleTurnCompact: (msg: ChatMessage) => void
 	listLoading: Ref<boolean>
 	listError: Ref<string>
 }
@@ -141,6 +142,15 @@ type TurnState = {
 	/** 当前运行批次的开盖时间戳：ensureProcessBatch 写入 head.startedAt（UI 层每秒 tick
 	 *  显示「正在执行中 · Ns」），closeBatch 用它落整批耗时后清零。 */
 	batchStartedAt: number
+	/** 本轮已收口（done/error 落定）标记：【2026-11-26 用户报障「任务都执行完毕了，
+	 *  移动端历史消息还有计时」真因】内核 forwarder 在 run 结束后仍会推迟到过程帧
+	 *  （background agent_end / action_batch / 重连补帧），旧实现经 ensureProcessBatch
+	 *  在【已终态】消息上重开 loading 盖子且无人再收口 → 盖子每秒刷「正在执行中 · Ns」
+	 *  （settleTerminalBatchHeads 只挂在 file_changes 一条路径，无快照的 run 永不收敛）。
+	 *  桌面同口径：finishStream 后 phase=PHASE_DONE，迟到帧不再 noteProcessInsert 开新批。
+	 *  置位后过程帧在 consumeFrame 入口直接丢弃（变更卡/trace 等非过程帧不受影响）；
+	 *  新 run 接流（running.add）/ 切轮 resetTurnState 清零。 */
+	runSettled: boolean
 }
 const turnStates: Map<string, TurnState> = new Map<string, TurnState>()
 
@@ -150,7 +160,8 @@ function turnStateOf(id: string): TurnState {
 		state = {
 			reasonKey: '', reasonOwner: '', batchId: '', batchOpen: false,
 			startedAt: Date.now(), tools: 0, reasons: 0, agents: 0, batches: 0, texts: 0, textKey: '',
-			toolStarts: new Map<string, number>(), agentKeys: new Map<string, string>(), pendingToolKey: '', batchStartedAt: 0
+			toolStarts: new Map<string, number>(), agentKeys: new Map<string, string>(), pendingToolKey: '', batchStartedAt: 0,
+			runSettled: false
 		}
 		turnStates.set(id, state)
 	}
@@ -164,7 +175,8 @@ function resetTurnState(id: string): void {
 	turnStates.set(id, {
 		reasonKey: '', reasonOwner: '', batchId: '', batchOpen: false,
 		startedAt: Date.now(), tools: 0, reasons: 0, agents: 0, batches: 0, texts: 0, textKey: '',
-		toolStarts: new Map<string, number>(), agentKeys: new Map<string, string>(), pendingToolKey: '', batchStartedAt: 0
+		toolStarts: new Map<string, number>(), agentKeys: new Map<string, string>(), pendingToolKey: '', batchStartedAt: 0,
+		runSettled: false
 	})
 }
 
@@ -188,13 +200,15 @@ function emptyBlock(kind: ChatBlockKind, label: string, icon: string): ChatBlock
 	return {
 		id: nextBlockId(), kind, label, icon, args: '', preview: '', body: '',
 		status: 'loading', duration: '', startedAt: 0, failed: false,
-		// agent（子智能体徽章）与 error/retry/qa/notice 一样不随 Compact 折叠：
-		// 桌面徽章挂在气泡本体，不在 [data-turn-process] 容器内，收口后仍常驻
-		process: kind !== 'error' && kind !== 'retry' && kind !== 'qa' && kind !== 'notice' && kind !== 'agent',
+		// agent（子智能体徽章）与 error/retry/qa/notice/compacted 一样不随 Compact 折叠：
+		// 桌面徽章挂在气泡本体，不在 [data-turn-process] 容器内，收口后仍常驻；
+		// compacted 分隔线是轮次边界标记（PC KEEP_VISIBLE 白名单），折叠后仍应可见
+		process: kind !== 'error' && kind !== 'retry' && kind !== 'qa' && kind !== 'notice' && kind !== 'agent' && kind !== 'compacted',
 		batchId: '', batchCount: 0, batchCollapsed: false, agentName: '', actionId: '',
 		interact: '', questions: [], answers: [], submitting: false, submitError: '',
 		command: '', resolvedText: '', changes: [], changesOpen: false, rowOpen: false,
-		bareTool: '', fileName: '', diffAdd: '', diffDel: '', thoughtTime: ''
+		bareTool: '', fileName: '', diffAdd: '', diffDel: '', thoughtTime: '', compactDetail: '',
+		diffRaw: '', oldRaw: '', newRaw: '', commandRaw: '', todosRaw: ''
 	}
 }
 
@@ -269,32 +283,64 @@ function ensureProcessBatch(conv: Conversation, label: string): void {
 	msg.blocks.push(head)
 }
 
+/** 收口批次（按【盖子实体】而非全局 state.batchId 定位 · 2026-11-27 用户报障
+ *  「任务都执行结束了，进入任务消息顶部还展示正在执行中」真因修复）。
+ *
+ *  旧实现 `if (!state.batchOpen) return` + 按 state.batchId 找盖子：盖子一旦
+ *  与全局轮状态失配就永远收不掉——① 回放 done 分支已 closeBatch 置 batchOpen=false，
+ *  其后迟到过程帧经 ensureProcessBatch 重开盖子；若随后 user 帧走「空尾条丢弃」
+ *  分支（不 resetTurnState），新轮的 closeBatch 只认新 batchId，旧盖子成孤儿；
+ *  ② finishProcessingTail 收口更早轮后 state 已指向下一轮，done/切轮再收口时
+ *  上一轮的 loading 盖子无人认领。孤儿盖子 status=loading + startedAt>0 →
+ *  batchLabel 每秒刷「正在执行中 · Ns」，且位于消息顶部，正是用户截图形态。
+ *
+ *  新口径：直接扫尾条 blocks 里【全部】loading 批次盖子逐一收口（常态只有一个，
+ *  与旧行为一致；孤儿盖子一并收敛），成员按【盖子自身 id】统计与连坐折叠。
+ *
+ *  【codereview 修复 · 热路径】closeBatch 每个 text 帧（token 级 delta）都会调用：
+ *  无盖子时必须 O(尾条块数) 早退，绝不扫全 conv.messages（长会话每 token 扫全量
+ *  块 = 真机卡顿）。更早轮孤儿盖子的全量扫描只挂低频终态点（settleOrphanLids：
+ *  done/error/markStopped/replay 兜底），每轮边界一次。
+ *
+ *  【codereview 修复 · 失配窗口】尾条全部 loading 盖子收口后 state 必须【无条件】
+ *  清：state 只可能指向尾条上的批次（ensureProcessBatch 挂 ensureStreamingTail），
+ *  若按 batchId 命中才清，失配 state（指向已收口/不存在盖子）会残留 batchOpen=true
+ *  → ensureProcessBatch 早退，新过程成员挂到已收口盖子 id 下被折叠永久隐藏。 */
 function closeBatch(conv: Conversation, failed: boolean): void {
 	const state: TurnState = turnStateOf(conv.id)
-	if (!state.batchOpen) return
 	const msg: ChatMessage | null = lastAiMessage(conv)
 	if (msg == null) {
 		state.batchOpen = false
 		state.batchId = ''
+		state.batchStartedAt = 0
 		return
 	}
-	// 成员数按「真实归属」统计：思考增量会重复到达、closeBatch/ensureProcessBatch 交替时
-	// 计数器清零时机也难对齐，故直接数本批次实际挂载的成员块。
-	let members: number = 0
-	msg.blocks.forEach((item: ChatBlock): void => {
-		if (item.kind !== 'batch' && item.batchId === state.batchId) members += 1
-	})
-	// PC 收口文案：「执行工具 N 次 · 思考 M 次」分类计数（穿透并行组），
-	// 两项全 0 才回落「已处理」；收口后不显示耗时（PC labelText 同口径）。
-	let toolCount: number = 0
-	let thinkCount: number = 0
-	msg.blocks.forEach((item: ChatBlock): void => {
-		if (item.batchId !== state.batchId) return
-		if (item.kind === 'tool') toolCount += 1
-		else if (item.kind === 'thinking') thinkCount += 1
-	})
-	const head: ChatBlock | undefined = msg.blocks.find((item: ChatBlock): boolean => item.id === state.batchId)
-	if (head != null) {
+	const heads: ChatBlock[] = msg.blocks.filter((item: ChatBlock): boolean =>
+		item.kind === 'batch' && item.status === 'loading')
+	/* 【无盖子的 state 清理必须无条件】旧版「heads.length===0 且 batchOpen=false
+	   就不清」会把失配的 batchId 残留给下一轮：ensureProcessBatch 先写新 batchId
+	   再 push 盖子，push 前的任何异常/清场都会让 state 指向不存在的盖子——
+	   此后新成员挂新 id、closeBatch 按旧 id 找不到 head（正是孤儿盖子链）。
+	   同时这是 text 帧热路径的快速出口：只做尾条 filter，不碰更早轮。 */
+	if (heads.length === 0) {
+		state.batchOpen = false
+		state.batchId = ''
+		state.batchStartedAt = 0
+		return
+	}
+	heads.forEach((head: ChatBlock): void => {
+		// 成员数按「真实归属」统计：直接数挂在【本盖子 id】下的成员块
+		let members: number = 0
+		let toolCount: number = 0
+		let thinkCount: number = 0
+		msg.blocks.forEach((item: ChatBlock): void => {
+			if (item.kind === 'batch' || item.batchId !== head.id) return
+			members += 1
+			if (item.kind === 'tool') toolCount += 1
+			else if (item.kind === 'thinking') thinkCount += 1
+		})
+		// PC 收口文案：「执行工具 N 次 · 思考 M 次」分类计数（穿透并行组），
+		// 两项全 0 才回落「已处理」；收口后不显示耗时（PC labelText 同口径）。
 		const parts: string[] = []
 		if (toolCount > 0) parts.push(t('chat.batch_done_count', { count: toolCount.toString() }))
 		if (thinkCount > 0) parts.push(t('chat.batch_thinking_count', { count: thinkCount.toString() }))
@@ -304,15 +350,53 @@ function closeBatch(conv: Conversation, failed: boolean): void {
 		head.batchCount = members
 		head.duration = ''
 		head.startedAt = 0
-	}
-	msg.blocks.forEach((item: ChatBlock): void => {
-		// 子智能体徽章不随批次折叠：桌面 appendAgentBadge 直接挂气泡，不进过程容器
-		if (item.kind === 'agent') return
-		if (item.id !== state.batchId && item.batchId === state.batchId) item.batchCollapsed = true
+		msg.blocks.forEach((item: ChatBlock): void => {
+			// 子智能体徽章不随批次折叠：桌面 appendAgentBadge 直接挂气泡，不进过程容器
+			if (item.kind === 'agent') return
+			if (item.id !== head.id && item.batchId === head.id) item.batchCollapsed = true
+		})
 	})
+	// 【空壳盖子不进历史 · 2026-11-27 用户报障「第一条消息多个已处理」】
+	// 零成员批次（过程帧丢了/迟到帧开盖即收）收口后只剩一行「已处理」空壳，
+	// 没有任何可展开内容——留在终态消息里就是多余的一行。收口后统一移除。
+	pruneEmptyBatchHeads(msg)
+	// 尾条全部 loading 盖子已收口 → state 无条件清（见头注释「失配窗口」）
 	state.batchOpen = false
 	state.batchId = ''
 	state.batchStartedAt = 0
+}
+
+/** 终态消息里零成员批次盖子的清道夫：盖子收口后若无任何成员挂在它 id 下，
+ *  「已处理」空壳没有可折叠内容，删除（用户报障截图第一行孤零零「已处理」）。
+ *  只动已收口盖子（done/reject），loading 活批次绝不触碰。 */
+function pruneEmptyBatchHeads(msg: ChatMessage): void {
+	const emptyIds: string[] = []
+	msg.blocks.forEach((head: ChatBlock): void => {
+		if (head.kind !== 'batch' || head.status === 'loading') return
+		let members: number = 0
+		msg.blocks.forEach((item: ChatBlock): void => {
+			if (item.kind !== 'batch' && item.batchId === head.id) members += 1
+		})
+		if (members === 0) emptyIds.push(head.id)
+	})
+	if (emptyIds.length === 0) return
+	msg.blocks = msg.blocks.filter((item: ChatBlock): boolean =>
+		!(item.kind === 'batch' && emptyIds.indexOf(item.id) >= 0))
+}
+
+/** 更早轮孤儿盖子全量收敛（低频：只挂轮终态点，绝不在 text 热路径调用）。
+ *  盖子失配不止发生在尾条：上一轮收口时 state 已指向下一轮（finishProcessingTail/
+ *  切轮先重置），旧轮的 loading 盖子同样无人认领。扫【全部已终态的更早 AI 行】——
+ *  它们不可能再有活批次（终态闸门保证），扫到 loading 必是孤儿，就地定格。
+ *  processing 行（挂起续跑/运行中）绝不触碰；不碰 TurnState（尾条由 closeBatch 管）。 */
+function settleOrphanLids(conv: Conversation): void {
+	const tail: ChatMessage | null = lastAiMessage(conv)
+	conv.messages.forEach((row: ChatMessage): void => {
+		if (row.role !== 'ai' || row === tail) return
+		if (row.status !== 'done' && row.status !== 'stopped') return
+		settleLoadingHeadsOf(row)
+		pruneEmptyBatchHeads(row)
+	})
 }
 
 /** 轮终态 Compact：只留最终正文 + 一行统计摘要（桌面 compactBubble(ended:true) 同款）。
@@ -1302,10 +1386,115 @@ function finishProcessingTail(conv: Conversation, elapsed: number): void {
 	if (msg == null || msg.status !== 'processing') return
 	flushTextBuf(conv.id)
 	closeBatch(conv, false)
+	// 【双保险 · 2026-11-27】closeBatch 已按盖子实体收口；此处再扫一遍纯 DOM
+	// 残留（不触碰 TurnState），任何路径漏收的 loading 盖子都不允许带进终态历史
+	settleLoadingHeadsOf(msg)
+	settleOrphanLids(conv)
 	msg.thinking = false
 	msg.status = 'done'
 	msg.meta = elapsed > 0 ? t('chat.metaDone', { n: elapsed.toString() }) : ''
 	compactTurn(msg, turnStateOf(conv.id), elapsed, 'done')
+	// 回放尾条收口＝本轮落定：其后迟到过程帧不得再开计时盖子（终态闸门）
+	turnStateOf(conv.id).runSettled = true
+	fillMissingFinalText(conv.id, msg)
+}
+
+/** 【正文兜底 · 2026-11-26 移动端「已完成但正文空白」终局修复】轮已收口但 msg.text 为空
+ *  （真机单帧异常丢正文帧 / 病态流缺 text 帧）时，向内核 messages 快照要该轮最终正文。
+ *  【轮归属按序数对齐 · codereview 修复】msg 是本会话第 k 条 AI 行（0 基），取快照第 k 条
+ *  ASSISTANT 行 content（落盘顺序 = 轮顺序，loadTextSnapshot 同映射）。旧实现「从尾倒扫
+ *  到第一个 USER 行」在【切轮收口】调用点（finishProcessingTail 收的是上一轮）会取到
+ *  【下一轮】正文写进上一轮——串轮污染，与注释宣称恰恰相反。
+ *  失败静默（已有内容优先）；与 loadTextSnapshot 的区别：这里不动 blocks/游标，只补正文一个字段。 */
+const finalTextFetching: Set<ChatMessage> = new Set<ChatMessage>()
+function fillMissingFinalText(id: string, msg: ChatMessage): void {
+	if (msg.text.length > 0 || finalTextFetching.has(msg)) return
+	const conv: Conversation | null = conversationOf(id)
+	if (conv == null) return
+	finalTextFetching.add(msg)
+	const pull = (attempt: number): void => {
+		request('GET', '/web/chat/messages', 'sessionId=' + encodeURIComponent(id), '', rootOf(conv)).then((body: ApiBody): void => {
+			finalTextFetching.delete(msg)
+			const current: Conversation | null = conversationOf(id)
+			if (current == null) return
+			// 只回填仍为空且仍在列表里的目标消息（引用判定：切轮后尾条已是新一轮）
+			let targetIdx: number = -1
+			let aiOrdinal: number = 0
+			for (let i = 0; i < current.messages.length; i++) {
+				const m: ChatMessage = current.messages[i]
+				if (m === msg) { targetIdx = aiOrdinal; break }
+				if (m.role === 'ai') aiOrdinal += 1
+			}
+			if (targetIdx < 0) return
+			if (!kernelOk(body) || !Array.isArray(body.data)) return
+			const rows = body.data as ApiBody[]
+			let seen: number = 0
+			let finalText: string = ''
+			for (let i = 0; i < rows.length; i++) {
+				if (fieldString(rows[i], 'role') === 'USER') continue
+				if (seen === targetIdx) { finalText = fieldString(rows[i], 'content'); break }
+				seen += 1
+			}
+			if (finalText.length === 0) {
+				// 落盘可能略晚于收口帧：单次短延时重试，仍空则放弃（不伪造内容）
+				if (attempt === 0) setTimeout((): void => { pull(1) }, 1500)
+				return
+			}
+			// 目标可能已不是尾条（切轮/迟到帧并回）：按引用写回目标消息本身
+			msg.text = finalText
+			// 【收口后补 Compact · 2026-11-27 用户报障「第一条消息只剩已处理盖子」】
+			// 回放收口时若正文块丢失（帧异常/病态流），compactTurn 虽生成摘要但
+			// msg.text 为空 → 摘要头孤零零；这里回填正文后必须重算 Compact：
+			// promoteLastTextSegment 会把过程区残留的同文 text 段移除（防双份），
+			// counts 按 blocks 真实计数刷新（TurnState 可能已切到下一轮，不可信）。
+			if (msg.status === 'done' || msg.status === 'stopped') {
+				let tools: number = 0
+				let reasons: number = 0
+				let agents: number = 0
+				let batches: number = 0
+				let texts: number = 0
+				let fatal: boolean = false
+				msg.blocks.forEach((item: ChatBlock): void => {
+					if (isChangesBlock(item)) return
+					if (item.kind === 'batch') batches += 1
+					else if (item.kind === 'tool') tools += 1
+					else if (item.kind === 'thinking') reasons += 1
+					else if (item.kind === 'agent') agents += 1
+					else if (item.kind === 'text') texts += 1
+					else if (item.kind === 'error') fatal = true
+				})
+				// 过程区里与回填正文同文的尾段删除（promote 同义：最终正文只渲染一遍）
+				for (let i = msg.blocks.length - 1; i >= 0; i--) {
+					const item: ChatBlock = msg.blocks[i]
+					if (item.kind === 'text' && item.body === finalText) { msg.blocks.splice(i, 1); texts -= 1; break }
+				}
+				msg.counts = { tools, reasons, agents, batches, texts }
+				if (!fatal) {
+					// 已有摘要头保持原状态词/耗时；缺失才补「已完成」（回放无真实耗时）
+					if (msg.summary.length === 0) msg.summary = msg.status === 'stopped' ? t('chat.turn.stopped') : t('chat.turn.doneNoTime')
+					msg.compactOpen = false
+					pruneEmptyBatchHeads(msg)
+				}
+			}
+			current.updatedAt = Date.now()
+		}).catch((): void => {
+			finalTextFetching.delete(msg)
+		})
+	}
+	pull(0)
+}
+
+/** 整轮摘要展开/收起（PC .turn-compact-toggle 同款 · 2026-11-27 用户报障
+ *  「总批次卡展开后内部所有折叠都是展开态，PC 是收起来的」）。
+ *
+ *  PC 口径（app-turn-display.js toggle click 只 classList.toggle('turn-compact-open')）：
+ *  展开摘要只解除过程区 [data-turn-process] 的隐藏——批次盖子以【收口折叠态】露出
+ *  （「执行工具 N 次 · 思考 M 次」单行统计），成员仍藏盖内，点盖子才展开。
+ *  上一版为修「展开只见盖子＝过程丢失」观感把全部盖子连坐展开，恰与 PC 相反：
+ *  盖子行本身就是过程区的合法可见形态（PC 同形态），不是丢失。
+ *  这里只翻 compactOpen，绝不触碰 batchCollapsed / rowOpen（盖子/行各自独立折叠）。 */
+export function toggleTurnCompact(msg: ChatMessage): void {
+	msg.compactOpen = !msg.compactOpen
 }
 
 function messageFromHistoryRow(row: ApiBody): ChatMessage {
@@ -1440,7 +1629,16 @@ async function loadTextSnapshot(id: string): Promise<void> {
 function loadMessages(id: string): Promise<void> {
 	const inflight: Promise<void> | undefined = loadingMessages.get(id)
 	if (inflight != null) return inflight
-	if (loaded.has(id) || running.has(id)) return Promise.resolve()
+	if (loaded.has(id) || running.has(id)) {
+		// 【切回重探 · 2026-11-27 远端新轮接管第三道防线】已加载的空闲会话被再次打开：
+		// 离开期间桌面端可能已在本会话发起新 run。立即轻量重探一次（probeRunning 自带
+		// running 幂等守卫），命中即接管，不等 15s 空闲对账探针；同时保持空闲探针武装。
+		if (loaded.has(id) && !running.has(id)) {
+			probeRunning(id)
+			armIdleProbe()
+		}
+		return Promise.resolve()
+	}
 	const task: Promise<void> = loadMessagesInner(id)
 	loadingMessages.set(id, task)
 	const release = (): void => {
@@ -1460,18 +1658,9 @@ function hasReplayContent(conv: Conversation | null): boolean {
 		msg.text.length > 0 || msg.blocks.length > 0 || msg.summary.length > 0)
 }
 
-/** 文本快照最终只能保住正文：给每条 AI 行落显式提示+重试入口，不假装完整。 */
-function markDegradedHistory(id: string): void {
-	const conv: Conversation | null = conversationOf(id)
-	if (conv == null) return
-	const notice: string = t('chat.history.degraded')
-	let tail: ChatMessage | null = null
-	conv.messages.forEach((msg: ChatMessage): void => {
-		msg.degradedNotice = ''
-		if (msg.role === 'ai') tail = msg
-	})
-	if (tail != null) tail.degradedNotice = notice
-}
+/** 【2026-11-26 用户明确要求】任何加载形态都不得再出现黄色降级警告条：
+ *  函数已退役（模板的 degradedNotice 渲染分支保留但永无数据写入）。
+ *  过程/产物缺失的补救改由「收口正文回填 + 重试入口」承担，不再贴警告。 */
 
 /** 用户点降级提示：清 loaded / in-flight，再走同一套幂等 replay 重建过程与产物卡。 */
 function retryHistory(id: string): void {
@@ -1542,11 +1731,22 @@ async function loadMessagesInner(id: string): Promise<void> {
 		
 		// 【修复 P1-④ loaded 标记】确保正常路径都标记，catch 中也会标记
 		loaded.add(id)
+		// 本会话进入「已加载且空闲」形态：武装空闲运行态对账探针
+		//（桌面端随后在本会话发新消息时，移动端必须能发现并接管，见 armIdleProbe 注释）
+		armIdleProbe()
 		// 设备端仍在进行中的轮次：接 live 流并补帧（replay 已把可见历史铺好）。
 		// 【先接流，再翻更早轮】接流只需要一次轻量探针 + 从游标续拉；更早轮翻页
 		// 是纯展示性补全，绝不能挡在 live 订阅前面（旧实现全量倒拉历史阻塞接流，
 		// 运行中任务「进去一直卡住不动」的直接原因）。
 		await probeRunning(id)
+		// 【空闲会话常驻订阅 · 2026-11-27 远端新轮接管帧级防线】probeRunning 只在命中
+		// running 时登记帧处理器：打开时已完成的会话没有任何订阅，桌面端随后在本会话
+		// 发起新 run 时，内核广播的帧经桌面中转到达手机却无人消费（用户报障真因）。
+		// 常驻登记后，新轮第一条 user 帧即触发 consumeFrame user 分支的远端自接管，
+		// 零延迟长出运行态。onFrame 幂等（Map.set），probeRunning 已登记时原样覆盖。
+		onFrame(id, (sessionId: string, frame: LinkFrame): void => {
+			handleStreamFrame(sessionId, frame)
+		})
 		// 挂起卡兜底：帧窗口可能已翻过 question 帧（见 probePendingQuestion 注释），
 		// 放在 probeRunning 之后——运行中不可能是挂起态，两者互斥，顺序无副作用
 		await probePendingQuestion(id)
@@ -1577,6 +1777,7 @@ async function loadMessagesInner(id: string): Promise<void> {
 		// 【修复 P1-④ loaded 标记必须执行】确保 loaded.add 在异常路径也被调用，
 		// 防止无限重加载循环。正常路径已在上面执行，这里补异常路径。
 		loaded.add(id)
+		armIdleProbe()
 	}
 }
 
@@ -1595,28 +1796,91 @@ async function probeRunning(id: string): Promise<void> {
 		if (!kernelOk(body)) return
 		const data = body.data != null && typeof body.data === 'object' ? body.data as ApiBody : {}
 		if (data.running !== true) return
-		const cursor = cursorOf(id)
-		cursor.runId = fieldString(data, 'runId')
-		cursor.startedAt = Date.now()
-		running.add(id)
-		onFrame(id, (sessionId: string, frame: LinkFrame): void => {
-			handleStreamFrame(sessionId, frame)
-		})
-		appendStreamingPlaceholder(conv)
-		// 【必须从历史游标续拉，不能从 0 重放】loadMessages 已把持久帧回放进 messages，
-		// 这里若 again afterSeq=0，整段历史会被再消费一遍 → 用户行/AI 行成对重复、
-		// 顺序错乱（用户报障「消息加载有的时候都是错乱的」的主因之一）。
-		// 拉取失败退避重试（桌面 scheduleStreamingRecovery 同款）：接流后不再
-		// 依赖链路 resumed 事件，单页超时也能把缺的段补回来。
-		catchUpFrames(id).then((ok: boolean): void => {
-			if (!ok && running.has(id)) scheduleResumeRetry(id)
-		})
-		// 【看门狗】旧设备中转不建 gate 订阅 / done 帧丢失时，running 会永久残留、
-		// 占位一直「思考中」。周期用轻量 rounds=1 探针对账内核权威 running 态。
-		armRunWatchdog(id)
+		attachRemoteRun(id, data)
 	} catch (_) {
 		// 探测失败不打扰：用户发送时会再走 ensureConnected
 	}
+}
+
+/** 【远端新轮接管 · 2026-11-27 用户报障「移动端先进已完成任务、桌面端再发消息，
+ *  移动端不显示运行中消息」真因修复】
+ *  移动端打开已完成会话后，running 集合为空、帧处理器只在 probeRunning 命中时登记；
+ *  桌面端随后在同一会话发起新 run，内核照样广播帧，但移动端【没有任何再探测机制】
+ *  发现设备端重新跑起来（probeRunning 只在打开会话时跑一次，看门狗只武装给
+ *  running 集合里的会话）→ 新 run 的 user/工具/正文帧全部无人消费，界面永远停在
+ *  上一轮的「已完成」。桌面端同场景靠常驻的会话级 gate 订阅 + 帧直达，天然无此问题。
+ *  本函数是接管的唯一实现：置运行态、登记帧处理器、铺占位、从游标补帧、武装看门狗。
+ *  调用方：probeRunning（打开会话时）/ 空闲对账探针（停留期间）/ 切回会话重探。 */
+function attachRemoteRun(id: string, data: ApiBody): void {
+	const conv: Conversation | null = conversationOf(id)
+	if (conv == null) return
+	if (running.has(id)) return
+	const cursor = cursorOf(id)
+	// 【runId 空值守卫】内核只在 busy 时回 runId（mod.rs:1774 `if busy { last_run_id }`）；
+	// 极端形态（旧内核/快照异常）回空时不得把上一轮权威 runId 覆写成空串，
+	// 否则「停止→内核判停」拿空串去 interrupt。与 user 帧自接管同口径。
+	const probeRunId: string = fieldString(data, 'runId')
+	if (probeRunId.length > 0) cursor.runId = probeRunId
+	cursor.startedAt = Date.now()
+	running.add(id)
+	// 新 run 接流：上一轮的「已收口」标记作废（resume/新一轮过程帧必须正常开批）
+	turnStateOf(id).runSettled = false
+	onFrame(id, (sessionId: string, frame: LinkFrame): void => {
+		handleStreamFrame(sessionId, frame)
+	})
+	appendStreamingPlaceholder(conv)
+	// 【必须从历史游标续拉，不能从 0 重放】loadMessages 已把持久帧回放进 messages，
+	// 这里若 again afterSeq=0，整段历史会被再消费一遍 → 用户行/AI 行成对重复、
+	// 顺序错乱（用户报障「消息加载有的时候都是错乱的」的主因之一）。
+	// 拉取失败退避重试（桌面 scheduleStreamingRecovery 同款）：接流后不再
+	// 依赖链路 resumed 事件，单页超时也能把缺的段补回来。
+	catchUpFrames(id).then((ok: boolean): void => {
+		if (!ok && running.has(id)) scheduleResumeRetry(id)
+	})
+	// 【看门狗】旧设备中转不建 gate 订阅 / done 帧丢失时，running 会永久残留、
+	// 占位一直「思考中」。周期用轻量 rounds=1 探针对账内核权威 running 态。
+	armRunWatchdog(id)
+}
+
+/** 【空闲会话运行态对账 · 2026-11-27 同上真因的第二道防线】
+ *  已加载但不在 running 的会话（典型：移动端停留在已完成任务上，桌面端随后发消息）
+ *  没有任何机制发现设备端重新跑起来。周期用轻量 rounds=1 探针对账内核权威
+ *  running 态：发现新 run 即 attachRemoteRun 接管（帧处理器 + 补帧 + 看门狗一条龙）。
+ *  【只对账当前会话】用户正看着的会话才需要即时长出运行态；其它会话切回时由
+ *  loadMessages 的切回重探即时接管。探针与运行看门狗同款开销（只解析末轮窗口）。
+ *  【idleProbe=1 标记】内核忽略未知 query 字段，标记只供本端审计区分
+ *  「空闲对账探针」与「运行看门狗/打开探针」，互不干扰各自的停摆断言。
+ *  【一旦武装恒心跳】每 15s 一跳，无对账目标（未登录/无活动会话/会话在跑）时
+ *  零请求空转——换取「任何时刻桌面端发起新 run 都能被发现」的完备性；
+ *  回调内任何分支都必须续武装，漏一条就会永久失聪。 */
+const IDLE_PROBE_MS: number = 15000
+let idleProbeTimer: number = 0
+
+function armIdleProbe(): void {
+	if (idleProbeTimer !== 0) return
+	idleProbeTimer = setTimeout((): void => {
+		idleProbeTimer = 0
+		const id: string = activeConvId.value
+		const conv: Conversation | null = id.length > 0 ? conversationOf(id) : null
+		// 无对账目标：空转一跳（不发请求），续武装等下一个目标出现
+		if (conv == null || !loaded.has(id) || running.has(id)) {
+			armIdleProbe()
+			return
+		}
+		request('GET', '/web/chat/replay', 'sessionId=' + encodeURIComponent(id) + '&rounds=1&idleProbe=1&maxBytes=' + REPLAY_MAX_BYTES.toString(), '', rootOf(conv)).then((body: ApiBody): void => {
+			armIdleProbe()
+			if (running.has(id)) return
+			const current: Conversation | null = conversationOf(id)
+			if (current == null) return
+			if (kernelOk(body)) {
+				const data = body.data != null && typeof body.data === 'object' ? body.data as ApiBody : {}
+				if (data.running === true) attachRemoteRun(id, data)
+			}
+		}, (): void => {
+			// 探针失败不打扰：下一跳再试
+			armIdleProbe()
+		})
+	}, IDLE_PROBE_MS)
 }
 
 /** 打开会话时探测后端权威挂起态（契约 §3.4 的 pendingQuestion 端点）。
@@ -1826,12 +2090,23 @@ function applyFileChanges(conv: Conversation, frame: LinkFrame): void {
 function settleTerminalBatchHeads(conv: Conversation, msg: ChatMessage): void {
 	if (historyReplay.has(conv.id) || running.has(conv.id)) return
 	if (msg.status !== 'done' && msg.status !== 'stopped') return
+	settleLoadingHeadsOf(msg)
+	const st: TurnState = turnStateOf(conv.id)
+	if (st.batchOpen) { st.batchOpen = false; st.batchId = ''; st.batchStartedAt = 0 }
+}
+
+/** 无守卫的「单条消息内全部 loading 批次盖子」定格（closeBatch 同文案口径）：
+ *  调用方自行保证该消息已终态/即将脱离 live（回放收口、更早轮前插、终态兜底扫描）。
+ *  按盖子实体统计成员并连坐折叠，绝不触碰 TurnState（影子/历史消息与 live 状态隔离）。 */
+function settleLoadingHeadsOf(msg: ChatMessage): void {
 	msg.blocks.forEach((head: ChatBlock): void => {
 		if (head.kind !== 'batch' || head.status !== 'loading') return
 		let tools: number = 0
 		let reasons: number = 0
+		let members: number = 0
 		msg.blocks.forEach((item: ChatBlock): void => {
-			if (item.batchId !== head.id) return
+			if (item.kind === 'batch' || item.batchId !== head.id) return
+			members += 1
 			if (item.kind === 'tool') tools += 1
 			else if (item.kind === 'thinking') reasons += 1
 		})
@@ -1842,12 +2117,13 @@ function settleTerminalBatchHeads(conv: Conversation, msg: ChatMessage): void {
 		head.status = 'done'
 		head.startedAt = 0
 		head.batchCollapsed = true
+		head.batchCount = members
 		msg.blocks.forEach((item: ChatBlock): void => {
 			if (item.id !== head.id && item.batchId === head.id && item.kind !== 'agent') item.batchCollapsed = true
 		})
 	})
-	const st: TurnState = turnStateOf(conv.id)
-	if (st.batchOpen) { st.batchOpen = false; st.batchId = ''; st.batchStartedAt = 0 }
+	// 空壳「已处理」盖子（零成员）不进终态历史，同 closeBatch 口径
+	pruneEmptyBatchHeads(msg)
 }
 
 /** 变更卡判定不能只靠 args 字符串标记：回放/兼容帧里 marker 若缺失，
@@ -2018,11 +2294,35 @@ function consumeFrame(sessionId: string, frame: LinkFrame, wireId?: string): voi
 				return
 			}
 		}
+		// 【远端新轮自接管 · 2026-11-27 用户报障「移动端先进已完成任务、桌面端再发消息，
+		//   移动端不显示运行中消息」帧级防线】live 路径收到 user 帧而本会话不在 running：
+		// 桌面/他端刚在本会话发起了新 run（移动端停留在上一轮已终态上）。上一轮 done
+		// 收口后帧处理器被有意保留（迟到帧并回依赖它），这条 user 帧就是新轮第一信号：
+		// 立即置运行态（停止按钮/看门狗/计时起点都依赖它）并清终态闸门。
+		// 【不走 attachRemoteRun】处理器已在；catchUpFrames 与 live 帧的游标推进会互抢，
+		// 缺帧由看门狗周期补拉兜底。回放路径有自己的切轮逻辑，绝不进入本分支。
+		if (!running.has(sessionId) && !historyReplay.has(sessionId)) {
+			running.add(sessionId)
+			const c: StreamCursor = cursorOf(sessionId)
+			c.startedAt = Date.now()
+			// 【runId 空值守卫】内核 user_input_frame（mod.rs:2252-2265）不带 runId 字段：
+			// 无守卫会把上一轮的 runId 覆写成空串。空串 interrupt 虽仍能停当前 run
+			//（内核 expected 为空时跳过 turn_changed 校验），但看门狗补帧回来前
+			//「停止→内核判停」依赖的是权威 runId，保持旧值更安全（与 2066 行同口径）。
+			const frameRunId: string = fieldString(frame, 'runId')
+			if (frameRunId.length > 0) c.runId = frameRunId
+			armRunWatchdog(sessionId)
+		}
 		// 【相邻同文去重】只在「紧邻上一条就是同文 user 行」时合并。
 		// user 与 user_input 是两条互斥路径（doOnChatInput→ofUser / Loop 准备→ofUserInput），
 		// 不会在同一轮各发一条；这里防的是内核把同一次输入重复落到 stream 文件。
 		const tailMsg: ChatMessage | undefined = conv.messages.length > 0 ? conv.messages[conv.messages.length - 1] : undefined
 		if (tailMsg != null && tailMsg.role === 'user' && tailMsg.text === displayText) return
+		// 【新轮边界 · 终态闸门清零】user 帧在两条路径都是新一轮起点：回放路径下面
+		// resetTurnState 会清；实时路径（他端/Loop 新发起的 run 经 live 帧到达）没有
+		// reset——不清 runSettled 会让新 run 的过程帧被上一轮的终态闸门全丢。
+		// 运行中插话（steer）时标记本就是 false，清零无副作用。
+		turnStateOf(sessionId).runSettled = false
 		// 历史回放：user 帧是一轮边界，先收口上一轮 AI 尾条，再重置轨迹状态
 		if (historyReplay.has(sessionId)) {
 			// 【顺序修正】回放若从「运行中段的助手帧」开始（流文件被截断、steer/后台续跑），
@@ -2063,6 +2363,14 @@ function consumeFrame(sessionId: string, frame: LinkFrame, wireId?: string): voi
 
 	// 过程块到来前先建运行批次盖子；正文/轮结束是批次边界（桌面 GourdTurnBatch 同款）
 	const processKind: boolean = kind === 'reason' || kind === 'action_draft' || kind === 'action_start' || kind === 'action_args' || kind === 'action_batch' || kind === 'action_end' || kind === 'agent_start' || kind === 'agent_progress' || kind === 'agent_end'
+	/* 【终态闸门 · 2026-11-26 用户「任务都执行完毕了还有计时」真因】本轮已收口后
+	   到达的过程帧一律丢弃：旧实现会让它们经 ensureProcessBatch 在已终态消息上
+	   重开 loading 盖子（实时流：forwarder 后台帧；回放：done 之后的迟到过程帧），
+	   无人再收口 → 盖子每秒刷「正在执行中 · Ns」。桌面同口径（finishStream 后
+	   phase=PHASE_DONE，迟到帧不再开新批）。回放期同样适用：replay 的 done 分支
+	   已 closeBatch，其后迟到过程帧开的新盖子在 finishProcessingTail 只收 state
+	   不收 head，同样残留计时盖子。变更卡/trace/context_size 等非过程帧不受影响。 */
+	if (processKind && state.runSettled) return
 	if (processKind) {
 		ensureProcessBatch(conv, t('chat.turn.running'))
 		// 正文段边界：收口当前正文段，后续 text 另起新段落在过程行之后
@@ -2169,6 +2477,19 @@ function consumeFrame(sessionId: string, frame: LinkFrame, wireId?: string): voi
 		const ds: string[] = diffStatOf(fargs)
 		block.diffAdd = ds[0]
 		block.diffDel = ds[1]
+		// 【展开明细对齐 PC】存完整原始入参（args 是预览截断 160，不能给 diff/命令渲染用）：
+		// edit 的 old_str/new_str/diff、bash 的 command、todo 的 todos 原文。
+		// action_args 分片期字段可能不完整，后续帧到达时覆盖更新（末帧即全量）。
+		const rawDiff: string = typeof fargs['diff'] === 'string' ? fargs['diff'] as string : ''
+		const rawOld: string = typeof fargs['old_str'] === 'string' ? fargs['old_str'] as string : ''
+		const rawNew: string = typeof fargs['new_str'] === 'string' ? fargs['new_str'] as string : ''
+		const rawCmd: string = typeof fargs['command'] === 'string' ? fargs['command'] as string : ''
+		const rawTodos: string = typeof fargs['todos'] === 'string' ? fargs['todos'] as string : ''
+		if (rawDiff.length > 0) block.diffRaw = rawDiff.substring(0, 4000)
+		if (rawOld.length > 0) block.oldRaw = rawOld.substring(0, 4000)
+		if (rawNew.length > 0) block.newRaw = rawNew.substring(0, 4000)
+		if (rawCmd.length > 0) block.commandRaw = rawCmd.substring(0, 2000)
+		if (rawTodos.length > 0) block.todosRaw = rawTodos.substring(0, 4000)
 		const argsText: string = summarizeArgs(frame)
 		if (argsText.length > 0) {
 			block.args = argsText
@@ -2210,6 +2531,18 @@ function consumeFrame(sessionId: string, frame: LinkFrame, wireId?: string): voi
 		const eds: string[] = diffStatOf(eargs)
 		if (eds[0].length > 0) block.diffAdd = eds[0]
 		if (eds[1].length > 0) block.diffDel = eds[1]
+		// action_end 帧也带 args（Java 侧 ToolResult 含入参）：补齐/覆盖原始入参，
+		// 防 action_args 分片丢失时 diff/命令渲染缺参（与 action_draft 分支同口径）
+		const endDiff: string = typeof eargs['diff'] === 'string' ? eargs['diff'] as string : ''
+		const endOld: string = typeof eargs['old_str'] === 'string' ? eargs['old_str'] as string : ''
+		const endNew: string = typeof eargs['new_str'] === 'string' ? eargs['new_str'] as string : ''
+		const endCmd: string = typeof eargs['command'] === 'string' ? eargs['command'] as string : ''
+		const endTodos: string = typeof eargs['todos'] === 'string' ? eargs['todos'] as string : ''
+		if (endDiff.length > 0) block.diffRaw = endDiff.substring(0, 4000)
+		if (endOld.length > 0) block.oldRaw = endOld.substring(0, 4000)
+		if (endNew.length > 0) block.newRaw = endNew.substring(0, 4000)
+		if (endCmd.length > 0) block.commandRaw = endCmd.substring(0, 2000)
+		if (endTodos.length > 0) block.todosRaw = endTodos.substring(0, 4000)
 		block.body = result.length > 0 ? result : block.body
 		block.preview = result.length > 0 ? previewOf(result, false) : block.preview
 		block.status = statusOf(frame)
@@ -2323,6 +2656,22 @@ function consumeFrame(sessionId: string, frame: LinkFrame, wireId?: string): voi
 	if (kind === 'question_answered' || kind === 'hitl_released') {
 		// 内核 WebChunk.java:688-691/715-720：actionId 用于精确回到「那一道题/那次审批」。
 		// 不带 id 时（旧快照恢复）才降级为释放全部挂起卡。
+		// 【挂起恢复 · 终态闸门清零 · 2026-11-27 code review 修复】这两条帧是内核权威
+		// 「挂起已被消费、spawn_resume 已续跑」的信号（mod.rs:2604-2609 作答即广播、
+		// 1573 full-access 切换广播 hitl_released；approve/deny 两条分支都走 spawn_resume）。
+		// 挂起收口 done(suspended) 已置 runSettled + 删 running（防挂起等待期迟到帧开
+		// 计时盖子）；本端作答经 submitInteract 清闸门，但【他端作答】（桌面先答/桌面
+		// 批准审批）时移动端只收到这条帧——不清 runSettled，续跑段的过程帧被终态闸门
+		// 全丢（挂起轮恢复后过程区空白、正文不增长）。同时恢复运行态：续跑是真实进行中
+		// 的 run，停止按钮/看门狗对账都依赖它。不铺占位：尾条还在，续跑内容由
+		// ensureStreamingTail 按 running 态接管（与本端 submitInteract 作答同形态）。
+		// 回放期不置运行态（回放有自己的收口链），清标记无副作用（回放 done 分支不置位）。
+		if (!running.has(sessionId) && !historyReplay.has(sessionId)) {
+			running.add(sessionId)
+			cursor.startedAt = Date.now()
+			armRunWatchdog(sessionId)
+		}
+		state.runSettled = false
 		const actionId: string = fieldString(frame, 'actionId')
 		const answeredText: string = kind === 'question_answered' ? resolvedAnswersText(frame) : ''
 		const msg: ChatMessage | null = lastAiMessage(conv)
@@ -2382,6 +2731,16 @@ function consumeFrame(sessionId: string, frame: LinkFrame, wireId?: string): voi
 		cancelResumeRetry(sessionId)
 		clearPendingEcho(sessionId)
 		closeBatch(conv, false)
+		// 本轮落定：此后迟到的过程帧不得再开 loading 盖子（终态计时残留真因）
+		state.runSettled = true
+		if (msg != null) {
+			// 【兜底扫描 · 2026-11-27】即便尾条已被其它路径置成终态（processing
+			// 守卫不成立），残留 loading 盖子也必须收敛——旧实现只收 state 批次，
+			// 失配孤儿盖子每秒刷「正在执行中」正是用户报障形态
+			settleLoadingHeadsOf(msg)
+		}
+		// 更早轮孤儿盖子收敛（低频轮终态点，text 热路径不扫全量）
+		settleOrphanLids(conv)
 		if (msg != null && msg.status === 'processing') {
 			msg.thinking = false
 			msg.status = 'done'
@@ -2397,6 +2756,7 @@ function consumeFrame(sessionId: string, frame: LinkFrame, wireId?: string): voi
 				msg.meta = formatMsgTime(Date.now()) + ' · ' + formatBatchElapsed(cursor.startedAt > 0 ? cursor.startedAt : Date.now())
 				compactTurn(msg, state, elapsed, 'done')
 			}
+			fillMissingFinalText(sessionId, msg)
 		}
 		conv.updatedAt = Date.now()
 		return
@@ -2420,13 +2780,17 @@ function consumeFrame(sessionId: string, frame: LinkFrame, wireId?: string): voi
 			running.delete(sessionId)
 			cancelResumeRetry(sessionId)
 			clearPendingEcho(sessionId)
+			// 同 done：本轮落定，迟到过程帧不得再开 loading 盖子
+			state.runSettled = true
 			if (msg != null) {
+				settleLoadingHeadsOf(msg)
 				msg.thinking = false
 				msg.status = 'stopped'
 				// 错误原文已在 chunk-error 块常驻，meta 不再重复一遍（PC 同口径）
 				msg.meta = ''
 				compactTurn(msg, state, 0, 'stopped')
 			}
+			settleOrphanLids(conv)
 		}
 		conv.updatedAt = Date.now()
 		return
@@ -2503,10 +2867,49 @@ function consumeFrame(sessionId: string, frame: LinkFrame, wireId?: string): voi
 		})
 		return
 	}
+	// 【压缩分隔线 · PC appendContextCompactedDivider 同款 · 2026-11-27 用户报障
+	//  「压缩显示和 PC 端不一致」】此前 context_compacted 与 command/rewind 一起落成
+	//  notice 工具行（图标+标签+参数 dump），PC 实际是一条「─── 已压缩上下文 ───」
+	//  横向分隔线（.context-compacted-divider）。对齐三点：
+	//  ① 先收口运行中批次盖子——分隔线是上一段过程行的终止符，压缩前/后内容分界；
+	//  ② 明细只取 args.beforeMessages → afterMessages（'120 → 32'）存 compactDetail，
+	//    但【不上屏】——PC 只把它写进 data-detail/title 悬停提示，可见文案恒为
+	//    「─── 已压缩上下文 ───」（原生端无 title 能力，明细仅留数据字段）；
+	//  ③ 非成员常驻块（process=false + batchId 空）：不进批次折叠、不进整轮 Compact
+	//    （PC isProcessRow 白名单不含它，KEEP_VISIBLE 语义——轮次边界折叠后仍可见）。
+	if (kind === 'context_compacted') {
+		const msg: ChatMessage | null = ensureStreamingTail(conv)
+		if (msg == null) return
+		msg.thinking = false
+		closeBatch(conv, false)
+		const args: ApiBody = frameArgs(frame)
+		const bmRaw = args['beforeMessages']
+		const amRaw = args['afterMessages']
+		const bm: number = typeof bmRaw === 'number' ? bmRaw as number : 0
+		const am: number = typeof amRaw === 'number' ? amRaw as number : 0
+		const detail: string = bm > am ? bm.toString() + ' → ' + am.toString() : ''
+		// 【codereview 修复 · 同帧去重】回放 + live 双通道可能把同一压缩事件送达
+		// 两次（replayFrom 与 watch 推送重叠），旧 key 恒新 → 同一分界画两条线。
+		// 尾条末尾已是【同明细】分隔线（中间只允许已收口盖子）则视为重复帧，幂等跳过；
+		// 明细不同/中间有真实内容 = 真的发生了第二次压缩，正常新增（PC 每次帧都画线）。
+		let dup: boolean = false
+		for (let i = msg.blocks.length - 1; i >= 0; i--) {
+			const prev: ChatBlock = msg.blocks[i]
+			if (prev.kind === 'batch') continue
+			dup = prev.kind === 'compacted' && prev.compactDetail === detail
+			break
+		}
+		if (dup) return
+		const block: ChatBlock = ensureBlock(conv, 'compacted:' + nextBlockId(), 'compacted', t('chat.context_compacted'), 'info')
+		block.process = false
+		block.batchId = ''
+		block.compactDetail = detail
+		block.status = 'done'
+		return
+	}
 	// 用户可见的补充帧：桌面端也各自渲染，移动端统一落成常驻的轻量提示行
 	// （trace / context_size / tps_progress 是独立徽标与用量指示器，不进过程轨迹）
 	const noticeKind: boolean = kind === 'command' || kind === 'rewind'
-		|| kind === 'context_compacted'
 	if (noticeKind) {
 		const msg: ChatMessage | null = ensureStreamingTail(conv)
 		if (msg == null) return
@@ -2514,8 +2917,7 @@ function consumeFrame(sessionId: string, frame: LinkFrame, wireId?: string): voi
 		closeBatch(conv, false)
 		const raw: string = fieldString(frame, 'text')
 		const detail: string = raw.length > 0 ? raw : summarizeObject(frameArgs(frame))
-		const labelKey: string = kind === 'context_compacted' ? 'chat.segment.compacted'
-			: (kind === 'rewind' ? 'chat.segment.rewind' : 'chat.segment.notice')
+		const labelKey: string = kind === 'rewind' ? 'chat.segment.rewind' : 'chat.segment.notice'
 		const block: ChatBlock = ensureBlock(conv, 'notice:' + nextBlockId(), 'notice', t(labelKey), 'info')
 		block.process = false
 		block.body = detail
@@ -2525,8 +2927,13 @@ function consumeFrame(sessionId: string, frame: LinkFrame, wireId?: string): voi
 	}
 	// trace / context_size / tps_progress / context_length 等元数据帧不落轨迹块。
 	// 【未知帧护栏 · 2026-11-24 用户报障「工具帧展示成问答」排查】新增帧类型
-	// 静默丢弃最难排查：开发态打日志留线索（release 构建 __DEV__ 为 false 零开销）。
-	if (__DEV__) {
+	// 静默丢弃最难排查：开发态打日志留线索。
+	// 【2026-11-26 真因修复】裸 __DEV__ 在 uni-app x vapor 编译产物中无定义
+	// （编译器不做替换），真机执行到即抛 ReferenceError。元数据帧（context_size/
+	// trace）每轮必达，首个即炸 → safeConsumeFrame catch 里第二处 __DEV__ 再炸 →
+	// 异常逃逸杀死整个回放循环 → 降级文本快照 = 只剩思考+正文、过程全丢。
+	// 用 typeof 守卫：typeof 对未声明标识符永不抛（语言规范保证）。
+	if (typeof __DEV__ !== 'undefined' && __DEV__) {
 		const known: string[] = ['user', 'text', 'reason_start', 'reason', 'action_batch',
 			'action_draft', 'action_start', 'action_args', 'action_end', 'agent_start',
 			'agent_progress', 'agent_end', 'question', 'hitl', 'question_answered',
@@ -2567,6 +2974,32 @@ const replayBuffers: Map<string, LinkFrame[]> = new Map<string, LinkFrame[]>()
  *  已在途时后来者直接共享同一 Promise。 */
 const catchingUp: Map<string, Promise<boolean>> = new Map<string, Promise<boolean>>()
 
+/** 【逐帧故障隔离 · 2026-11-26 移动端「正文/过程全空只剩已完成」真因修复】
+ *  真机（UTS→Kotlin 运行时）对动态 JSON 的取值/转型比纯 JS 严格：单帧消费抛异常时，
+ *  旧实现整页 for 循环被 catch 吞掉——已渲染的部分（用户行/首个思考块）留下、
+ *  其余帧全丢，收口后就是「已完成 + 空正文」，且 hasReplayContent=true 还不走快照兜底。
+ *  sim（纯 JS）永不抛，所以此前多轮修复都没暴露。这里把单帧异常隔离在帧级：
+ *  坏帧跳过、其余帧照常渲染；开发态留线索，release 零开销。
+ *
+ *  【2026-11-26 二次真因】隔离层自身绝不能抛：上一版 catch 块里裸写 `if (__DEV__)`，
+ *  而 vapor 编译产物不定义 __DEV__，真机执行 catch 时二次抛 ReferenceError →
+ *  异常逃逸出 safeConsumeFrame → 外层回放循环整体被吞 → 降级快照丢全过程。
+ *  本函数内所有语句必须对任何输入都永不抛（typeof 守卫 + 日志再包一层）。 */
+const droppedFrames: Map<string, number> = new Map<string, number>()
+function safeConsumeFrame(sessionId: string, frame: LinkFrame, wireId?: string): void {
+	try {
+		consumeFrame(sessionId, frame, wireId)
+	} catch (e) {
+		const n: number = (droppedFrames.get(sessionId) || 0) + 1
+		droppedFrames.set(sessionId, n)
+		try {
+			if (typeof __DEV__ !== 'undefined' && __DEV__) {
+				console.warn('[gwork] stream frame dropped after render error:', fieldString(frame, 'type'), 'seq:', frame.eventSeq, 'session:', sessionId, e)
+			}
+		} catch (_logErr) { /* 日志失败不得破坏帧级隔离 */ }
+	}
+}
+
 function handleStreamFrame(id: string, frame: LinkFrame): void {
 	const buffer: LinkFrame[] | undefined = replayBuffers.get(id)
 	if (buffer != null) {
@@ -2575,7 +3008,7 @@ function handleStreamFrame(id: string, frame: LinkFrame): void {
 		buffer.push(frame)
 		return
 	}
-	consumeFrame(id, frame)
+	safeConsumeFrame(id, frame)
 }
 
 /** 单飞补帧入口：所有「从游标续拉」的调用方统一走这里。 */
@@ -2619,7 +3052,7 @@ async function replayFrom(id: string, afterSeq: number): Promise<boolean> {
 			if (Array.isArray(events)) {
 				const frames = events as LinkFrame[]
 				for (let i = 0; i < frames.length; i++) {
-					consumeFrame(id, frames[i])
+					safeConsumeFrame(id, frames[i])
 					const seqRaw = frames[i].eventSeq
 					const seq: number = typeof seqRaw === 'number' ? seqRaw as number : 0
 					if (seq > pageMax) pageMax = seq
@@ -2644,7 +3077,7 @@ async function replayFrom(id: string, afterSeq: number): Promise<boolean> {
 					return na - nb
 				})
 				for (let i = 0; i < buffered.length; i++) {
-					consumeFrame(id, buffered[i])
+					safeConsumeFrame(id, buffered[i])
 				}
 			}
 			if (data.running !== true && running.has(id) && !historyReplay.has(id)) {
@@ -2656,11 +3089,16 @@ async function replayFrom(id: string, afterSeq: number): Promise<boolean> {
 					const msg: ChatMessage | null = lastAiMessage(current)
 					if (msg != null && msg.status === 'processing') {
 						closeBatch(current, false)
+						settleLoadingHeadsOf(msg)
 						msg.thinking = false
 						msg.status = 'done'
 						msg.meta = t('chat.metaDone', { n: '1' })
 						compactTurn(msg, turnStateOf(id), 1, 'done')
+						// 设备端已结束的收口＝本轮落定：迟到过程帧不得再开计时盖子
+						turnStateOf(id).runSettled = true
+						fillMissingFinalText(id, msg)
 					}
+					settleOrphanLids(current)
 				}
 			}
 			return true
@@ -2767,7 +3205,7 @@ async function replayRoundsPage(id: string): Promise<boolean> {
 				const nb: number = typeof b.eventSeq === 'number' ? b.eventSeq as number : 0
 				return na - nb
 			})
-			for (let i = 0; i < buffered.length; i++) consumeFrame(id, buffered[i])
+			for (let i = 0; i < buffered.length; i++) safeConsumeFrame(id, buffered[i])
 		}
 		const cursor = cursorOf(id)
 		if (!dropped && latest > cursor.lastSeq) cursor.lastSeq = latest
@@ -2885,7 +3323,7 @@ function prependRoundsPage(id: string, frames: LinkFrame[], epoch: number): void
 		// 长会话自动翻页 = 每页一批必败请求风暴（挤占 WS 链路，正是要修的慢），
 		// 且缓存键/steer 键全带影子后缀永不复用。渲染目标仍由 conversationOf(shadowId)
 		// 定位到影子数组，游标/轮状态按 shadowId 隔离；仅「对外身份」用真实 id。
-		for (let i = 0; i < sorted.length; i++) consumeFrame(shadowId, sorted[i], id)
+		for (let i = 0; i < sorted.length; i++) safeConsumeFrame(shadowId, sorted[i], id)
 		const shadowConv: Conversation | null = conversationOf(shadowId)
 		if (shadowConv != null) segment = shadowConv.messages.slice(0)
 	} finally {
@@ -2899,8 +3337,13 @@ function prependRoundsPage(id: string, frames: LinkFrame[], epoch: number): void
 	if (segment.length === 0) return
 	// 段内 processing 占位统一收口：done(suspended) 等回放期不收口的尾条
 	// 若原样前插，历史头部会挂一条永久「思考中」。
+	// 【盖子必须同收 · 2026-11-27 孤儿盖子修复】只置 msg.status 不收批次盖子，
+	// 段内 loading 盖子会带着计时起点前插进历史（batchLabel 每秒刷「正在执行中」）。
+	// 影子会话即将销毁，settleLoadingHeadsOf 按盖子实体就地定格（不触碰 TurnState）。
 	segment.forEach((msg: ChatMessage): void => {
-		if (msg.role === 'ai' && msg.status === 'processing') {
+		if (msg.role !== 'ai') return
+		settleLoadingHeadsOf(msg)
+		if (msg.status === 'processing') {
 			if (msg.text.length === 0 && msg.blocks.length === 0) return
 			msg.thinking = false
 			msg.status = 'done'
@@ -2924,6 +3367,9 @@ function sealEarlierHead(id: string, epoch: number): void {
 	if (conv == null || conv.messages.length === 0) return
 	const head: ChatMessage = conv.messages[0]
 	if (head.role === 'ai' && head.status === 'processing') {
+		// 盖子同收（2026-11-27 孤儿盖子修复）：只置消息终态不收盖子，
+		// 历史头部会残留每秒刷「正在执行中」的 loading 批次头
+		settleLoadingHeadsOf(head)
 		head.thinking = false
 		head.status = 'done'
 		head.meta = ''
@@ -3287,7 +3733,10 @@ function markStopped(id: string): void {
 		last.meta = t('chat.metaStopped')
 		const elapsed: number = cursorOf(id).startedAt > 0 ? Math.max(1, Math.round((Date.now() - cursorOf(id).startedAt) / 1000)) : 1
 		compactTurn(last, turnStateOf(id), elapsed, 'stopped')
+		// 手动停止＝本轮落定：设备端在途帧不得再开计时盖子（终态闸门）
+		turnStateOf(id).runSettled = true
 	}
+	settleOrphanLids(conv)
 	conv.updatedAt = Date.now()
 }
 
@@ -3366,6 +3815,9 @@ function submitInteract(id: string, block: ChatBlock, payload: ApiBody, onOk?: (
 	block.submitError = ''
 	// 恢复轮立刻进入流式态：resume 一开始就吐 reason/text 帧，等响应回来再置态会漏开头
 	running.add(id)
+	// 挂起期 done 已置 runSettled（防挂起等待期迟到帧开计时盖子）：恢复即作废，
+	// 否则续跑的过程帧被终态闸门全丢（resume 后过程区空白）
+	turnStateOf(id).runSettled = false
 	armRunWatchdog(id)
 	const cursor = cursorOf(id)
 	cursor.startedAt = Date.now()
@@ -3650,6 +4102,11 @@ function resetForDeviceChange(): void {
 	// 看门狗/翻页链同样作废：旧设备的对账探针与更早轮前插不得写新设备会话
 	runWatchdogs.forEach((timer: number, _id: string): void => { clearTimeout(timer) })
 	runWatchdogs.clear()
+	// 空闲运行态对账探针一并作废：旧设备的对账不得写新设备会话（重登后由加载路径重新武装）
+	if (idleProbeTimer !== 0) {
+		clearTimeout(idleProbeTimer)
+		idleProbeTimer = 0
+	}
 	earlierEpoch += 1
 	earlierCursors.clear()
 	earlierMore.clear()
@@ -3746,6 +4203,7 @@ export function useConversations(): Conversations {
 		setQuestionAnswer,
 		refresh: refreshConversations,
 		retryHistory,
+		toggleTurnCompact,
 		listLoading,
 		listError
 	}

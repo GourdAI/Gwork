@@ -491,12 +491,18 @@ console.log('PASS  drawer: overlay slide-in + swipe gestures, workbuddy-style co
 // 用户从安装到使用从未见过授权弹窗，每次按住说话都 toast「无法访问麦克风」。
 
 // 9-a) manifest.json：权限必须在 distribute 下（JSONC 去注释后解析验证）
+// 【2026-11-26 契约更新】值必须是 <uses-permission/> XML 片段，不是裸权限名：
+// HBuilderX 预校验对 permissions.join("") 跑 isValidXml，裸名直接报「格式不正确」
+// 拒绝打包；云端同样按 XML 注入 AndroidManifest，裸名被静默忽略 → APK 缺权限。
 const manifestRaw = fs.readFileSync(path.join(__dirname, '..', 'manifest.json'), 'utf8');
 const manifestJson = JSON.parse(manifestRaw.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, ''));
 const androidNode = manifestJson['app-android'];
 assert.ok(androidNode && androidNode.distribute && Array.isArray(androidNode.distribute.permissions)
-	&& androidNode.distribute.permissions.includes('android.permission.RECORD_AUDIO'),
-	'RECORD_AUDIO must live under app-android.distribute.permissions (top-level app-android.permissions is silently dropped by cloud packaging)');
+	&& androidNode.distribute.permissions.some((p) => typeof p === 'string'
+		&& /<uses-permission\s+android:name="android\.permission\.RECORD_AUDIO"\s*\/>/.test(p)),
+	'RECORD_AUDIO must live under app-android.distribute.permissions as a <uses-permission/> XML fragment (bare names fail HBuilderX precheck and are silently dropped by cloud packaging)');
+assert.ok(androidNode.distribute.permissions.every((p) => typeof p === 'string' && /^<uses-permission\s/.test(p)),
+	'every permission entry must be an XML fragment, never a bare permission name');
 assert.ok(!Array.isArray(androidNode.permissions),
 	'the mis-placed top-level app-android.permissions array must be gone');
 
@@ -747,26 +753,57 @@ assert.ok(/key: 'md-' \+ i\.toString\(\)/.test(mdComp),
 // prepareMdHtml：strip TS 后直接执行
 const mdUtilsSrc = fs.readFileSync(path.join(__dirname, '..', 'utils', 'markdown-html.ts'), 'utf8');
 const mdUtilsJs = mdUtilsSrc
+	.replace(/export type MdPart = \{[\s\S]*?\}\n/, '')
+	.replace(/export type MdContainerEvent = \{[\s\S]*?\}\n/, '')
 	.replace(/export /g, '')
 	.replace(/:\s*Array<\[number, number\]>/g, '')
+	.replace(/:\s*MdPart\[\]/g, '')
+	.replace(/:\s*MdContainerEvent\b/g, '')
+	.replace(/\bas MdContainerEvent\b/g, '')
+	.replace(/\bas MdPart\b/g, '')
+	.replace(/:\s*string\[\]/g, '')
 	.replace(/:\s*string\b/g, '').replace(/:\s*number\b/g, '').replace(/:\s*boolean\b/g, '');
-const md = new Function(mdUtilsJs + '\nreturn { prepareMdHtml, findMdOpenTag };')();
+const md = new Function(mdUtilsJs + '\nreturn { prepareMdHtml, findMdOpenTag, mdBlockKind, mdCodeInner, mdQuoteInner, splitRichCode };')();
 const styled = md.prepareMdHtml('<h2>真因</h2><p>这是 <strong>加粗</strong> 与 <code>inline</code></p><pre><code class="language-ts">const a = 1</code></pre>', false);
 assert.ok(/<h2 style="[^"]*font-size:18px/.test(styled), 'h2 must get the PC-aligned 18px heading style');
 assert.ok(/<strong>加粗<\/strong>/.test(styled), 'inline semantics must survive untouched');
-assert.ok(/<pre style="[^"]*background-color:#111827[^"]*"/.test(styled), 'code fences must get the dark block background');
-assert.ok(/<code class="language-ts" style="[^"]*color:#e5e7eb/.test(styled),
-	'code inside pre must be pinned light-on-dark (rich-text does not inherit color)');
-assert.ok(/<code style="[^"]*background-color:rgba\(127,127,127,0\.16\)/.test(styled),
-	'inline code outside pre keeps the translucent chip background');
-// PC .md-content code 的 2px×7px 圆角胶囊：native rich-text 没有 CSS 继承/简写保障，
-// 四条 padding + radius 必须逐个注入；否则就是用户看到的直角贴字灰块。
-assert.ok(/<code style="[^"]*padding-top:2px;padding-right:7px;padding-bottom:2px;padding-left:7px/.test(styled),
-	'inline code must carry all four UCSS-safe padding edges (shorthand silently drops)');
-assert.ok(/<code style="[^"]*border-radius:5px/.test(styled),
-	'inline code must round the chip like PC .md-content code');
-assert.ok(/<code style="[^"]*color:#1f2328/.test(styled),
-	'inline code must pin its own text color (rich-text does not inherit)');
+// 【2026-11-27 用户报障「代码块和 PC 不一致」】PC --bg-code-block 亮色 #f6f6f7 / 暗色 #0f0f11，
+// 兜底路径必须随主题翻转（此前两端钉死深底 #111827，亮色下突兀黑块）
+assert.ok(/<pre style="[^"]*background-color:#f6f6f7[^"]*"/.test(styled), 'light-mode code fences must get the PC light block background');
+assert.ok(/<code class="language-ts" style="[^"]*color:#24292e/.test(styled),
+	'light-mode code inside pre must pin the PC dark text color (rich-text does not inherit color)');
+const styledPreDark = md.prepareMdHtml('<pre><code>x</code></pre>', true);
+assert.ok(/<pre style="[^"]*background-color:#0f0f11[^"]*"/.test(styledPreDark) && /color:#d4d4d4/.test(styledPreDark),
+	'dark-mode code fences must flip to the PC dark palette (#0f0f11 bg / #d4d4d4 text)');
+// 【2026-11-27 第十三轮 · 用户拍板「阴影块修改不好就去掉」】行内 code 亮暗两端
+// 一律【零底色零几何】：native inline span 的 border-radius/padding 渲染不出
+// （padding 还会把底色向上下撑出 4px 连成一片），自造 rgba 灰胶囊在暗色深底上
+// 实测渲成黑色阴影块、亮色下直角灰块不对齐 PC 圆角——用户三轮报障的真因。
+// 行内代码只靠等宽字体+字号+字色区分；围栏代码块的 PC 几何由原生 view 容器承担。
+const styledInlineDark = md.prepareMdHtml('<p>这是 <code>inline</code> 代码</p>', true);
+assert.ok(!/<code style="[^"]*background-color/.test(styled) && !/<code style="[^"]*background-color/.test(styledInlineDark),
+	'inline code must carry NO background in either theme (fabricated chips rendered as black shadow blocks / non-PC square gray blocks)');
+assert.ok(!/<code style="[^"]*padding-(?:top|bottom)/.test(styled),
+	'inline code must NOT carry vertical padding (native span background bleeds into adjacent lines)');
+assert.ok(!/<code style="[^"]*border-radius/.test(styled) && !/<code style="[^"]*border-radius/.test(styledInlineDark),
+	'inline code must NOT carry border-radius (native inline span cannot render it; user-final: drop instead of faking)');
+assert.ok(/<code style="[^"]*color:#1f2328/.test(styled) && /<code style="[^"]*color:#e8eaed/.test(styledInlineDark),
+	'inline code must pin its own themed text color (rich-text does not inherit)');
+assert.ok(/<code style="[^"]*font-family:monospace/.test(styled),
+	'inline code keeps the monospace family as its only visual distinction');
+// 列表行距（PC li margin:4px 0）：单边 margin-bottom 展开，li 之间不再贴连
+assert.ok(/<li style="[^"]*margin-bottom:4px/.test(md.prepareMdHtml('<ul><li>a</li><li>b</li></ul>', false)),
+	'list items must carry single-side margin-bottom (PC 4px breathing room, shorthand silently drops)');
+// 块级载体分类 + 剥壳纯函数（app-md-text 原生容器渲染的数据源）
+assert.equal(md.mdBlockKind('<pre><code>x</code></pre>'), 'code', 'fence blocks must classify as native code container');
+assert.equal(md.mdBlockKind('<blockquote><p>q</p></blockquote>'), 'quote', 'quote blocks must classify as native quote container');
+assert.equal(md.mdBlockKind('<p>x</p>'), 'rich', 'other blocks stay on rich-text');
+assert.equal(md.mdCodeInner('<pre><code class="language-ts">a &lt; b &amp;&amp; c</code></pre>'), 'a < b && c',
+	'code inner must strip the pre/code shell and unescape entities (&amp; last, no double-decode)');
+assert.equal(md.mdQuoteInner('<blockquote><p>q</p></blockquote>'), '<p>q</p>',
+	'quote inner must strip only the outermost blockquote shell');
+assert.equal(md.mdQuoteInner('<blockquote><blockquote><p>q</p></blockquote></blockquote>'), '<blockquote><p>q</p></blockquote>',
+	'nested quotes keep inner shells (recursion stays in the style pipeline)');
 // 块间呼吸感归外层分段容器：rich-text 节点的 margin/padding/border 简写在 UCSS 下不可靠。
 assert.ok(!/style="[^"]*(?:margin|padding|border):/.test(styled),
 	'rich-text inline styles must not rely on unsupported shorthand (PC paragraph/list gaps would collapse)');
@@ -777,9 +814,79 @@ assert.ok(/line-height:24px/.test(mdCompSrc), 'mobile body line-height must matc
 const styledDark = md.prepareMdHtml('<h3>x</h3><blockquote>q</blockquote>', true);
 assert.ok(/color:#e8eaed/.test(styledDark), 'dark mode headings must flip to light text');
 assert.equal(md.findMdOpenTag('<codex> <code>', 'code', 0), 8, 'tag matcher must not hit prefix collisions like <codex>');
-// 流式未闭合 pre：块内 code 仍按块配色（区间延伸到文末）
-const tailStyled = md.prepareMdHtml('<pre><code class="language-js">let x =', false);
-assert.ok(/color:#e5e7eb/.test(tailStyled), 'an unclosed streaming pre must still color its code light');
+// 流式未闭合 pre：块内 code 仍按块配色（区间延伸到文末；暗色浅字）
+const tailStyled = md.prepareMdHtml('<pre><code class="language-js">let x =', true);
+assert.ok(/color:#d4d4d4/.test(tailStyled), 'an unclosed streaming pre must still color its code for the dark palette');
+// 【2026-11-27 用户报障「代码块没有圆角」】native rich-text 的 pre 不渲染
+// border-radius/padding → 围栏/引用必须由原生 view 容器承载几何。
+assert.ok(/v-if="seg\.kind === 'code'" class="app-md-text__code"/.test(mdCompSrc)
+	&& /v-else-if="seg\.kind === 'quote'" class="app-md-text__quote"/.test(mdCompSrc),
+	'fence/quote blocks must render inside native view containers (rich-text drops radius/padding/border)');
+const codeStyle = mdCompSrc.match(/&__code \{[\s\S]*?\n\t\t\}/);
+// 【2026-11-27 第四轮 · 用户拍板】PC .md-content pre 只有底色+圆角+16/18 内边距，
+// 【没有任何 box-shadow】（app.css 逐字核对）。此前移动端自造「代码阴影块」是
+// 报障来源，已整体删除——此断言反向钉死：代码容器再引入 box-shadow 直接报错。
+assert.ok(codeStyle != null && /border-radius: 10px/.test(codeStyle[0])
+	&& /background-color: var\(--color-code-block-bg\)/.test(codeStyle[0])
+	&& /padding-top: 16px/.test(codeStyle[0]) && /padding-left: 18px/.test(codeStyle[0])
+	&& !/padding: /.test(codeStyle[0]) && /overflow: hidden/.test(codeStyle[0])
+	&& !/box-shadow/.test(codeStyle[0]),
+	'code container must carry PC-aligned radius/padding/themed bg WITHOUT any box-shadow (PC pre has none)');
+assert.ok(!/app-md-text__code--dark/.test(mdCompSrc) && !/code-shadow/.test(mdCompSrc),
+	'the fabricated code-shadow modifier/palette references must stay deleted (PC has no code shadow)');
+assert.ok(!/^\s*\.theme-dark \.app-md-text[^\n]*\{/m.test(mdCompSrc),
+	'no descendant .theme-dark rule blocks may remain in app-md-text (silently dead in vapor mode)');
+assert.ok(/&__code-text \{[\s\S]*?line-height: 20px/.test(mdCompSrc)
+	&& /&__code-text \{[\s\S]*?color: var\(--color-code-block-text\)/.test(mdCompSrc),
+	'code text must be a native text node with explicit line-height and themed text color');
+// 【第四轮真因之二】列表项内/引用内围栏代码此前整块走 rich-text（只有「恰以 <pre>
+// 开头」才进原生容器）→ 亮色下直角无底色。混合块必须按 <pre> 边界拆子段。
+assert.ok(/v-else-if="seg\.html\.indexOf\('<pre'\) >= 0"/.test(mdCompSrc)
+	&& /in splitParts\(seg\.html\)/.test(mdCompSrc),
+	'mixed blocks (fences inside lists/quotes) must split by <pre> and route code parts to the native container');
+const mixedParts = md.splitRichCode('<ul><li>intro<pre><code>let x = 1</code></pre>tail</li></ul>');
+assert.ok(mixedParts.length === 3 && mixedParts[0].kind === 'rich' && mixedParts[1].kind === 'code'
+	&& mixedParts[1].inner === 'let x = 1' && mixedParts[2].kind === 'rich',
+	'splitRichCode must carve the fence out of a list item (rich/code/rich)');
+const openParts = md.splitRichCode('<p>a</p><pre><code>let x =');
+assert.ok(openParts.length === 2 && openParts[1].kind === 'code' && openParts[1].inner === 'let x =',
+	'an unclosed streaming fence inside a mixed block must extend to the end');
+assert.equal(md.splitRichCode('<p>plain</p>').length, 1, 'no-fence html stays a single rich part');
+// 【codereview 回归锁 · 嵌套围栏丢项】rich 子段必须自平衡（悬空 ul/li 补闭合），
+// code 之后的 rich 子段按原栈重开容器（列表缩进保持）——旧线性切分把
+// '<ul><li>intro' 悬空丢给 rich-text，不成对标签渲染异常/丢内容。
+assert.equal(mixedParts[0].html, '<ul><li>intro</li></ul>',
+	'the rich part before a nested fence must close the dangling containers (self-balanced HTML)');
+assert.equal(mixedParts[2].html, '<ul><li>tail</li></ul>',
+	'the rich part after a nested fence must reopen the containers then keep the original closings');
+const twoFences = md.splitRichCode('<ul><li>a<pre><code>x</code></pre>b<pre><code>y</code></pre>c</li></ul>');
+assert.equal(twoFences.length, 5, 'two fences inside one item split into rich/code/rich/code/rich');
+assert.equal(twoFences[2].html, '<ul><li>b</li></ul>', 'the middle rich part must be self-balanced too');
+assert.equal(twoFences[4].html, '<ul><li>c</li></ul>', 'the tail rich part must be self-balanced too');
+const quoteFence = md.splitRichCode('<blockquote><p>q</p><pre><code>z</code></pre><p>r</p></blockquote>');
+assert.equal(quoteFence[0].html, '<blockquote><p>q</p></blockquote>', 'quote containers must balance around fences');
+assert.equal(quoteFence[2].html, '<blockquote><p>r</p></blockquote>', 'quote reopen must preserve the trailing content');
+// 流式未闭栏在列表项内：尾部不得渲染「只有开标签」的空列表壳（幽灵 bullet）
+const nestOpen = md.splitRichCode('<ul><li>a<pre><code>x');
+assert.equal(nestOpen.length, 2, 'an unclosed nested fence must not emit an empty reopen shell');
+assert.equal(nestOpen[0].html, '<ul><li>a</li></ul>', 'the balanced rich part precedes the streaming fence');
+// 色板成对：code-block-bg / code-block-text / bg-code / git-* 必须 light/dark 各一份
+const themeScss = fs.readFileSync(path.join(__dirname, '..', 'styles', 'theme.scss'), 'utf8');
+['code-block-bg', 'code-block-text', 'bg-code', 'git-add-bg', 'git-add-text', 'git-del-bg', 'git-del-text', 'git-hunk-text'].forEach((k) => {
+	const hits = (themeScss.match(new RegExp("'" + k + "':", 'g')) || []).length;
+	assert.equal(hits, 2, 'palette key ' + k + ' must exist in both light and dark tables (found ' + hits + ')');
+});
+assert.ok(!/'code-shadow':/.test(themeScss), 'the fabricated code-shadow palette key must stay deleted');
+assert.ok(/'code-block-bg': #f6f6f7/.test(themeScss) && /'code-block-bg': #0f0f11/.test(themeScss)
+	&& /'code-block-text': #24292e/.test(themeScss) && /'code-block-text': #d4d4d4/.test(themeScss),
+	'code palette must equal the PC --bg-code-block/--text-code values in both themes');
+assert.ok(/'bg-code': #f4f4f5/.test(themeScss) && /'git-add-text': #22863a/.test(themeScss)
+	&& /'git-del-text': #cb2431/.test(themeScss) && /'git-add-text': #56d364/.test(themeScss),
+	'tool-detail palette must equal the PC --bg-code/--git-line-* values in both themes');
+assert.ok(/&__quote-bar \{[\s\S]*?width: 3px/.test(mdCompSrc),
+	'quote left bar must be a real 3px view (rich-text border-left does not render)');
+assert.ok(/import \{ prepareMdHtml, mdBlockKind, mdCodeInner, mdQuoteInner, splitRichCode \} from '@\/utils\/markdown-html\.ts'/.test(mdCompSrc),
+	'app-md-text must consume the shared block-kind/shell-strip/split helpers (single implementation)');
 
 // 自研解析器：strip UTS 类型注解后直接执行（编写约束保证 TS/JS 双兼容子集）
 const mdParseSrc = fs.readFileSync(path.join(__dirname, '..', 'utils', 'markdown-parse.uts'), 'utf8');
@@ -811,6 +918,15 @@ assert.ok(/<strong>加粗<\/strong>/.test(doc[1].html) && /<code>inline<\/code>/
 	'bold and inline code must render inside paragraphs');
 assert.ok(/<pre><code class="language-ts">const a = 1<\/code><\/pre>/.test(doc[2].html),
 	'fenced code must keep the language class and escape-free body');
+// 端到端（解析器 → 载体分类 → 剥壳）：围栏走原生容器且代码文本逐字保真
+assert.equal(md.mdBlockKind(doc[2].html), 'code', 'parser fence output must classify as native code container');
+assert.equal(md.mdCodeInner(doc[2].html), 'const a = 1', 'parser fence output must strip to the exact code text');
+const e2eEsc = mp.parseMarkdownBlocks('```\nif (a < b && c > d) { x = "s" }\n```', true)[0].html;
+assert.equal(md.mdCodeInner(e2eEsc), 'if (a < b && c > d) { x = "s" }',
+	'escaped code literals must round-trip through the shell-strip exactly (no double-decode)');
+const e2eStream = mp.parseMarkdownBlocks('```ts\nlet x =', false)[0];
+assert.equal(md.mdBlockKind(e2eStream.html), 'code', 'streaming unclosed fence must still take the native container');
+assert.equal(md.mdCodeInner(e2eStream.html), 'let x =', 'streaming unclosed fence body must strip cleanly');
 // 列表（含嵌套）/引用/表格/分隔线/setext
 const doc2 = mp.parseMarkdownBlocks('- a\n- b\n  - b1\n\n> 引用 **重点**\n\n| A | B |\n| --- | :-: |\n| 1 | 2 |\n\n---\n\nSetext\n===', true);
 assert.ok(/<ul><li>a<\/li><li>b<ul><li>b1<\/li><\/ul><\/li><\/ul>/.test(doc2[0].html),
@@ -964,8 +1080,8 @@ assert.ok(/head\.batchCollapsed = false/.test(convSrc),
 assert.ok(/head\.batchCollapsed = true/.test(convSrc),
 	'closeBatch must collapse the batch when the run settles');
 assert.ok(/rowOpen: false/.test(convSrc), 'process rows must default to collapsed bodies');
-assert.ok(/v-else-if="item\.rowOpen && item\.body\.length > 0"/.test(bubble) && /function onToggleRow\(item: ChatBlock\)/.test(bubble),
-	'row bodies must render only when rowOpen and toggle via the row head tap');
+assert.ok(/v-if="item\.kind !== 'text' && item\.rowOpen && item\.body\.length > 0"/.test(bubble) && /function onToggleRow\(item: ChatBlock\)/.test(bubble),
+	'row bodies must render only when rowOpen (and never for text segments) and toggle via the row head tap');
 assert.ok(!/v-if="item\.body\.length > 0" class="app-chat-bubble__row-body"/.test(bubble),
 	'the always-expanded row body must not regress');
 // 12-e3) 正文按帧时序分段（2026-11 用户报障「产物卡片跑到正文上面 + 过程框裸露 markdown 原文」）：
@@ -993,7 +1109,7 @@ assert.ok(/function hasVisibleContent\(body: string\): boolean/.test(convSrc)
 	'promotion/counting must skip comment-only text segments (visible-content check)');
 // 12-e5) 【评审修复】'text' 过程正文段恒渲染（不随 rowOpen 折叠）：
 // 滚动窗高度估算与内容签名都必须始终计入其 body，否则长正文段误走平铺撑爆气泡
-assert.ok(/\(item\.rowOpen \|\| item\.kind === 'text'\) \? Math\.min\(item\.body\.length, 2400\) : 0/.test(bubble)
+assert.ok(/if \(item\.kind === 'text'\) \{[\s\S]{0,220}wrapLines\(Math\.min\(item\.body\.length, 2400\), detailAvailWidth\(\)\) \* 22/.test(bubble)
 	&& /if \(item\.rowOpen \|\| item\.kind === 'text'\) w \+= Math\.min\(item\.body\.length, 2400\)/.test(bubble),
 	'always-rendered text segments must count toward window height estimate and follow signature');
 
@@ -1024,9 +1140,24 @@ assert.ok(/v-if="seg\.windowed && seg\.members\.length > 0" class="app-chat-bubb
 // 必须显式给高：windowStyle = min(内容估算+2, WINDOW_MAX_PX=232)，且 CSS 不得再依赖 max-height。
 assert.ok(/const WINDOW_MAX_PX = 232/.test(bubble)
 	&& /function windowStyle\(seg: BubbleSegment\): string/.test(bubble)
-	&& /Math\.min\(seg\.estHeight \+ 2, WINDOW_MAX_PX\)/.test(bubble)
+	&& /Math\.min\(est, WINDOW_MAX_PX\)/.test(bubble)
 	&& /:style="windowStyle\(seg\)"/.test(bubble),
 	'the batch window must carry an explicit content-fitted height capped at 232px (PC WINDOW_MAX_PX parity)');
+// 【2026-11-27 用户报障「展开后大片空白」回归锁】估算必须与真实渲染几何同源：
+// ① 展开卡体走 toolDetailHeight（同一投影行集折算，不再「每40字符一行」拍脑袋）；
+// ② 内容层 tbcont- 实测真实高度，windowStyle 取 min(实测, 估算, 232) 收紧——
+//    估算虚高绝不落屏成空白；③ 旧的脱节估算不得回潮。
+assert.ok(/import \{ toolDetailHeight \} from '@\/utils\/tool-detail'/.test(bubble)
+	&& /h \+= toolDetailHeight\(item\.bareTool, item\.body, item\.diffRaw, item\.oldRaw, item\.newRaw,/.test(bubble),
+	'expanded card height must be estimated from the SAME projection the detail component renders (toolDetailHeight)');
+assert.ok(/Math\.ceil\(bodyLen \/ 40\)/.test(bubble) === false,
+	'the old body-length/40 heuristic (detached from real render geometry, caused the big blank gap) must stay deleted');
+assert.ok(/:id="'tbcont-' \+ seg\.key"/.test(bubble)
+	&& /function measureContent\(key: string\): void/.test(bubble)
+	&& /measured! \+ 2 < est\) est = measured! \+ 2/.test(bubble),
+	'the window content layer must be measured (tbcont-) and shrink the explicit height when the estimate overshoots');
+assert.ok(/measureContent\(seg\.key\)/.test(bubble) && /winContentHeights\.value\.delete\(key\)/.test(bubble),
+	'content measurement must run in the follow-watch and be cleared on batch collapse (no stale heights)');
 assert.ok(!/max-height: 232px/.test(bubble),
 	'max-height alone leaves the scroll-view at its default height (the big blank gap between batch headers)');
 // 13-b) 常驻行绝不进滚动窗：agent 徽章/无归属行独立成段
@@ -1063,13 +1194,14 @@ console.log('PASS  batch-window: segments + capped scroll-view (232px), pinned a
 		'batch head label must keep 13px/21px typography after the shared rule split');
 	assert.ok(/&__row-label \{[\s\S]{0,120}margin-left: 7px/.test(stylePart),
 		'member row label keeps margin-left 7px after the 13px icon slot (text column at 22px)');
-	// ② row-body 的左缩进与上下间距必须是单边写法，且不得回潮四值简写
-	assert.ok(/&__row-body \{[\s\S]{0,200}margin-left: 20px/.test(stylePart),
-		'expanded row body must indent via single-side margin-left (shorthand silently drops on UCSS -> overlap at screen edge)');
+	// ② 展开明细已迁至 app-tool-detail 组件（PC 专用渲染器等价物）：
+	//    气泡内不得回潮整段 dump 的 row-body 纯文本节点；四值简写禁令保持。
+	assert.ok(!/__row-body/.test(stylePart) && !/displayText\(item\.body\)/.test(bubble),
+		'the raw-dump row-body must stay deleted (expanded detail renders via app-tool-detail, PC renderer parity)');
 	assert.ok(!/margin: \d+px \d+px \d+px \d+px/.test(stylePart),
 		'four-value margin shorthand must not regress anywhere in the bubble (UCSS parsing is unreliable)');
-	assert.ok(!/padding: \d+px \d+px;/.test(stylePart.slice(stylePart.indexOf('&__compact {'), stylePart.indexOf('&__error {'))) && !/padding: \d+px \d+px;/.test(stylePart.slice(stylePart.indexOf('&__row-body {'), stylePart.indexOf('&__meta {'))),
-		'compact/batch/row-head/row-body paddings must stay single-side (column geometry must not depend on shorthand)');
+	assert.ok(!/padding: \d+px \d+px;/.test(stylePart.slice(stylePart.indexOf('&__compact {'), stylePart.indexOf('&__error {'))),
+		'compact/batch/row-head paddings must stay single-side (column geometry must not depend on shorthand)');
 	// ③ 字体图标定宽槽存在，且模板两处（滚动窗/平铺）都不再有裸 rice-icon 行
 	assert.ok(/&__row-icon \{[\s\S]{0,160}width: 13px/.test(stylePart),
 		'font icons need a fixed 13px slot so the row text column never drifts with glyph width');
@@ -1129,6 +1261,13 @@ for (const tag of envBarTags) {
 	assert.ok(!/:permission=/.test(tag), 'app-env-bar callers must not pass permission anymore');
 }
 assert.ok(!/permission/.test(header), 'home-header must not carry a permission prop');
+// 【2026-11-27 第十三轮 · 用户报障「暗色下菜单图标看不见」】裸 .iconfont 无 color，
+// UCSS 不保证继承 → 暗色落默认深色字形隐形。菜单图标必须显式主题字色（app-chat__back 同款）。
+assert.ok(/class="iconfont home-header__menu-icon"/.test(header)
+	&& /&__menu-icon \{[\s\S]*?color: var\(--color-text-secondary\)/.test(header),
+	'home-header menu icon must pin an explicit themed color (bare .iconfont is invisible on dark bg)');
+assert.ok(/&__back \{[\s\S]*?color: var\(--color-text-secondary\)/.test(chatSrc),
+	'app-chat back/menu icon must keep its explicit themed color');
 // 14-b) run-sheet：工作空间+权限模式同组卡（细分隔线），权限行任何态可调
 const runSheet = fs.readFileSync(path.join(__dirname, '..', 'components', 'app-run-sheet', 'app-run-sheet.uvue'), 'utf8');
 assert.ok(/class="app-run__group"/.test(runSheet) && /app-run__group-sep/.test(runSheet),
@@ -1337,20 +1476,27 @@ console.log('PASS  i18n-flags: vue-i18n esm-bundler feature flags literalized (d
     assert.ok(/return \{ ok: ok, degraded: !ok \} as HistoryResult/.test(rebuildFn),
         'partial replay must be preserved instead of being replaced by a text snapshot');
     const loadInnerHistory = extractBlockFrom(fs.readFileSync(hookPath17, 'utf8'), 'function loadMessagesInner(');
-    assert.ok(/if \(!built\.ok\) \{/.test(loadInnerHistory) && /if \(partial\) markDegradedHistory\(id\)/.test(loadInnerHistory),
-        'a failed-but-rendered replay must keep its blocks and show a retryable degraded notice');
-    assert.ok(/markDegradedHistory\(id\)/.test(loadInnerHistory) && /await loadTextSnapshot\(id\)/.test(loadInnerHistory),
+    // 【2026-11-26 新契约】用户明确要求任何形态都不得出现黄色降级警告：
+    // loadMessagesInner 不再写 markDegradedHistory；部分内容保留语义不变
+    // （hasReplayContent 为真时绝不降级快照），空正文由收口回填兜底（S14/第19节）。
+    assert.ok(!/markDegradedHistory\(id\)/.test(loadInnerHistory),
+        'the degraded yellow notice must not be written from the load path (user requirement: zero warnings)');
+    assert.ok(/hasReplayContent\(conversationOf\(id\)\)/.test(loadInnerHistory) && /await loadTextSnapshot\(id\)/.test(loadInnerHistory),
         'text snapshot is only allowed when no replay content was rendered');
     assert.ok(!/for \(;;\)/.test(rebuildFn), 'rebuildHistory must NOT serially back-page the whole history before first paint (the extreme-slowness bug)');
     const probeRunFn = extractBlock('async function probeRunning(');
-    assert.ok(/scheduleResumeRetry\(id\)/.test(probeRunFn), 'probeRunning must schedule backoff retry when the catch-up fails');
+    // 补帧失败退避重试/看门狗武装现在位于 attachRemoteRun（probeRunning 命中后委托的
+    // 唯一接管实现；2026-11-27 远端新轮接管重构抽出）
+    const attachRunFn = extractBlock('function attachRemoteRun(');
+    assert.ok(/scheduleResumeRetry\(id\)/.test(attachRunFn), 'attachRemoteRun must schedule backoff retry when the catch-up fails');
+    assert.ok(/attachRemoteRun\(id, data\)/.test(probeRunFn), 'probeRunning must delegate the attach to attachRemoteRun');
     // 探针必须轻量：afterSeq=0 全文件扫描的 After 探针在长流上秒级（卡首屏第二真因）。
     // 先剥注释：函数头注释里引用了旧探针字符串作对比说明。
     const probeCode = stripComments17(probeRunFn);
     assert.ok(/&rounds=1/.test(probeCode) && !/afterSeq=0&limit=1/.test(probeCode),
         'probeRunning must use the bounded rounds=1 probe, not the whole-file After scan');
     // 看门狗：done 帧丢失（旧桌面中转不建 gate 订阅）时周期对账内核 running 态
-    assert.ok(/armRunWatchdog\(id\)/.test(probeRunFn), 'probeRunning must arm the run watchdog (lost done frames would pin the spinner forever)');
+    assert.ok(/armRunWatchdog\(id\)/.test(attachRunFn), 'attachRemoteRun must arm the run watchdog (lost done frames would pin the spinner forever)');
     const snapFn = stripComments17(extractBlock('async function loadTextSnapshot('));
     assert.ok(/&rounds=1/.test(snapFn), 'the snapshot fallback must align the cursor via a rounds=1 probe (Rounds-mode latestSeq spans the whole file)');
     assert.ok(!/afterSeq=-1&limit=1/.test(snapFn), 'After-mode latestSeq is page-bound — using it for alignment would skip the middle');
@@ -1405,6 +1551,8 @@ console.log('PASS  i18n-flags: vue-i18n esm-bundler feature flags literalized (d
             kernelOk: (b) => String(b.code) === '200',
             rootOf: () => '',
             consumeFrame: (_id, f) => { consumed.push(f.eventSeq); if (f.eventSeq > cursor.lastSeq) cursor.lastSeq = f.eventSeq; },
+            // 【2026-11-26】replayFrom 的帧循环改走逐帧隔离包装：env 必须注入它
+            safeConsumeFrame: (id, f) => { consumed.push(f.eventSeq); if (f.eventSeq > cursor.lastSeq) cursor.lastSeq = f.eventSeq; },
             cursorOf: () => cursor,
             fieldString: (obj, k) => (obj && typeof obj[k] === 'string') ? obj[k] : '',
             replayBuffers: buffers,
@@ -1450,6 +1598,7 @@ console.log('PASS  i18n-flags: vue-i18n esm-bundler feature flags literalized (d
             request: async () => { calls++; return { code: 200, data: { events: [{ type: 'text' }], hasMore: true, running: true } }; },
             kernelOk: () => true, rootOf: () => '',
             consumeFrame: (_id, f) => consumed.push(f),
+            safeConsumeFrame: (_id, f) => consumed.push(f),
             cursorOf: () => cursor, fieldString: () => '',
             replayBuffers: buffers, running: new Set(), historyReplay: new Set(),
             lastAiMessage: () => null, closeBatch: () => {}, compactTurn: () => {}, turnStateOf: () => ({}), t: (k) => k
@@ -1731,8 +1880,8 @@ console.log('PASS  i18n-flags: vue-i18n esm-bundler feature flags literalized (d
             'the new-message path must kick off the thumbnail upgrade (with the wire session id)');
         assert.ok(/const realId: string = wireId != null && wireId\.length > 0 \? wireId : sessionId/.test(hookSrc),
             'consumeFrame must resolve the wire id (shadow rendering keeps cursor isolation but attachment/steer keys use the real session)');
-        assert.ok(/consumeFrame\(shadowId, sorted\[i\], id\)/.test(hookSrc),
-            'shadow prepend must pass the real session id as wireId (meta requests to id#earlier always fail and storm the link)');
+        assert.ok(/safeConsumeFrame\(shadowId, sorted\[i\], id\)/.test(hookSrc),
+            'shadow prepend must pass the real session id as wireId through the per-frame isolation wrapper (meta requests to id#earlier always fail and storm the link)');
         assert.ok(/imageUrls: string\[\]/.test(fs.readFileSync(path.join(__dirname, '..', 'data', 'app-data.ts'), 'utf8')),
             'ChatMessage must carry imageUrls (placeholder text alone hides the illustration)');
         assert.ok(/__attach-img/.test(bubbleSrc) && /uni\.previewImage\(\{ urls: props\.message\.imageUrls/.test(bubbleSrc),
@@ -1748,14 +1897,14 @@ console.log('PASS  i18n-flags: vue-i18n esm-bundler feature flags literalized (d
         assert.ok(/只进缓冲不消费/.test(hookSrc),
             'rounds pages must accumulate into replayBuffers, not consume per-page (monotonic cursor would swallow every earlier page)');
         const rpBody = hookSrc.slice(rpAt, hookSrc.indexOf('replayBuffers.delete(id)', rpAt));
-        assert.ok(!/consumeFrame\(id, frames\[i\]\)/.test(rpBody),
+        assert.ok(!/(?<!safe)consumeFrame\(id, frames\[i\]\)/.test(rpBody),
             'the page loop must NOT call consumeFrame directly — buffer and sort-then-consume at the end (P0 regression lock)');
-        assert.ok(/for \(let i = 0; i < buffered\.length; i\+\+\) consumeFrame\(id, buffered\[i\]\)/.test(rpBody),
-            'the sorted full-buffer consume loop must remain the single consumption path');
+        assert.ok(/for \(let i = 0; i < buffered\.length; i\+\+\) safeConsumeFrame\(id, buffered\[i\]\)/.test(rpBody),
+            'the sorted full-buffer consume loop must remain the single consumption path (now via the per-frame isolation wrapper)');
         // 游标对齐必须在统一消费之后（否则 latestSeq 上抬先于渲染，去重再吞一遍）。
         // dropped 护栏版对齐条件带 !dropped 前缀（溢出时不上抬游标）。
         const alignIdx = rpBody.indexOf('latest > cursor.lastSeq)');
-        const consumeIdx = rpBody.indexOf('for (let i = 0; i < buffered.length; i++) consumeFrame');
+        const consumeIdx = rpBody.indexOf('for (let i = 0; i < buffered.length; i++) safeConsumeFrame');
         assert.ok(alignIdx > consumeIdx && alignIdx > 0 && consumeIdx > 0,
             'cursor latestSeq alignment must happen AFTER the sorted consume loop');
         // d2) 【codereview 补】缓冲溢出丢帧不能谎报拉全：倒拉页序下 shift 掉的是
@@ -1860,8 +2009,8 @@ console.log('PASS  i18n-flags: vue-i18n esm-bundler feature flags literalized (d
         assert.ok(/&__member \{[\s\S]{0,80}margin-left: 26px/.test(stylePart),
             'batch members must shift one column right via wrapper margin-left 26px (PC layer-20 parity)');
         assert.ok(/function memberWrapClass\(item: ChatBlock\): string/.test(b)
-            && /item\.interact\.length === 0 \? 'app-chat-bubble__member' : ''/.test(b),
-            'HITL/question/resolved interact cards must be exempt from the indent (PC :not(.hitl-pending) parity, data-driven for UCSS)');
+            && /item\.interact\.length === 0 && item\.kind !== 'text' && item\.kind !== 'compacted' \? 'app-chat-bubble__member' : ''/.test(b),
+            'HITL/question/resolved interact cards, text body segments AND compacted dividers must be exempt from the indent (PC parity + 2026-11-27 body flush-left)');
         assert.ok((b.match(/:class="memberWrapClass\(item\)"/g) || []).length === 2,
             'both member loops (windowed + batched-flat group) must apply the indent class');
         // b) 引导线：真 view 画线（UCSS 无 ::before），absolute top:0/bottom:0 随成员伸缩；
@@ -1993,12 +2142,584 @@ console.log('PASS  i18n-flags: vue-i18n esm-bundler feature flags literalized (d
         assert.ok(/historyReplay\.has\(conv\.id\) \|\| running\.has\(conv\.id\)/.test(settleFn)
             && /msg\.status !== 'done' && msg\.status !== 'stopped'/.test(settleFn),
             'settlement must be gated to terminal, non-running, non-replay messages only');
-        assert.ok(/head\.status !== 'loading'/.test(settleFn) && /head\.startedAt = 0/.test(settleFn),
+        // 2026-11-27 孤儿盖子修复：定格实现下沉到共享助手 settleLoadingHeadsOf
+        //（closeBatch/终态补扫/更早轮前插同口径），settleTerminalBatchHeads 委托调用。
+        assert.ok(/settleLoadingHeadsOf\(msg\)/.test(settleFn),
+            'terminal settlement must delegate to the shared lid settler');
+        const lidSettler = stripComments(extractBlock('function settleLoadingHeadsOf('));
+        assert.ok(/head\.status !== 'loading'/.test(lidSettler) && /head\.startedAt = 0/.test(lidSettler),
             'residual running batch heads must be closed and their ticker start cleared');
         assert.ok(/settleTerminalBatchHeads\(conv, msg\)/.test(apply27),
             'applyFileChanges must invoke terminal settlement after sinking the card');
     }
     console.log('PASS  changes-card-pinned(mobile): passive snapshots never cut batches/thinking, cards sink to the process-area tail and render after final text, batch membership exempt, terminal running heads settled');
+
+    /* ===== 19) 逐帧故障隔离 + 收口正文回填（2026-11-26 真机「已完成但正文/过程全空」）=====
+       真机 UTS/Kotlin 运行时对动态 JSON 取值/转型比纯 JS 严格：单帧消费抛异常曾把整页
+       for 循环吞掉（replayFrom/replayRoundsPage 的 catch 只 return false），已渲染部分
+       留下、其余帧全丢 → 收口后「已完成 + 空正文」，且 hasReplayContent=true 还不走快照
+       兜底。sim 纯 JS 永不抛，故多轮修复未暴露。回归锁：
+       a) 所有帧消费循环必须走 safeConsumeFrame（逐帧 try/catch）；裸 consumeFrame 调用
+          只允许存在于 safeConsumeFrame 包装内部；
+       b) 收口三处（done 帧 / finishProcessingTail / replayFrom 无 done 收口）必须调用
+          fillMissingFinalText，空正文轮自动从 /messages 快照回填最终正文；
+       c) 降级黄色警告不得再被写入（markDegradedHistory 不得有调用点）。 */
+    {
+        const hookSrc = fs.readFileSync(path.join(__dirname, '..', 'hooks', 'useConversations.ts'), 'utf8');
+        const callSites = (hookSrc.match(/safeConsumeFrame\(/g) || []).length;
+        assert.ok(callSites >= 6, 'every frame-consumption loop must route through safeConsumeFrame (found ' + callSites + ')');
+        const bare = hookSrc.split('\n').filter((l) => /consumeFrame\(/.test(l) && !/safeConsumeFrame/.test(l) && !/function consumeFrame/.test(l) && !/^\s+consumeFrame\(sessionId, frame, wireId\)/.test(l));
+        assert.equal(bare.length, 0, 'bare consumeFrame calls must not survive outside the isolation wrapper: ' + bare.join(' | '));
+        const fill = (hookSrc.match(/fillMissingFinalText\(/g) || []).length;
+        assert.ok(fill >= 4, 'settlement paths must backfill an empty final body (found ' + fill + ' refs)');
+        assert.ok(!/markDegradedHistory\(id\)/.test(hookSrc), 'the degraded yellow notice must never be rendered again (user requirement)');
+    }
+    console.log('PASS  frame-fault-isolation(mobile): per-frame try/catch on every consumption loop, closed turns backfill empty final text from the messages snapshot, no degraded notice anywhere');
+
+    /* ===== 20) 收口形态（2026-11-26 报障 + 2026-11-27 用户拍板 PC 对齐修订）=====
+       【2026-11-27 修订】上一版为修「展开只见盖子」观感让 toggleTurnCompact 连坐展开
+       全部批次盖子——用户实机对照 PC 报障「总批次卡展开后内部所有折叠都是展开态，
+       PC 是收起来的」。PC 口径（app-turn-display.js toggle click 只翻 turn-compact-open）：
+       展开摘要仅解除过程区隐藏，盖子以收口折叠态露出（单行统计），成员点盖子才展开。
+       toggleTurnCompact 只准翻 compactOpen，禁止触碰 batchCollapsed/rowOpen。
+       真因②：text 正文段块被模板套通用过程行行头（图标+「回答」+preview+状态点）——
+       PC 的中间正文是纯 markdown 段落（.md-content，无行头）。行头/row-body 必须对
+       kind==='text' 关门。
+       真因③：回填旧实现「从尾倒扫到第一个 USER」在切轮收口调用点取到下一轮正文（串轮），
+       且 per-id 锁让多轮收口互相抢占。必须按轮序数对齐 + 按消息对象加锁。 */
+    {
+        const hookSrc = fs.readFileSync(path.join(__dirname, '..', 'hooks', 'useConversations.ts'), 'utf8');
+        const bubbleSrc = fs.readFileSync(path.join(__dirname, '..', 'components', 'app-chat-bubble', 'app-chat-bubble.uvue'), 'utf8');
+        const headGates = (bubbleSrc.match(/v-if="item\.kind !== 'text'" class="app-chat-bubble__row-head"/g) || []).length;
+        assert.ok(headGates >= 3, 'every process row-head must hide for text segments (PC md-content has no head): found ' + headGates);
+        const bodyGates = (bubbleSrc.match(/v-if="item\.kind !== 'text' && item\.rowOpen && item\.body\.length > 0"/g) || []).length;
+        assert.ok(bodyGates >= 3, 'expanded row-body must not apply to text segments: found ' + bodyGates);
+        assert.ok(!/<view class="app-chat-bubble__row-head"/.test(bubbleSrc), 'no ungated row-head may survive (text segments would render an Answer head + status dot)');
+        assert.ok(/function onToggleCompact\(\): void \{[\s\S]{0,200}toggleTurnCompact\(props\.message\)/.test(bubbleSrc),
+            'the bubble summary toggle must route through the hook so lid sync is testable');
+        const toggleFn = extractBlockFrom(hookSrc, 'export function toggleTurnCompact(');
+        assert.ok(/msg\.compactOpen = !msg\.compactOpen/.test(toggleFn),
+            'the summary toggle must flip compactOpen');
+        assert.ok(!/batchCollapsed/.test(toggleFn) && !/rowOpen/.test(toggleFn),
+            'PC parity: expanding the turn summary must NOT touch batch lids or row bodies (lids stay folded, members open only via their own lid click)');
+        const fillFn = extractBlockFrom(hookSrc, 'function fillMissingFinalText(');
+        assert.ok(!/for \(let i = rows\.length - 1; i >= 0; i--\)/.test(fillFn),
+            'backfill must NOT scan backwards from the snapshot tail (cross-turn bleed at turn-switch settlement)');
+        assert.ok(/seen === targetIdx/.test(fillFn) && /if \(m\.role === 'ai'\) aiOrdinal \+= 1/.test(fillFn),
+            'backfill must align the target message by AI-row ordinal against ASSISTANT snapshot rows');
+        assert.ok(/finalTextFetching: Set<ChatMessage>/.test(hookSrc) && /finalTextFetching\.has\(msg\)/.test(fillFn),
+            'the in-flight backfill lock must be per message object (multi-turn settlements must not starve each other)');
+    }
+    console.log('PASS  settled-turn-shape(mobile): summary expansion keeps batch lids folded (PC parity), text segments render as plain markdown paragraphs without row heads, backfill aligns by turn ordinal');
+
+    /* ===== 20b) 压缩分隔线 PC 对齐（2026-11-27 用户两轮报障「压缩显示和 PC 端不一致」）=====
+       PC appendContextCompactedDivider（app-message.js）：context_compacted 帧渲染
+       「─── 已压缩上下文 ───」横向分隔线（.context-compacted-divider），非过程行：
+       ① 帧到达先收口运行中批次盖子（分隔线是压缩前/后内容分界）；
+       ② 明细只取 args.beforeMessages → afterMessages 存 compactDetail，但【不上屏】——
+          PC 只把它写进 data-detail/title 悬停提示，可见文案恒为词条本身
+          （第二轮报障真因之一：移动端把明细当第二段可见文本渲染，PC 没有）；
+       ③ KEEP_VISIBLE：不进批次折叠、不进整轮 Compact（折叠后仍可见）；
+       ④ 文案词条与 PC chat.context_compacted 逐语言同值（第二轮报障真因之二：
+          移动端自造 chat.segment.compacted 译文，en/ja/es/fr/el 等与 PC 不一致）。
+       旧移动端把它落成 notice 工具行（图标+标签+参数 dump），形态与 PC 完全不同。 */
+    {
+        const hookSrc = fs.readFileSync(path.join(__dirname, '..', 'hooks', 'useConversations.ts'), 'utf8');
+        const bubbleSrc = fs.readFileSync(path.join(__dirname, '..', 'components', 'app-chat-bubble', 'app-chat-bubble.uvue'), 'utf8');
+        const dataSrc = fs.readFileSync(path.join(__dirname, '..', 'data', 'app-data.ts'), 'utf8');
+        assert.ok(/'compacted'/.test(dataSrc) && /compactDetail: string/.test(dataSrc),
+            'ChatBlockKind must include compacted and ChatBlock must carry compactDetail');
+        const ccBranch = extractBlockFrom(hookSrc, "if (kind === 'context_compacted')");
+        assert.ok(/closeBatch\(conv, false\)/.test(ccBranch),
+            'the divider must close the running batch lid first (PC appendContextCompactedDivider)');
+        assert.ok(/'compacted:' \+ nextBlockId\(\), 'compacted'/.test(ccBranch),
+            'context_compacted must land as a dedicated compacted block, not a notice row');
+        assert.ok(/block\.process = false/.test(ccBranch) && /block\.batchId = ''/.test(ccBranch),
+            'the divider is a turn-boundary marker: exempt from batch collapse and turn Compact (PC KEEP_VISIBLE)');
+        assert.ok(/beforeMessages/.test(ccBranch) && /afterMessages/.test(ccBranch) && /' → '/.test(ccBranch),
+            'detail must be the beforeMessages → afterMessages projection only');
+        assert.ok(!/summarizeObject/.test(ccBranch), 'no protocol-field dump on the divider');
+        // 文案词条：PC chat.context_compacted 同源（禁止自造 segment 译文）
+        assert.ok(/t\('chat\.context_compacted'\)/.test(ccBranch),
+            'divider label must use the PC-parity key chat.context_compacted');
+        // 明细不上屏：PC 只进 data-detail/title 悬停，模板不得渲染 compactDetail
+        assert.ok(!/\{\{ item\.compactDetail \}\}/.test(bubbleSrc),
+            'compactDetail must NOT be visible text (PC keeps it in data-detail/title hover only)');
+        // 12 语言词条与 PC locales 逐语言同值
+        const pcMap = { 'zh-Hans': 'zh-CN', 'zh-Hant': 'zh-TW', en: 'en', de: 'de', el: 'el', es: 'es', fr: 'fr', ja: 'ja', pt: 'pt', ro: 'ro', ru: 'ru', vi: 'vi' };
+        Object.keys(pcMap).forEach((m) => {
+            const mob = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'locale', m + '.json'), 'utf8'));
+            const pc = JSON.parse(fs.readFileSync(path.join(__dirname, '..', '..', 'gourd-work', 'desktop', 'ui', 'locales', pcMap[m] + '.json'), 'utf8'));
+            assert.equal(mob['chat.context_compacted'], pc.chat.context_compacted,
+                'chat.context_compacted must equal the PC locale value for ' + m);
+        });
+        // noticeKind 不再包含 context_compacted（command/rewind 仍走 notice 行）
+        const noticeDecl = hookSrc.match(/const noticeKind: boolean = [^\n]+/);
+        assert.ok(noticeDecl != null && !/context_compacted/.test(noticeDecl[0]),
+            'context_compacted must not fall through to the generic notice row');
+        // 模板：三处成员循环都要有 compacted 分支（限高窗/平铺 group/常驻平铺）
+        const ccdBranches = (bubbleSrc.match(/v-else-if="item\.kind === 'compacted'" class="app-chat-bubble__ccd"/g) || []).length;
+        assert.ok(ccdBranches >= 3, 'every member loop must render the compacted divider (found ' + ccdBranches + ')');
+        assert.ok(/&__ccd-line \{[\s\S]*?height: 1px/.test(bubbleSrc) && /&__ccd \{[\s\S]*?flex-direction: row/.test(bubbleSrc),
+            'divider must be line—label—line with real 1px views (PC .ccd-line)');
+        assert.ok(/&__ccd-text \{[\s\S]*?color: var\(--color-text-tertiary\)/.test(bubbleSrc),
+            'divider text must use the tertiary color (PC --text-tertiary)');
+        // 成员缩进豁免：分隔线与盖子/正文同列（PC 与过程行同列，不进 26px 成员列）
+        const wrapFn = extractBlockFrom(bubbleSrc, 'function memberWrapClass(');
+        assert.ok(/item\.kind !== 'compacted'/.test(wrapFn),
+            'the divider must be exempt from the 26px member indent');
+    }
+    console.log('PASS  compacted-divider(mobile): context_compacted renders the PC line—label—line divider, closes the running lid, stays visible through Compact, label matches PC locales in 12 languages, detail stays off-screen (PC data-detail/title only)');
+
+/* ===== 20c) 工具展开明细 PC 对齐（2026-11-27 第四轮报障「编辑等展开内容和 PC 全都不一样」）=====
+   真因：移动端把工具结果 body 整段 dump 成纯文本 text（截断 2400），而 PC
+   （唯一源 gourd-work/desktop/ui）每类工具有专用渲染器（window._toolRenderers）：
+   edit diff 逐行着色+双列行号（args.diff / old_str+new_str 合成）、bash $命令+stdout、
+   grep 归组行号、glob/ls 文件列表、read/write/todo 浅底等宽文件体。
+   且明细渲染需要【完整原始入参】——args 字段是预览截断 160，必须另存 raw 字段。 */
+{
+	const hookSrc2 = fs.readFileSync(path.join(__dirname, '..', 'hooks', 'useConversations.ts'), 'utf8');
+	const bubbleSrc2 = fs.readFileSync(path.join(__dirname, '..', 'components', 'app-chat-bubble', 'app-chat-bubble.uvue'), 'utf8');
+	const dataSrc2 = fs.readFileSync(path.join(__dirname, '..', 'data', 'app-data.ts'), 'utf8');
+	// ① 原始入参字段：类型 + 工厂 + draft/args 与 end 两条写入路径
+	['diffRaw', 'oldRaw', 'newRaw', 'commandRaw', 'todosRaw'].forEach((k) => {
+		assert.ok(new RegExp(k + ': string').test(dataSrc2), 'ChatBlock must carry ' + k + ' (full raw args for PC-parity detail render)');
+		assert.ok(new RegExp(k + ": ''").test(hookSrc2), 'emptyBlock must initialize ' + k);
+	});
+	assert.ok(/block\.diffRaw = rawDiff\.substring\(0, 4000\)/.test(hookSrc2) && /block\.diffRaw = endDiff\.substring\(0, 4000\)/.test(hookSrc2),
+		'both action_draft/args and action_end must persist the full diff (capped), not the 160-char preview');
+	assert.ok(/block\.commandRaw = rawCmd\.substring\(0, 2000\)/.test(hookSrc2),
+		'bash command must persist in full (PC .bash-cmd renders the whole command)');
+	// ② 气泡三条渲染路径全部换成 app-tool-detail 组件
+	const detailTags = (bubbleSrc2.match(/<app-tool-detail v-if="item\.kind !== 'text' && item\.rowOpen && item\.body\.length > 0"/g) || []).length;
+	assert.ok(detailTags >= 3, 'all three member loops must render expanded detail via app-tool-detail (found ' + detailTags + ')');
+	assert.ok(/import AppToolDetail from '@\/components\/app-tool-detail\/app-tool-detail\.uvue'/.test(bubbleSrc2),
+		'the bubble must import the detail component');
+	// ③ 投影模块可执行断言（strip TS 后 node 直跑）
+	const tdSrc = fs.readFileSync(path.join(__dirname, '..', 'utils', 'tool-detail.ts'), 'utf8');
+	const tdJs = tdSrc
+		.replace(/export type ToolDetailRow = \{[\s\S]*?\n\}\n/, '')
+		.replace(/export type ToolDetail = \{[\s\S]*?\n\}\n/, '')
+		.replace(/export /g, '')
+		.replace(/:\s*ToolDetailRow\[\]\[\]/g, '').replace(/:\s*ToolDetailRow\[\]/g, '').replace(/:\s*ToolDetailRow\b/g, '')
+		.replace(/:\s*ToolDetail\b/g, '')
+		.replace(/:\s*string\[\]\[\]/g, '').replace(/:\s*string\[\]/g, '').replace(/:\s*number\[\]/g, '')
+		.replace(/:\s*\(files: number, hits: number\) => string/g, '')
+		.replace(/:\s*\(n: number\) => string/g, '')
+		.replace(/:\s*\(from: number\): number/g, '')
+		.replace(/:\s*\(len: number, width: number\): number/g, '')
+		.replace(/:\s*string\b/g, '').replace(/:\s*number\b/g, '').replace(/:\s*boolean\b/g, '')
+		.replace(/\bas ToolDetailRow\b/g, '').replace(/\bas ToolDetail\b/g, '');
+	const td = new Function(tdJs + '\nreturn { toolDetailOf, stripAnsi, synthesizeEditDiff, toolDetailHeight };')();
+	// ANSI 削离：CSI/OSC/裸 ESC；无 ESC 的方括号文本原样保留
+	assert.equal(td.stripAnsi('\u001b[31mred\u001b[0m plain'), 'red plain', 'CSI color codes must be stripped');
+	assert.equal(td.stripAnsi('\u001b]0;title\u0007after'), 'after', 'OSC sequences must be stripped at BEL');
+	assert.equal(td.stripAnsi('stack[31] kept'), 'stack[31] kept', 'bracket text without ESC must survive');
+	// edit：args.diff 逐行着色 + 双列行号 + 结果段
+	const ed = td.toolDetailOf('edit', 'Edited a.ts at line 12', '@@ -12,2 +12,2 @@\n-old\n+new\n ctx', '', '', '', '', false, '(no output)', 'Failed', (f, h) => f + '/' + h, (n) => n + '');
+	assert.equal(ed.view, 'edit', 'edit must take the diff view');
+	const addRow = ed.rows.find((r) => r.kind === 'diff-add');
+	const delRow = ed.rows.find((r) => r.kind === 'diff-del');
+	assert.ok(addRow && addRow.text === '+new' && addRow.num2 === '12' && addRow.num === '', 'add rows carry the new-side line number only');
+	assert.ok(delRow && delRow.num === '12' && delRow.num2 === '', 'del rows carry the old-side line number only');
+	assert.ok(ed.rows.some((r) => r.kind === 'result' && r.text.indexOf('Edited') === 0), 'the Edited result line must render below the diff (PC .edit-result)');
+	// edit 无 args.diff：old_str/new_str 合成（首行号从结果 at line 解析）
+	const synth = td.synthesizeEditDiff('a\nb', 'c', 'Edited x at line 7');
+	assert.ok(synth.startsWith('@@ -7,2 +7,1 @@') && synth.indexOf('-a') >= 0 && synth.indexOf('+c') >= 0,
+		'synthesizeEditDiff must anchor at the result line number (PC parity)');
+	const edFail = td.toolDetailOf('edit', 'Error: old_str not found', '', 'x', 'y', '', '', true, '(no output)', 'Failed', (f, h) => f + '/' + h, (n) => n + '');
+	assert.ok(edFail.rows.some((r) => r.kind === 'result-error' && r.text.indexOf('Failed') === 0), 'failed edit must show the warn label + error text');
+	// bash：$ 命令行 + 输出行；空输出走词条
+	const bs = td.toolDetailOf('bash', 'line1\nline2', '', '', '', 'npm test', '', false, '(no output)', 'Failed', (f, h) => f + '/' + h, (n) => n + '');
+	assert.equal(bs.view, 'bash', 'bash must take the command view');
+	assert.ok(bs.rows[0].kind === 'bash-cmd' && bs.rows[0].text === 'npm test', 'the full command must lead the bash view');
+	assert.ok(bs.rows.filter((r) => r.kind === 'bash-out').length === 2, 'stdout lines must render individually');
+	const bsEmpty = td.toolDetailOf('bash', '', '', '', '', 'ls', '', false, '(no output)', 'Failed', (f, h) => f + '/' + h, (n) => n + '');
+	assert.ok(bsEmpty.rows.some((r) => r.text === '(no output)'), 'empty stdout must fall back to the no-output label');
+	// grep：路径归组 + 行号（Windows 盘符冒号不误判）+ 汇总行
+	const gr = td.toolDetailOf('grep', 'C:\\work\\a.ts:12: hit one\nC:\\work\\a.ts:30: hit two\nb.ts:3: hit three', '', '', '', '', '', false, '(no output)', 'Failed', (f, h) => f + ' files/' + h + ' hits', (n) => n + '');
+	assert.equal(gr.view, 'grep', 'grep output must take the grouped view');
+	assert.ok(gr.rows[0].kind === 'summary' && gr.rows[0].text === '2 files/3 hits', 'summary counts files and hits');
+	const hit = gr.rows.find((r) => r.kind === 'grep-hit');
+	assert.ok(hit && hit.num === '12' && hit.text === 'hit one', 'drive-letter colons must not break line-number parsing');
+	assert.equal(gr.rows.filter((r) => r.kind === 'grep-file').length, 2, 'hits must group under their file paths');
+	// glob/ls：[FILE]/[DIR] 列表 + 汇总；树形字符走兜底
+	const gl = td.toolDetailOf('glob', '[FILE] a.ts\n[DIR] sub\n[FILE] b.md', '', '', '', '', '', false, '(no output)', 'Failed', (f, h) => f + '/' + h, (n) => n + ' items');
+	assert.equal(gl.view, 'files', 'glob listing must take the file view');
+	assert.ok(gl.rows[0].text === '3 items' && gl.rows.some((r) => r.kind === 'file-dir' && r.text === 'sub'), 'file listing carries a summary and DIR rows');
+	const tree = td.toolDetailOf('ls', 'root\n├── a\n└── b', '', '', '', '', '', false, '(no output)', 'Failed', (f, h) => f + '/' + h, (n) => n + '');
+	assert.equal(tree.view, 'file', 'tree output must fall back to the plain file body (PC renderFileListing parity)');
+	// read/todo：浅底文件体；todo 优先取入参原文
+	const rd = td.toolDetailOf('read', 'line1\nline2', '', '', '', '', '', false, '(no output)', 'Failed', (f, h) => f + '/' + h, (n) => n + '');
+	assert.equal(rd.view, 'file', 'read output must take the file body view');
+	const todo = td.toolDetailOf('todowrite', 'saved ok', '', '', '', '', '- [x] done\n- [ ] next', false, '(no output)', 'Failed', (f, h) => f + '/' + h, (n) => n + '');
+	assert.ok(todo.rows.some((r) => r.text === '- [x] done'), 'todowrite must prefer the raw todos markdown (PC renderTodoMarkdown)');
+	// 思考/兜底：plain 行逐行投影
+	const th = td.toolDetailOf('', 'thought line1\nthought line2', '', '', '', '', '', false, '(no output)', 'Failed', (f, h) => f + '/' + h, (n) => n + '');
+	assert.equal(th.view, 'file', 'thinking body falls to the plain projection');
+	assert.equal(th.rows.length, 2, 'thinking lines project one row each');
+	// 【2026-11-27「展开后大片空白」回归锁】toolDetailHeight 必须与投影渲染几何同源：
+	// ① 2 短行思考体 = 2×18 + 24（内外边距），绝不按原文长度虚估
+	const thH = td.toolDetailHeight('', 'thought line1\nthought line2', '', '', '', '', '', false, '(no output)', 'Failed', (f, h) => f + '/' + h, (n) => n + '', 300);
+	assert.equal(thH, 2 * 18 + 24, 'two short thinking lines must estimate exactly 2 rows + box margins (no blank overshoot)');
+	// ② edit：高度由 diff 行数决定（body 只是短结果句）——旧「body/40」估算的真因场景
+	const edH = td.toolDetailHeight('edit', 'Edited a.ts at line 12', '@@ -12,2 +12,2 @@\n-old\n+new\n ctx', '', '', '', '', false, '(no output)', 'Failed', (f, h) => f + '/' + h, (n) => n + '', 300);
+	assert.ok(edH >= 4 * 18 + 24 && edH <= 4 * 18 + 24 + 22, 'edit height must follow the diff rows (4) + result line, not the short body text');
+	// ③ todo：todosRaw 优先（body 是 saved ok 一句）
+	const todoH = td.toolDetailHeight('todowrite', 'saved ok', '', '', '', '', '- [x] done\n- [ ] next', false, '(no output)', 'Failed', (f, h) => f + '/' + h, (n) => n + '', 300);
+	assert.equal(todoH, 2 * 18 + 24, 'todo height must follow the raw todos lines, not the result body');
+	// ④ grep：投影丢弃非命中行——按原文折算的虚高必须消失
+	const grH = td.toolDetailHeight('grep', 'junk line\nC:\\a.ts:1: hit\nmore junk\nand more junk here', '', '', '', '', '', false, '(no output)', 'Failed', (f, h) => f + '/' + h, (n) => n + '', 300);
+	const grProj = td.toolDetailOf('grep', 'junk line\nC:\\a.ts:1: hit\nmore junk\nand more junk here', '', '', '', '', '', false, '(no output)', 'Failed', (f, h) => f + '/' + h, (n) => n + '');
+	assert.ok(grH <= grProj.rows.length * 22 + 24 + 12, 'grep height must follow projected rows only (dropped junk lines never inflate the window)');
+	// ⑤ 长行折行必须计入（等宽 12px ≈ 8px/字符保守折算）
+	const longH = td.toolDetailHeight('read', 'x'.repeat(600), '', '', '', '', '', false, '(no output)', 'Failed', (f, h) => f + '/' + h, (n) => n + '', 300);
+	assert.ok(longH > 24 + 18, 'a 600-char single line must wrap into multiple rows in the estimate');
+	// 【codereview 回归锁】思考/agent 展开体同样有灰底——PC .thinking-inner-out
+	// { padding:8px 14px; background:var(--bg-code) }（与 .tool-plain-out 同族），
+	// 旧断言「PC 思考展开无底色卡」是错的，透明就是又一次「和 PC 不一致」。
+	const tdComp0 = fs.readFileSync(path.join(__dirname, '..', 'components', 'app-tool-detail', 'app-tool-detail.uvue'), 'utf8');
+	assert.ok(!/item\.kind === 'thinking' \|\| item\.kind === 'agent'\) return false/.test(tdComp0),
+		'thinking/agent bodies must NOT stay transparent (PC .thinking-inner-out has --bg-code)');
+	assert.ok(/const boxed: ComputedRef<boolean> = computed<boolean>\(\(\): boolean => true\)/.test(tdComp0),
+		'every expanded body takes the boxed --bg-code container (PC parity)');
+	// ④ 组件与词条：明细组件必须消费投影模块 + 5 个 PC 同源词条逐语言同值
+	const tdComp = fs.readFileSync(path.join(__dirname, '..', 'components', 'app-tool-detail', 'app-tool-detail.uvue'), 'utf8');
+	assert.ok(/import \{ toolDetailOf \} from '@\/utils\/tool-detail'/.test(tdComp), 'the detail component must consume the shared projection module');
+	assert.ok(/var\(--color-git-add-bg\)/.test(tdComp) && /var\(--color-bg-code\)/.test(tdComp),
+		'diff/box backgrounds must use the PC-parity palette vars (no hard-coded colors)');
+	assert.ok(!/box-shadow/.test(tdComp), 'the detail component must not fabricate shadows (PC tool bodies have none)');
+	assert.ok(!/^\s*\.theme-dark /m.test(tdComp), 'no descendant theme rules (vapor drops them silently)');
+	const pcMap2 = { 'zh-Hans': 'zh-CN', 'zh-Hant': 'zh-TW', en: 'en', de: 'de', el: 'el', es: 'es', fr: 'fr', ja: 'ja', pt: 'pt', ro: 'ro', ru: 'ru', vi: 'vi' };
+	Object.keys(pcMap2).forEach((m) => {
+		const mob = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'locale', m + '.json'), 'utf8'));
+		const pc = JSON.parse(fs.readFileSync(path.join(__dirname, '..', '..', 'gourd-work', 'desktop', 'ui', 'locales', pcMap2[m] + '.json'), 'utf8'));
+		['files', 'matches', 'items', 'no_output', 'edit_failed'].forEach((k) => {
+			assert.equal(mob['chat.detail.' + k], pc.chat[k], 'chat.detail.' + k + ' must equal the PC locale value for ' + m);
+		});
+	});
+}
+console.log('PASS  tool-detail(mobile): expanded bodies render PC-parity views (edit diff w/ line numbers, bash $cmd+stdout, grep groups, file listings, todo raw markdown), full raw args persisted on draft+end, ANSI stripped, 5 detail labels match PC locales in 12 languages');
+
+    /* ===== 21) 裸 __DEV__ 禁令（2026-11-26 第十一轮真因）=====
+       vapor 编译产物（app-service.js）不定义 __DEV__（实测：产物中 2 次引用、
+       0 次定义；HBuilderX 全插件亦无注入）。真机执行裸 `if (__DEV__)` 即抛
+       ReferenceError。上一版两处裸引用构成连环炸：
+       ① consumeFrame 元数据帧分支（context_size/trace 每轮必达）先炸；
+       ② safeConsumeFrame 的 catch 块里第二处再炸 → 异常逃逸出帧级隔离 →
+          整个回放循环被外层 catch 吞掉 → 降级文本快照 = 用户报障的
+          「只剩思考+正文、过程工具全丢」。
+       sim 把 __DEV__ 作为函数参数注入恒可解析，纯 Node 永不抛，故未暴露。
+       回归锁：
+       a) hook 源码禁止裸 __DEV__ 条件/取值：所有引用必须走 `typeof __DEV__`
+          守卫（typeof 对未声明标识符永不抛，语言规范保证）；
+       b) safeConsumeFrame 的 catch 块内日志必须再包一层 try/catch——
+          帧级隔离层自身对任何输入都不得抛。 */
+    {
+        const hookSrc = fs.readFileSync(path.join(__dirname, '..', 'hooks', 'useConversations.ts'), 'utf8');
+        const lines = hookSrc.split('\n');
+        const bare = [];
+        lines.forEach((l, i) => {
+            if (!/__DEV__/.test(l)) return;
+            if (/^\s*(\/\/|\*|\/\*)/.test(l)) return; // 注释行豁免
+            if (/typeof __DEV__/.test(l)) return;      // typeof 守卫合法
+            bare.push((i + 1) + ': ' + l.trim());
+        });
+        assert.equal(bare.length, 0, 'bare __DEV__ reference (undefined on-device → ReferenceError kills replay): ' + bare.join(' | '));
+        const guarded = (hookSrc.match(/typeof __DEV__ !== 'undefined' && __DEV__/g) || []).length;
+        assert.ok(guarded >= 2, 'dev-log sites must use the typeof guard (found ' + guarded + ')');
+        const safeFn = extractBlockFrom(hookSrc, 'function safeConsumeFrame(');
+        assert.ok(/catch \(_logErr\)/.test(safeFn), 'the isolation wrapper must never let its own logging throw escape');
+    }
+    console.log('PASS  no-bare-dev-flag(mobile): __DEV__ only behind typeof guards, isolation wrapper logging is throw-proof');
+
+    /* ---------------- 22) 终态闸门（2026-11-26 用户实机报障「任务都执行完毕了，
+       移动端历史消息还有计时」）回归锁。真因：done/error 收口后迟到的过程帧
+       （Rust forwarder 后台帧 / 重连补帧 / 回放 done 后迟到帧）经 ensureProcessBatch
+       在已终态消息上重开 loading 盖子且无人收口 → 盖子每秒刷「正在执行中 · Ns」；
+       旧 settleTerminalBatchHeads 只挂在 file_changes 一条路径，无快照的 run 永不收敛。
+       修复：TurnState.runSettled 终态标记 + consumeFrame 过程帧闸门（桌面 finishStream
+       后 PHASE_DONE 不再开新批同口径）。锁：
+       a) 闸门存在且只挡过程帧（processKind 判定与 ensureProcessBatch 同帧入口）；
+       b) 所有终态收口点必须置 runSettled（done/error/停止/回放尾条/replay 收口）；
+       c) 新轮边界必须清零（user 帧切轮、resume、probeRunning 接流、resetTurnState）。 */
+    {
+        const hookSrc22 = fs.readFileSync(path.join(__dirname, '..', 'hooks', 'useConversations.ts'), 'utf8');
+        assert.ok(/runSettled: boolean/.test(hookSrc22), 'TurnState must carry the runSettled terminal flag');
+        assert.ok(/if \(processKind && state\.runSettled\) return/.test(hookSrc22),
+            'process frames must be gated once the run settled (stray loading lid = per-second elapsed ticker)');
+        const setSites = (hookSrc22.match(/runSettled = true/g) || []).length;
+        assert.ok(setSites >= 5, 'every terminal settle site must arm the gate (found ' + setSites + ')');
+        const clearSites = (hookSrc22.match(/runSettled\s*[:=]\s*false/g) || []).length;
+        assert.ok(clearSites >= 4, 'new-run boundaries must disarm the gate (found ' + clearSites + ')');
+        // user 帧切轮清零必须早于 historyReplay 分支（两条路径共用），且实时路径也覆盖
+        const userBranch = extractBlockFrom(hookSrc22, "if (kind === 'user' || kind === 'user_input')");
+        assert.ok(/turnStateOf\(sessionId\)\.runSettled = false/.test(userBranch)
+            && userBranch.indexOf('runSettled = false') < userBranch.indexOf('if (historyReplay.has(sessionId))'),
+            'the user-frame turn boundary must clear runSettled before the replay branch (live new runs rely on it)');
+    }
+    console.log('PASS  terminal-gate(mobile): settled runs drop late process frames, new runs disarm the gate');
+
+    /* ---------------- 23) 远端新轮接管（2026-11-27 用户实机报障「移动端先进入
+       已完成任务，桌面端再在这个任务内发送消息，移动端无法正常显示正在运行的消息」）
+       回归锁。真因：上一轮 done 收口后 running 清空，且旧实现只在 probeRunning
+       命中 running 时才登记帧处理器、打开后再无任何再探测机制——桌面端随后发起的
+       新 run 帧全部无人消费，界面永远停在上一轮「已完成」。修复三道防线：
+       a) 常驻帧订阅：打开会话即 onFrame（不只依赖 probeRunning 命中）；
+       b) 帧级自接管：live 路径 user 帧到达且不在 running → 置运行态+武装看门狗；
+       c) 空闲对账探针：15s rounds=1 探针发现 running=true → attachRemoteRun 接管；
+       d) 切回重探：loadMessages 对已加载空闲会话即时重探一次。 */
+    {
+        const hookSrc23 = fs.readFileSync(path.join(__dirname, '..', 'hooks', 'useConversations.ts'), 'utf8');
+        // a) 打开会话即常驻订阅（在 probeRunning 之后兜底登记，幂等覆盖）
+        const loadInner = extractBlockFrom(hookSrc23, 'async function loadMessagesInner(id: string)');
+        assert.ok(/await probeRunning\(id\)[\s\S]{0,600}onFrame\(id,/.test(loadInner),
+            'opening a session must register a resident frame handler even when the probe misses a running run');
+        // b) user 帧自接管：不在 running 且非回放时置运行态
+        const userBranch23 = extractBlockFrom(hookSrc23, "if (kind === 'user' || kind === 'user_input')");
+        assert.ok(/if \(!running\.has\(sessionId\) && !historyReplay\.has\(sessionId\)\) \{[\s\S]{0,900}running\.add\(sessionId\)[\s\S]{0,900}armRunWatchdog\(sessionId\)/.test(userBranch23),
+            'a live user frame arriving on an idle session must self-attach the run (running + watchdog)');
+        // c) attachRemoteRun 是唯一接管实现，且含补帧+看门狗
+        const attach = extractBlockFrom(hookSrc23, 'function attachRemoteRun(id: string, data: ApiBody)');
+        assert.ok(/running\.add\(id\)/.test(attach) && /onFrame\(id,/.test(attach)
+            && /catchUpFrames\(id\)/.test(attach) && /armRunWatchdog\(id\)/.test(attach),
+            'attachRemoteRun must set running, register handler, catch up frames and arm the watchdog');
+        assert.ok(/function probeRunning[\s\S]{0,1200}attachRemoteRun\(id, data\)/.test(hookSrc23),
+            'probeRunning must delegate the attach to attachRemoteRun (single implementation)');
+        assert.ok(/if \(data\.running === true\) attachRemoteRun\(id, data\)/.test(hookSrc23),
+            'the idle reconciliation probe must attach when the kernel reports running');
+        // d) 切回重探：已加载空闲会话再次打开即时重探
+        const loadMsgs = extractBlockFrom(hookSrc23, 'function loadMessages(id: string)');
+        assert.ok(/loaded\.has\(id\) && !running\.has\(id\)[\s\S]{0,300}probeRunning\(id\)/.test(loadMsgs),
+            're-opening a loaded idle session must re-probe immediately (do not wait for the 15s probe)');
+        // 设备切换必须撤掉空闲探针定时器（旧设备对账不得写新设备会话）
+        const resetDev = extractBlockFrom(hookSrc23, 'function resetForDeviceChange()');
+        assert.ok(/idleProbeTimer/.test(resetDev) && /clearTimeout\(idleProbeTimer\)/.test(resetDev),
+            'device switch must cancel the idle reconciliation probe timer');
+        // 探针带审计标记且内核容忍未知 query 字段（ReplayQuery 无 deny_unknown_fields）
+        assert.ok(/idleProbe=1/.test(hookSrc23), 'idle probe must carry its audit marker');
+    }
+    console.log('PASS  remote-run-takeover(mobile): idle sessions detect and attach to runs started elsewhere');
+
+    /* ---------------- 24) 挂起恢复闸门清零（2026-11-27 code review 发现的终态闸门
+       回归）回归锁。真因：done(suspended) 收口置 runSettled + 删 running（防挂起
+       等待期迟到帧开计时盖子）；本端作答经 submitInteract 清闸门，但他端作答
+       （桌面先答/批准审批）时移动端只收到 question_answered / hitl_released 帧——
+       旧实现不清 runSettled，spawn_resume 续跑段的过程帧被终态闸门全丢。锁：
+       a) question_answered/hitl_released 分支必须清 runSettled；
+       b) 同分支必须恢复运行态（running + 看门狗），回放期除外；
+       c) user 帧自接管与 attachRemoteRun 的 runId 写入必须带空值守卫
+          （内核 user 帧不带 runId，空值覆写会废掉停止判停的权威 runId）。 */
+    {
+        const hookSrc24 = fs.readFileSync(path.join(__dirname, '..', 'hooks', 'useConversations.ts'), 'utf8');
+        const qaBranch = extractBlockFrom(hookSrc24, "if (kind === 'question_answered' || kind === 'hitl_released')");
+        assert.ok(/state\.runSettled = false/.test(qaBranch),
+            'resume signal frames must disarm the terminal gate (other-client answers rely on it)');
+        assert.ok(/if \(!running\.has\(sessionId\) && !historyReplay\.has\(sessionId\)\) \{[\s\S]{0,300}running\.add\(sessionId\)[\s\S]{0,300}armRunWatchdog\(sessionId\)/.test(qaBranch),
+            'resume signal frames must restore the running state (live path only, not during replay)');
+        const userBranch24 = extractBlockFrom(hookSrc24, "if (kind === 'user' || kind === 'user_input')");
+        assert.ok(/const frameRunId: string = fieldString\(frame, 'runId'\)[\s\S]{0,200}if \(frameRunId\.length > 0\) c\.runId = frameRunId/.test(userBranch24),
+            'user-frame self-takeover must guard runId against empty overwrite (kernel user frames carry no runId)');
+        const attach24 = extractBlockFrom(hookSrc24, 'function attachRemoteRun(id: string, data: ApiBody)');
+        assert.ok(/if \(probeRunId\.length > 0\) cursor\.runId = probeRunId/.test(attach24),
+            'attachRemoteRun must guard runId against empty overwrite');
+    }
+    console.log('PASS  suspend-resume-gate(mobile): resume signal frames disarm the terminal gate and restore running state');
+
+    /* ---------------- 25) 孤儿 loading 盖子（2026-11-27 用户实机报障「任务都执行
+       结束了，移动端进入任务的时候消息顶部还展示正在执行中」）回归锁。真因：
+       closeBatch 旧实现 `if (!state.batchOpen) return` + 按全局 state.batchId 找
+       盖子——回放 done 分支收口后迟到过程帧重开的盖子、切轮/收口错位产生的失配
+       盖子永远无人认领（status=loading + startedAt>0 → batchLabel 每秒刷
+       「正在执行中 · Ns」）。修复口径：closeBatch 按【尾条自身全部 loading 盖子
+       实体】收口，成员按盖子 id 统计；终态收口点补扫 settleLoadingHeadsOf。锁：
+       a) closeBatch 不得再以 state.batchOpen 作早退守卫（孤儿盖子收不掉的根因）；
+       b) closeBatch 必须扫尾条全部 loading 批次盖子（filter kind=batch+loading）；
+       c) 无守卫定格助手 settleLoadingHeadsOf 存在，且被终态收口点调用
+          （finishProcessingTail / replayFrom 兜底 / 更早轮前插 / sealEarlierHead）；
+       d) done/error 终态分支必须补扫（尾条已终态时 processing 守卫不成立的路径）。 */
+    {
+        const hookSrc25 = fs.readFileSync(path.join(__dirname, '..', 'hooks', 'useConversations.ts'), 'utf8');
+        const closeFn = extractBlockFrom(hookSrc25, 'function closeBatch(conv: Conversation, failed: boolean)');
+        assert.ok(!/if \(!state\.batchOpen\) return/.test(closeFn),
+            'closeBatch must NOT early-return on state.batchOpen (orphan lids were never settled — the reported bug)');
+        assert.ok(/item\.kind === 'batch' && item\.status === 'loading'/.test(closeFn),
+            'closeBatch must settle ALL loading batch lids of the tail message by entity, not by state.batchId lookup');
+        assert.ok(/item\.batchId !== head\.id/.test(closeFn),
+            'member counting/collapse must key off the lid entity id (state.batchId may be stale/mismatched)');
+        assert.ok(/function settleLoadingHeadsOf\(msg: ChatMessage\)/.test(hookSrc25),
+            'a guard-free per-message lid settler must exist for terminal/replay/prepend paths');
+        const finishTail = extractBlockFrom(hookSrc25, 'function finishProcessingTail(conv: Conversation, elapsed: number)');
+        assert.ok(/settleLoadingHeadsOf\(msg\)/.test(finishTail),
+            'finishProcessingTail must sweep residual loading lids before marking the tail done');
+        const prepend = extractBlockFrom(hookSrc25, 'function prependRoundsPage(id: string, frames: LinkFrame[], epoch: number)');
+        assert.ok(/settleLoadingHeadsOf\(msg\)/.test(prepend),
+            'earlier-rounds prepend must settle lids inside each segment (shadow state is discarded right after)');
+        const sealHead = extractBlockFrom(hookSrc25, 'function sealEarlierHead(id: string, epoch: number)');
+        assert.ok(/settleLoadingHeadsOf\(head\)/.test(sealHead),
+            'sealEarlierHead must settle lids together with the processing head placeholder');
+        const doneBranch = extractBlockFrom(hookSrc25, "if (kind === 'done')");
+        assert.ok(/settleLoadingHeadsOf\(msg\)/.test(doneBranch),
+            'the live done branch must sweep residual lids even when the tail is already terminal');
+        const replayFn25 = extractBlockFrom(hookSrc25, 'async function replayFrom(id: string, afterSeq: number)');
+        assert.ok(/settleLoadingHeadsOf\(msg\)/.test(replayFn25),
+            'the replay running=false fallback settle must sweep residual lids too');
+        // settleTerminalBatchHeads（file_changes 路径）复用同一助手，口径唯一
+        const settleFn25 = extractBlockFrom(hookSrc25, 'function settleTerminalBatchHeads(conv: Conversation, msg: ChatMessage)');
+        assert.ok(/settleLoadingHeadsOf\(msg\)/.test(settleFn25),
+            'settleTerminalBatchHeads must delegate to the shared lid settler (single implementation)');
+    }
+    console.log('PASS  orphan-lid-settle(mobile): closeBatch settles by lid entity; terminal paths sweep residual loading lids');
+
+    /* ---------------- 26) 空壳「已处理」盖子 + 回填后 Compact + 正文对齐
+       （2026-11-27 用户截图报障两问题）回归锁：
+       ① 零成员批次收口后不得残留「已处理」空壳行（pruneEmptyBatchHeads，
+          closeBatch/settleLoadingHeadsOf/settleOrphanLids 三处收口口径统一）；
+       ② fillMissingFinalText 回填正文后必须重建 Compact（摘要头/折叠态/counts），
+          并移除与最终正文同文的过程 text 段（防双份渲染）；
+       ③ closeBatch 是 text 帧热路径：无盖子早退分支不得扫 conv.messages
+          （更早轮全量扫描只允许在低频 settleOrphanLids）；
+       ④ 过程正文 __process-md 不得 margin-left 缩进，memberWrapClass 对 text
+          块豁免 __member（正文与折叠标头左对齐，用户拍板口径）。 */
+    {
+        const hookSrc26 = fs.readFileSync(path.join(__dirname, '..', 'hooks', 'useConversations.ts'), 'utf8');
+        assert.ok(/function pruneEmptyBatchHeads\(msg: ChatMessage\)/.test(hookSrc26),
+            'a zero-member lid pruner must exist (empty 已处理 shells must not enter terminal history)');
+        const closeFn26 = extractBlockFrom(hookSrc26, 'function closeBatch(conv: Conversation, failed: boolean)');
+        assert.ok(/pruneEmptyBatchHeads\(msg\)/.test(closeFn26),
+            'closeBatch must prune zero-member lids after settling');
+        // 热路径锁：closeBatch 不得遍历 conv.messages（每 text 帧调用，长会话全量扫描=卡顿）
+        assert.ok(!/conv\.messages\.forEach/.test(closeFn26),
+            'closeBatch runs on EVERY text delta — it must not scan conv.messages (use low-frequency settleOrphanLids)');
+        assert.ok(/function settleOrphanLids\(conv: Conversation\)/.test(hookSrc26),
+            'earlier-round orphan sweep must live in a dedicated low-frequency helper');
+        const orphanFn = extractBlockFrom(hookSrc26, 'function settleOrphanLids(conv: Conversation)');
+        assert.ok(/row\.status !== 'done' && row\.status !== 'stopped'/.test(orphanFn) && /pruneEmptyBatchHeads\(row\)/.test(orphanFn),
+            'settleOrphanLids must only touch terminal earlier rows and prune empty shells there');
+        const doneBranch26 = extractBlockFrom(hookSrc26, "if (kind === 'done')");
+        assert.ok(/settleOrphanLids\(conv\)/.test(doneBranch26), 'live done must run the earlier-round orphan sweep');
+        const lidSettler26 = extractBlockFrom(hookSrc26, 'function settleLoadingHeadsOf(msg: ChatMessage)');
+        assert.ok(/pruneEmptyBatchHeads\(msg\)/.test(lidSettler26),
+            'settleLoadingHeadsOf must prune zero-member lids too (replay/prepend paths)');
+        const fillFn26 = extractBlockFrom(hookSrc26, 'function fillMissingFinalText(id: string, msg: ChatMessage)');
+        assert.ok(/msg\.compactOpen = false/.test(fillFn26) && /msg\.summary\.length === 0/.test(fillFn26),
+            'backfill must rebuild turn Compact (summary head + collapsed) after writing msg.text');
+        assert.ok(/item\.kind === 'text' && item\.body === finalText/.test(fillFn26),
+            'backfill must drop the process text segment identical to the final body (no double render)');
+        const bubble26 = fs.readFileSync(path.join(__dirname, '..', 'components', 'app-chat-bubble', 'app-chat-bubble.uvue'), 'utf8');
+        const mdStyle = bubble26.match(/&__process-md \{[\s\S]*?\}/);
+        assert.ok(mdStyle != null && /margin-left: 0/.test(mdStyle[0]) && !/margin-left: 20px/.test(mdStyle[0]),
+            'process markdown must not carry the legacy 20px indent (body aligns with fold headers)');
+        const wrapFn = bubble26.match(/function memberWrapClass\(item: ChatBlock\): string \{[\s\S]*?\n\t\}/);
+        assert.ok(wrapFn != null && /item\.kind !== 'text'/.test(wrapFn[0]),
+            'memberWrapClass must exempt text segments from the 26px member indent');
+    }
+    console.log('PASS  empty-lid-prune+backfill-compact+body-align(mobile): no 已处理 shells; backfill rebuilds Compact; body flush-left');
+
+    /* ---------------- 27) 消息列表贴底跟随门禁（2026-11-27 用户报障
+       「消息内容展示后上下滑动会卡住」）回归锁：
+       ① 旧实现 scrollTick 每帧无条件拽底（每 token + 60ms 补滚），用户上滑读历史
+          被程序滚动打断——「滑不动」真因。watch 主路径与补滚路径都必须过 listMayFollow；
+       ② 手势判定：touchstart/touchend/touchcancel 三事件齐全（cancel 是外层
+          list-view 抢占手势时的唯一收尾信号，漏绑=标志永真）；
+       ③ 离底暂停只认手势期（scroll-anchoring 内容长高的 scroll 不算上滑）；
+          回底恢复走 gap≤48 + scrolltolower 双保险；
+       ④ 切会话必须重置跟随态（上一会话的暂停态不得残留）；
+       ⑤ 批次滚动窗同修：followBottom 手势期不下发 scroll-top、touchcancel 补绑、
+          惯性窗内离底同样暂停跟随。 */
+    {
+        const chat27 = fs.readFileSync(path.join(__dirname, '..', 'components', 'app-chat', 'app-chat.uvue'), 'utf8');
+        assert.ok(/const listPinned: Ref<boolean> = ref<boolean>\(true\)/.test(chat27),
+            'the message list must have a pinned-follow gate (unconditional per-token scroll fights the user gesture)');
+        assert.ok(/function listMayFollow\(\): boolean \{[\s\S]*?listPinned\.value && !listTouching\.value && Date\.now\(\) >= listInertiaUntil/.test(chat27),
+            'listMayFollow must require pinned AND no active gesture/inertia (program scroll during a drag breaks native scrolling)');
+        const tickWatch = extractBlockFrom(chat27, 'watch(scrollTick, (): void => {');
+        const mayFollowCalls = (tickWatch.match(/if \(!listMayFollow\(\)\) return/g) || []).length;
+        assert.ok(mayFollowCalls >= 2,
+            'BOTH the nextTick follow and the 60ms fix-up must pass the follow gate (found ' + mayFollowCalls + ')');
+        assert.ok(/@scroll="onListScroll" @scrolltolower="onListLower" @scrollend="onListScrollEnd"/.test(chat27)
+            && /@touchstart="onListTouchStart" @touchend="onListTouchEnd" @touchcancel="onListTouchEnd"/.test(chat27),
+            'list-view must wire scroll/lower/scrollend + all three touch events (touchcancel is the only close signal when the gesture is stolen)');
+        const listScrollFn = extractBlockFrom(chat27, 'function onListScroll(e: UniScrollEvent): void {');
+        assert.ok(/gesturing && gap > 48/.test(listScrollFn),
+            'leaving the bottom must only pause follow during a user gesture (anchoring growth events are not swipes)');
+        assert.ok(/gap >= 0 && gap <= 48/.test(listScrollFn) && /function onListLower\(\): void \{[\s\S]*?listPinned\.value = true/.test(chat27),
+            'returning to the bottom must resume follow (gap check + scrolltolower fallback)');
+        assert.ok(/d\.scrollHeight - d\.scrollTop - listViewport/.test(chat27) && /getBoundingClientRect\(\)/.test(chat27),
+            'gap must subtract the measured viewport height (content-minus-scroll alone always reads as off-bottom)');
+        const switchWatch = extractBlockFrom(chat27, 'watch(activeId, (): void => {');
+        assert.ok(/listPinned\.value = true/.test(switchWatch) && /listInertiaUntil = 0/.test(switchWatch),
+            'switching conversations must reset the follow gate (a paused state must not leak across conversations)');
+        // 批次滚动窗同口径
+        const bubble27 = fs.readFileSync(path.join(__dirname, '..', 'components', 'app-chat-bubble', 'app-chat-bubble.uvue'), 'utf8');
+        assert.ok(/@touchcancel="onWindowTouchEnd\(seg\.key\)"/.test(bubble27),
+            'the batch window must handle touchcancel (stolen gestures never fire touchend; a stuck flag kills follow forever)');
+        const followFn27 = extractBlockFrom(bubble27, 'function followBottom(key: string): void {');
+        assert.ok(/if \(winGesturing\(key\)\) return/.test(followFn27),
+            'followBottom must not push scroll-top during a gesture/inertia window (it interrupts native scrolling)');
+        assert.ok(/function winGesturing\(key: string\): boolean/.test(bubble27)
+            && /winInertia/.test(bubble27),
+            'the window gesture gate must include the 300ms inertia window (fling scrolling still belongs to the user)');
+        const winScrollFn27 = extractBlockFrom(bubble27, 'function onWindowScroll(key: string, e: UniScrollEvent): void {');
+        assert.ok(/if \(winGesturing\(key\)\) winPinned\.set\(key, false\)/.test(winScrollFn27),
+            'window scroll pause must use the shared gesture gate (touching OR inertia), not the raw touching flag');
+    }
+    console.log('PASS  scroll-follow-gate(mobile): list + batch window follow only when pinned & gesture-free; touchcancel wired; conversation switch resets');
+
+    /* ---------------- 28) 主题 token 存在性门禁（2026-11-27 用户报障
+       「添加内容图标暗色看不见，你都没动手改怎么说改完了」）回归锁：
+       真因不是某个页面手滑，而是引用了 theme.scss 里根本不存在的 token
+       （--color-text-primary / --color-fill-secondary）。原生端 var() 解析
+       失败静默落默认黑/透明：亮色碰巧能看，暗色深底上图标隐形、磁贴无底。
+       此前各轮只查「成对/半透明」，从没查过「token 是否被定义」——本门禁
+       全量扫描 pages+components 的每一个 var(--color-*)，必须能在
+       theme.scss 调色板（或 rice 桥接表）里找到定义。 */
+    {
+        const theme28 = fs.readFileSync(path.join(__dirname, '..', 'styles', 'theme.scss'), 'utf8');
+        const defined28 = new Set();
+        // 调色板两张表的键（'bg-card': ... → --color-bg-card）
+        for (const m of theme28.matchAll(/^\s*'([a-z0-9-]+)':/gm)) defined28.add('--color-' + m[1]);
+        // theme.scss 里显式声明的其他自定义属性（rice 桥接等）
+        for (const m of theme28.matchAll(/(--[a-z0-9-]+)\s*:/g)) defined28.add(m[1]);
+        const roots28 = ['pages', 'components'].map((d) => path.join(__dirname, '..', d));
+        const uvueFiles28 = [];
+        const walk28 = (dir) => {
+            for (const ent of fs.readdirSync(dir, { withFileTypes: true })) {
+                const p = path.join(dir, ent.name);
+                if (ent.isDirectory()) walk28(p);
+                else if (ent.name.endsWith('.uvue')) uvueFiles28.push(p);
+            }
+        };
+        roots28.forEach(walk28);
+        assert.ok(uvueFiles28.length >= 20, 'token gate must scan the real page/component tree (found ' + uvueFiles28.length + ' files)');
+        const offenders28 = [];
+        for (const file of uvueFiles28) {
+            const text28 = fs.readFileSync(file, 'utf8');
+            for (const m of text28.matchAll(/var\((--color-[a-z0-9-]+)\)/g)) {
+                if (!defined28.has(m[1])) {
+                    const line28 = text28.slice(0, m.index).split('\n').length;
+                    offenders28.push(path.relative(path.join(__dirname, '..'), file) + ':' + line28 + ' ' + m[1]);
+                }
+            }
+        }
+        assert.equal(offenders28.length, 0,
+            'undefined theme tokens silently fall back to black/transparent on-device (dark-mode invisibility). Fix these references:\n  ' + offenders28.join('\n  '));
+        // 具体报障位点锁死：添加内容三磁贴图标/文字 + composer 附件 chips
+        const plus28 = fs.readFileSync(path.join(__dirname, '..', 'components', 'app-plus-sheet', 'app-plus-sheet.uvue'), 'utf8');
+        assert.ok(!/var\(--color-text-primary\)/.test(plus28), 'plus-sheet must not reference the nonexistent --color-text-primary (primary text token is --color-text)');
+        const tileIcons28 = (plus28.match(/rice-icon name="(?:camera|photo|upload)" size="24px" color="var\(--color-text-secondary\)"/g) || []).length;
+        assert.equal(tileIcons28, 3, 'all three attach tiles must color their icons with a real theme token (PC .plus-menu-item svg parity)');
+        const tileBlock28 = plus28.match(/&__tile \{[\s\S]*?\n\t\t\}/);
+        assert.ok(tileBlock28 != null && /border-color: var\(--color-border\)/.test(tileBlock28[0]),
+            'attach tiles need the PC .attachment-item-file 1px border (dark card bg is only 5 gray levels above the sheet bg)');
+        const composer28 = fs.readFileSync(path.join(__dirname, '..', 'components', 'app-composer', 'app-composer.uvue'), 'utf8');
+        assert.ok(!/var\(--color-fill-secondary\)/.test(composer28), 'composer must not reference the nonexistent --color-fill-secondary');
+        const attachBlock28 = composer28.match(/&__attach \{[\s\S]*?\n\t\t\}/);
+        assert.ok(attachBlock28 != null && /background-color: var\(--color-bg-hover\)/.test(attachBlock28[0])
+            && /border-color: var\(--color-border\)/.test(attachBlock28[0]),
+            'pending-attachment chips must use real tokens with PC .attachment-item-file geometry (bg-hover + border)');
+    }
+    console.log('PASS  theme-token-existence(mobile): every var(--color-*) in pages/components is defined in theme.scss; plus-sheet tiles + composer chips use real tokens');
     console.log('ALL MOBILE CHECKS PASSED');
 })().catch((e) => { console.error(e); process.exit(1); });
 

@@ -840,6 +840,11 @@ function createThinkingBlockEl(sess) {
     $(block).find('.thinking-block-header').on('click', function() {
         $(block).toggleClass('expanded');
         notifyBatchWindowResize(block);   // 思考卡体展开/收起同样触发批次窗重测
+        /* 【㉖】卡体自绘滚条同刻重算（收起摘条 / 展开建条），不等秒级 ticker */
+        if (window.GourdTurnDisplay && window.GourdTurnDisplay.paintInnerScrollbar) {
+            var tb = $(block).find('.thinking-block-body')[0];
+            if (tb) window.GourdTurnDisplay.paintInnerScrollbar(tb);
+        }
     });
     return block;
 }
@@ -2584,6 +2589,11 @@ function bindToolCardToggle(card) {
         /* 【滚动窗重测】卡体展开/收起改变成员高度：closed 批次窗没有流式触发源，
            不补这一次重测，clip/overflow/负 margin 全按旧几何裁（内容被裁/重叠）。 */
         notifyBatchWindowResize(card);
+        /* 【㉖】卡体自绘滚条同刻重算：收起摘条、展开按真实视口建条（见 agent 卡同注释） */
+        if (window.GourdTurnDisplay && window.GourdTurnDisplay.paintInnerScrollbar) {
+            var tb = $(card).find('.tool-card-body')[0];
+            if (tb) window.GourdTurnDisplay.paintInnerScrollbar(tb);
+        }
     });
 }
 
@@ -3346,6 +3356,14 @@ function updateAgentProgress(sess, chunk) {
     
     $(card).find('.agent-card-header').on('click', function() {
         $(card).toggleClass('expanded');
+        /* 【㉖】展开/收起即刻重算卡体自绘滚条：收起要摘条（隐藏子树的
+           scrollHeight 仍是旧布局值，秒级 ticker 的指纹差分抓不到），
+           展开要按真实视口建条 —— 否则最长等 1s 才出现/消失。 */
+        if (window.GourdTurnDisplay && window.GourdTurnDisplay.paintInnerScrollbar) {
+            var ab = $(card).find('.agent-card-body')[0];
+            if (ab) window.GourdTurnDisplay.paintInnerScrollbar(ab);
+        }
+        notifyBatchWindowResize(card);
     });
         
     insertBeforeActions(sess, card);

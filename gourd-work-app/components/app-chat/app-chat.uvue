@@ -26,9 +26,11 @@
 
 		<view class="app-chat__body">
 			<!-- list-view 原生回收列表，结构对齐 uni-ai-x 的 uni-ai-chat.uvue -->
-			<list-view v-if="messages.length > 0" :key="activeId" direction="vertical" class="app-chat__scroll"
+			<list-view v-if="messages.length > 0" id="app-chat-list" :key="activeId" direction="vertical" class="app-chat__scroll"
 				:show-scrollbar="false" :initial-scroll-bottom="initialScrollBottom" :scroll-anchoring="true"
-				:scroll-top="scrollTop" :scroll-into-view="scrollIntoViewId">
+				:scroll-top="scrollTop" :scroll-into-view="scrollIntoViewId" :lower-threshold="48"
+				@scroll="onListScroll" @scrolltolower="onListLower" @scrollend="onListScrollEnd"
+				@touchstart="onListTouchStart" @touchend="onListTouchEnd" @touchcancel="onListTouchEnd">
 				<list-item v-for="msg in messages" :key="msg.id" :type="msg.role === 'user' ? 1 : 2">
 					<view class="app-chat__msg" :class="msg.role === 'user' ? 'app-chat__msg--user' : ''"
 						:style="msgColStyle">
@@ -263,6 +265,11 @@
 	watch(activeId, (): void => {
 		initialScrollBottom.value = messages.value.length > 0
 		scrollTop.value = 0
+		// 切会话重新贴底跟随：上一会话里用户上滑留下的暂停态不得跨会话残留
+		listPinned.value = true
+		listTouching.value = false
+		listInertiaUntil = 0
+		listViewport = 0
 		// 产物清单按会话隔离：切走必须失效，否则上一条会话的产物会冒充当前会话
 		resetArtifacts()
 	})
@@ -283,9 +290,80 @@
 	// 二次补滚 timer 持句柄：流式期间每帧都排一个 60ms 短 timer，
 	// 新帧到来先清旧的（同一批高度变化只需补滚一次），卸载时一并清理（项目 timer 纪律）
 	let scrollFixTimer: number = -1
-	// 消息数量或流式尾条内容变化后滚到底
+
+	/* ---- 贴底跟随门禁（2026-11-27 用户报障「消息展示后上下滑动会卡住」）----
+	   旧实现 scrollTick 每变一次就【无条件】把列表拽到底（每 token 一次 + 60ms 补滚），
+	   用户上滑读历史时手指还在屏上就被拽回底部——「滑不动/卡住」的真因；
+	   批次滚动窗早已有同款门禁（winPinned），消息列表此前漏配。
+	   口径与批次窗一致：贴底自动跟随；用户手势期间离底即暂停；滑回底部恢复。
+	   另：手势期间（含惯性余量）程序 scroll-top 一律不下发——
+	   即便判定贴底，跟手期间强行设 scrollTop 也会打断原生滚动手势。 */
+	const listPinned: Ref<boolean> = ref<boolean>(true)
+	const listTouching: Ref<boolean> = ref<boolean>(false)
+	/** touchend 后惯性保护窗：300ms 内的 scroll 事件仍按用户手势对待（批次窗同款） */
+	let listInertiaUntil: number = 0
+	/** 列表视口高（onListScroll 首帧实测）：gap 判定必须扣视口，否则永远误判离底 */
+	let listViewport: number = 0
+
+	function measureListViewport(): void {
+		if (listViewport > 0) return
+		const el = uni.getElementById('app-chat-list')
+		if (el == null) return
+		const rect = el.getBoundingClientRect()
+		if (rect.height > 0) listViewport = rect.height
+	}
+
+	/** 距底距离：内容高 - 滚动位置 - 视口高。视口未实测时返回 -1（不可判，不动状态） */
+	function listGapOf(e: UniScrollEvent): number {
+		if (listViewport <= 0) return -1
+		const d = e.detail
+		return d.scrollHeight - d.scrollTop - listViewport
+	}
+
+	function onListScroll(e: UniScrollEvent): void {
+		measureListViewport()
+		const gap: number = listGapOf(e)
+		// 贴底（≤48px，与 lower-threshold 同值）：恢复跟随（含程序滚底自身触发的事件）
+		if (gap >= 0 && gap <= 48) {
+			listPinned.value = true
+			return
+		}
+		// 离底只在用户手势期间才暂停：scroll-anchoring 下内容长高也派发 scroll，
+		// 此刻 scrollTop 未动而 scrollHeight 已增，非手势事件不算「上滑」（批次窗同款）
+		const gesturing: boolean = listTouching.value || Date.now() < listInertiaUntil
+		if (gesturing && gap > 48) listPinned.value = false
+	}
+
+	/** 触底事件必真（部分端 scrollHeight 不可靠，批次窗同款兜底）：恢复跟随 */
+	function onListLower(): void {
+		listPinned.value = true
+	}
+
+	/** 滚动结束（惯性停稳）：停在底部附近也恢复跟随，滑回底部后新帧继续跟 */
+	function onListScrollEnd(e: UniScrollEvent): void {
+		measureListViewport()
+		const gap: number = listGapOf(e)
+		if (gap >= 0 && gap <= 48) listPinned.value = true
+	}
+
+	function onListTouchStart(): void {
+		listTouching.value = true
+	}
+
+	function onListTouchEnd(): void {
+		listTouching.value = false
+		listInertiaUntil = Date.now() + 300
+	}
+
+	/** 跟随判定：贴底 + 非手势期（含惯性保护窗）才允许程序滚底 */
+	function listMayFollow(): boolean {
+		return listPinned.value && !listTouching.value && Date.now() >= listInertiaUntil
+	}
+
+	// 消息数量或流式尾条内容变化后滚到底（仅贴底跟随时）
 	watch(scrollTick, (): void => {
 		nextTick((): void => {
+			if (!listMayFollow()) return
 			bottomAnchorId.value = bottomAnchorId.value === 'msg-anchor-a' ? 'msg-anchor-b' : 'msg-anchor-a'
 			// 限幅在 10 万~20 万间震荡：持续递增会累计到数百万，导致 list-view 内部状态异常（uni-ai-x 经验）
 			scrollTop.value = scrollTop.value > 100000 ? 100000 : scrollTop.value + 100000
@@ -293,6 +371,7 @@
 		if (scrollFixTimer !== -1) clearTimeout(scrollFixTimer)
 		scrollFixTimer = setTimeout((): void => {
 			scrollFixTimer = -1
+			if (!listMayFollow()) return
 			// 二次补滚：list-item 高度在首帧后还会变（流式 text 折行、图标字体异步就绪），
 			// 只滚一次会停在「差一点点到底」的位置，表现为「到最底部展示有问题」
 			scrollTop.value = scrollTop.value > 100000 ? 100000 : scrollTop.value + 100000

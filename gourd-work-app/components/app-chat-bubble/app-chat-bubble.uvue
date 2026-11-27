@@ -1,5 +1,5 @@
 <template>
-	<view class="app-chat-bubble" :class="message.role === 'user' ? 'app-chat-bubble--user' : 'app-chat-bubble--ai'">
+	<view :id="'bub-' + message.id" class="app-chat-bubble" :class="message.role === 'user' ? 'app-chat-bubble--user' : 'app-chat-bubble--ai'">
 		<!-- 身份头：对齐桌面 .msg-head（22px 圆形 logo + 13px/600 名称）。
 			 同轮续段（插话/问答/审批恢复）由宿主按「最近一条用户消息之后是否已有 assistant 行」省头 -->
 		<view v-if="showIdentity" class="app-chat-bubble__head">
@@ -67,7 +67,10 @@
 					direction="vertical" :show-scrollbar="true" :scroll-top="segScrollTop(seg.key)"
 					:lower-threshold="24" @scroll="onWindowScroll(seg.key, $event)"
 					@scrolltolower="onWindowLower(seg.key)"
-					@touchstart="onWindowTouchStart(seg.key)" @touchend="onWindowTouchEnd(seg.key)">
+					@touchstart="onWindowTouchStart(seg.key)" @touchend="onWindowTouchEnd(seg.key)"
+					@touchcancel="onWindowTouchEnd(seg.key)">
+					<!-- 内容层：实测真实高度（tbcont-）供 windowStyle 收紧显式窗高 -->
+					<view :id="'tbcont-' + seg.key" class="app-chat-bubble__group-body">
 					<view v-for="item in seg.members" :key="item.id" :class="memberWrapClass(item)">
 						<app-interact-card v-if="item.interact.length > 0" :block="item"
 							@approve="onInteractApprove" @answer="onInteractAnswer" @edit="onInteractEdit"></app-interact-card>
@@ -90,8 +93,18 @@
 						<view v-else-if="item.kind === 'error'" class="app-chat-bubble__error">
 							<text class="app-chat-bubble__error-text">{{ item.body }}</text>
 						</view>
+						<!-- 压缩分隔线（PC .context-compacted-divider 同款）：线—图标+文案—线，
+							 轮次边界标记，非过程行（无行头/状态点/折叠体） -->
+						<view v-else-if="item.kind === 'compacted'" class="app-chat-bubble__ccd">
+							<view class="app-chat-bubble__ccd-line"></view>
+							<view class="app-chat-bubble__ccd-label">
+								<text class="iconfont app-chat-bubble__ccd-icon">&#xe69f;</text>
+								<text class="app-chat-bubble__ccd-text">{{ item.label }}</text>
+							</view>
+							<view class="app-chat-bubble__ccd-line"></view>
+						</view>
 						<view v-else class="app-chat-bubble__row">
-							<view class="app-chat-bubble__row-head" @click.stop="onToggleRow(item)">
+							<view v-if="item.kind !== 'text'" class="app-chat-bubble__row-head" @click.stop="onToggleRow(item)">
 								<image v-if="useSvg(item)" class="app-chat-bubble__row-svg" :src="svgIconOf(item)" mode="aspectFit"></image>
 								<view v-else class="app-chat-bubble__row-icon"><rice-icon :name="iconOf(item)" size="13px" color="var(--color-text-tertiary)" /></view>
 								<view class="app-chat-bubble__row-main">
@@ -112,8 +125,9 @@
 								<app-md-text :text="item.body" :complete="item.status !== 'loading'"></app-md-text>
 							</view>
 							<!-- 思考全文/工具结果默认折叠（2026-11 用户拍板），点行头才展开 -->
-							<text v-else-if="item.rowOpen && item.body.length > 0" class="app-chat-bubble__row-body">{{ displayText(item.body) }}</text>
+							<app-tool-detail v-if="item.kind !== 'text' && item.rowOpen && item.body.length > 0" :item="item"></app-tool-detail>
 						</view>
+					</view>
 					</view>
 					</scroll-view>
 				</view>
@@ -147,8 +161,17 @@
 							<view v-else-if="item.kind === 'error'" class="app-chat-bubble__error">
 								<text class="app-chat-bubble__error-text">{{ item.body }}</text>
 							</view>
+							<!-- 压缩分隔线（PC .context-compacted-divider 同款）：线—图标+文案—线 -->
+							<view v-else-if="item.kind === 'compacted'" class="app-chat-bubble__ccd">
+								<view class="app-chat-bubble__ccd-line"></view>
+								<view class="app-chat-bubble__ccd-label">
+									<text class="iconfont app-chat-bubble__ccd-icon">&#xe69f;</text>
+									<text class="app-chat-bubble__ccd-text">{{ item.label }}</text>
+								</view>
+								<view class="app-chat-bubble__ccd-line"></view>
+							</view>
 							<view v-else class="app-chat-bubble__row">
-								<view class="app-chat-bubble__row-head" @click.stop="onToggleRow(item)">
+								<view v-if="item.kind !== 'text'" class="app-chat-bubble__row-head" @click.stop="onToggleRow(item)">
 									<image v-if="useSvg(item)" class="app-chat-bubble__row-svg" :src="svgIconOf(item)" mode="aspectFit"></image>
 									<view v-else class="app-chat-bubble__row-icon"><rice-icon :name="iconOf(item)" size="13px" color="var(--color-text-tertiary)" /></view>
 									<view class="app-chat-bubble__row-main">
@@ -165,7 +188,7 @@
 								<view v-if="item.kind === 'text' && item.body.length > 0" class="app-chat-bubble__process-md">
 									<app-md-text :text="item.body" :complete="item.status !== 'loading'"></app-md-text>
 								</view>
-								<text v-else-if="item.rowOpen && item.body.length > 0" class="app-chat-bubble__row-body">{{ displayText(item.body) }}</text>
+								<app-tool-detail v-if="item.kind !== 'text' && item.rowOpen && item.body.length > 0" :item="item"></app-tool-detail>
 							</view>
 						</view>
 					</view>
@@ -199,8 +222,18 @@
 					<view v-else-if="item.kind === 'error'" class="app-chat-bubble__error">
 						<text class="app-chat-bubble__error-text">{{ item.body }}</text>
 					</view>
+					<!-- 压缩分隔线（PC .context-compacted-divider 同款）：线—图标+文案—线，
+						 轮次边界标记，非过程行（无行头/状态点/折叠体） -->
+					<view v-else-if="item.kind === 'compacted'" class="app-chat-bubble__ccd">
+						<view class="app-chat-bubble__ccd-line"></view>
+						<view class="app-chat-bubble__ccd-label">
+							<text class="iconfont app-chat-bubble__ccd-icon">&#xe69f;</text>
+							<text class="app-chat-bubble__ccd-text">{{ item.label }}</text>
+						</view>
+						<view class="app-chat-bubble__ccd-line"></view>
+					</view>
 					<view v-else class="app-chat-bubble__row">
-						<view class="app-chat-bubble__row-head" @click.stop="onToggleRow(item)">
+						<view v-if="item.kind !== 'text'" class="app-chat-bubble__row-head" @click.stop="onToggleRow(item)">
 							<image v-if="useSvg(item)" class="app-chat-bubble__row-svg" :src="svgIconOf(item)" mode="aspectFit"></image>
 							<!-- 字体图标钉进 13×13 定宽槽：字形实际宽随字体漂移，不定宽时
 								 同批行文本列参差（与 __row-svg 同槽位，右缘恒 15px） -->
@@ -226,7 +259,7 @@
 						</view>
 						<!-- 思考/工具全文默认折叠（2026-11 用户拍板：点行头才展开），
 							 卡体透明无底色。margin 拆单边同上。 -->
-						<text v-else-if="item.rowOpen && item.body.length > 0" class="app-chat-bubble__row-body">{{ displayText(item.body) }}</text>
+						<app-tool-detail v-if="item.kind !== 'text' && item.rowOpen && item.body.length > 0" :item="item"></app-tool-detail>
 					</view>
 				</view>
 				</template>
@@ -286,10 +319,13 @@
 	import { i18n } from '@/locale/i18n.ts'
 	import { formatBatchElapsed } from '@/utils/tools.ts'
 	import { toolIconUri, thinkingIconUri, agentIconUri, processTextIconUri, hasSvgIcon } from '@/utils/tool-presentation.ts'
+	import { toolDetailHeight } from '@/utils/tool-detail'
 	import { useTheme } from '@/hooks/useTheme'
 	import { useAssistantIdentity } from '@/hooks/useAssistantIdentity'
+	import { toggleTurnCompact } from '@/hooks/useConversations.ts'
 	import AppInteractCard from '@/components/app-interact-card/app-interact-card.uvue'
 	import AppMdText from '@/components/app-md-text/app-md-text.uvue'
+	import AppToolDetail from '@/components/app-tool-detail/app-tool-detail.uvue'
 
 	defineOptions({
 		name: 'app-chat-bubble',
@@ -372,7 +408,10 @@
 	   UCSS 不认 :not() 复合选择器，HITL/问答/已闭环交互卡的豁免在这里按数据判定
 	   （PC :not(.hitl-pending) 同语义）；agent 徽章是常驻段（head=null）天然不缩进。 */
 	function memberWrapClass(item: ChatBlock): string {
-		return item.interact.length === 0 ? 'app-chat-bubble__member' : ''
+		// 交互卡豁免（PC :not(.hitl-pending)）；text 正文段同样豁免——
+		// 正文不是工具行，与盖子/标头左对齐（2026-11-27 用户报障「正文不应该缩进」）；
+		// compacted 分隔线是轮次边界标记（PC 与过程行/正文同列），不参与成员右移
+		return item.interact.length === 0 && item.kind !== 'text' && item.kind !== 'compacted' ? 'app-chat-bubble__member' : ''
 	}
 
 	/* 平铺段通用循环的成员源：有成员的批次段已在上方 group 容器渲染（带引导线+缩进），
@@ -426,24 +465,103 @@
 		estHeight: number
 	}
 
-	/** 单个成员行的估算高度：行头 ≈29px + 展开卡体折算（每 40 字符 ≈ 一行 18px，
-	 *  上限 2400 字符）。'text' 过程正文段恒渲染 markdown（不随 rowOpen 折叠），
-	 *  其 body 必须始终计入；其余行 body 只有点开（rowOpen）才占高。 */
-	function memberHeight(item: ChatBlock): number {
-		let h: number = 29
-		const bodyLen: number = (item.rowOpen || item.kind === 'text') ? Math.min(item.body.length, 2400) : 0
-		if (bodyLen > 0) h += Math.ceil(bodyLen / 40) * 18
-		else if (item.preview.length > 0) h += 18
-		if (item.args.length > 0) h += 18
+	/* 【2026-11-27 用户报障「展开后大片空白」修复】旧估算「每 40 字符一行 18px」
+	   与真实渲染几何脱节（edit 渲染 diff 不是 body、todo 优先 todosRaw、grep/glob
+	   投影丢行、长行折行/卡体内距漏计），scroll-view 显式高度虚高即底部整段空白。
+	   现在展开卡体走 utils/tool-detail.ts toolDetailHeight——与 app-tool-detail
+	   渲染几何同源（同一投影行集 + 每类行字号/行高/折行/内外边距），估算即渲染。 */
+
+	/** 卡体可用宽：窗宽 - 成员缩进 26（memberWrapClass）。窗宽未实测时按
+	 *  屏宽 - 消息行内距 36 兜底（窄屏消息列恒撑满）。 */
+	function detailAvailWidth(): number {
+		const w: number = bubbleWidth > 0 ? bubbleWidth : uni.getWindowInfo().windowWidth - 36
+		return Math.max(120, w - 26)
+	}
+
+	/** 行内文本折行数（13px 中文 ≈ 13px/字符、英文 ≈ 7px，统一按 8px 保守折算） */
+	function wrapLines(len: number, width: number): number {
+		const perLine: number = Math.max(1, Math.floor(width / 8))
+		return Math.max(1, Math.ceil(len / perLine))
+	}
+
+	/** 交互卡估算（app-interact-card.uvue 几何）：外距 8 + 内距 24 + 边框 2；
+	 *  question 每题 = 题面/详情 + 选项（19px 标签 + 17px 描述折行 + 18 内距 + 6 外距）
+	 *  + 输入框 40 + 题间距 12；按钮排 34；hitl = 命令体折行 + 内距 18 + 10 + 34；
+	 *  resolved = 回显折行。失败提示 +25。 */
+	function interactHeight(item: ChatBlock): number {
+		const w: number = detailAvailWidth()
+		let h: number = 34
+		if (item.interact === 'question') {
+			for (let i = 0; i < item.questions.length; i++) {
+				const q = item.questions[i]
+				let qh: number = 12
+				if (q.header.length > 0) qh += wrapLines(q.header.length, w - 24) * 20 + 4
+				if (q.detail.length > 0) qh += wrapLines(q.detail.length, w - 24) * 19 + 8
+				for (let j = 0; j < q.options.length; j++) {
+					const o = q.options[j]
+					qh += wrapLines(o.label.length, w - 80) * 19 + 24
+					if (o.description.length > 0) qh += wrapLines(o.description.length, w - 80) * 17 + 2
+				}
+				qh += 40
+				h += qh
+			}
+			h += 34
+		} else if (item.interact === 'hitl') {
+			h += wrapLines(Math.max(item.command.length, 12), w - 44) * 20 + 28 + 34
+		} else {
+			h += wrapLines(Math.max(item.resolvedText.length, 8), w - 24) * 19
+		}
+		if (item.submitError.length > 0) h += wrapLines(item.submitError.length, w - 24) * 17 + 8
 		return h
 	}
 
-	/** 滚动窗显式高度样式：内容不足 232px 时按内容收缩（无空白），超出封顶内部滚动。
-	 *  +2px 容差吸收估算与真实行高的微小偏差（宁可多 2px 也不裁掉半行）。 */
+	/** 单个成员行的估算高度：与模板渲染分支一一对应。
+	 *  行头恒单行 29px（label/args/preview 均 nowrap+ellipsis，不再按 args 加行——
+	 *  旧实现给同行元素额外 +18px 是虚高来源之一）。展开卡体按真实投影折算。 */
+	function memberHeight(item: ChatBlock): number {
+		if (item.interact.length > 0) return interactHeight(item)
+		/* 压缩分隔线：16px 文本 + 上下 14px 外边距 */
+		if (item.kind === 'compacted') return 44
+		/* 错误块：19px 行高折行 + 16 内距 + 8 外距 */
+		if (item.kind === 'error') return wrapLines(item.body.length, detailAvailWidth() - 22) * 19 + 24
+		let h: number = 29
+		if (item.kind === 'text') {
+			/* 过程正文段恒渲染 markdown：正文 14px/22px 行高，按 8px/字符保守折行 */
+			if (item.body.length > 0) h += wrapLines(Math.min(item.body.length, 2400), detailAvailWidth()) * 22 + 8
+			return h
+		}
+		/* 展开卡体：v-if 同条件 rowOpen && body 非空（bash 空输出 no_output 特例
+		   由 toolDetailHeight 内部按渲染行为折算） */
+		if (item.rowOpen && item.body.length > 0) {
+			h += toolDetailHeight(item.bareTool, item.body, item.diffRaw, item.oldRaw, item.newRaw,
+				item.commandRaw, item.todosRaw, item.failed,
+				t('chat.detail.no_output'), t('chat.detail.edit_failed'),
+				(files: number, hits: number): string => {
+					return files.toString() + ' ' + t('chat.detail.files') + ' / ' + hits.toString() + ' ' + t('chat.detail.matches')
+				},
+				(n: number): string => {
+					return n.toString() + ' ' + t('chat.detail.items')
+				},
+				detailAvailWidth())
+		}
+		return h
+	}
+
+	/* 实测校正：估算永远只是近似（字体度量/折行细节），首帧后实测内容真实高度，
+	   取 min(实测, 估算, 232) 收紧显式窗高——估算虚高不再变成屏上空白。
+	   实测偏小也不放大（宁可差半行由 +2 容差兜底，也不回弹空白）。 */
+	const winContentHeights: Ref<Map<string, number>> = ref<Map<string, number>>(new Map<string, number>())
+
 	function windowStyle(seg: BubbleSegment): string {
-		const h: number = Math.min(seg.estHeight + 2, WINDOW_MAX_PX)
+		let est: number = seg.estHeight + 2
+		const measured: number | undefined = winContentHeights.value.get(seg.key)
+		if (measured != null && measured! > 0 && measured! + 2 < est) est = measured! + 2
+		const h: number = Math.min(est, WINDOW_MAX_PX)
 		return 'height:' + h.toString() + 'px;'
 	}
+
+	/** 气泡宽度实测（估高折行基准）：measureBubble 首帧回填 */
+	let bubbleWidth: number = 0
 
 	const segments: ComputedRef<BubbleSegment[]> = computed<BubbleSegment[]>((): BubbleSegment[] => {
 		const out: BubbleSegment[] = []
@@ -504,6 +622,8 @@
 
 	function followBottom(key: string): void {
 		if (!isPinned(key)) return
+		// 手势期（含惯性余量）不下发程序滚动：跟手期间设 scroll-top 会打断原生手势
+		if (winGesturing(key)) return
 		const cur: number = winTops.value.get(key) ?? 0
 		// 限幅震荡：两个足够大的值互换，保证每次赋值都触发 scroll-top 变更
 		const next: number = cur > 100000 ? 100000 : 200000
@@ -516,13 +636,24 @@
 	/* 【code review 修复 · 手势门控】只有用户手势期间的 scroll 才允许把 pinned 置 false：
 	   部分端（Android scroll-anchoring）内容长高也派发 scroll 事件，此刻 scrollTop 未动
 	   而 scrollHeight 已增 → gap>24 会被误判「上滑」终止跟随。touchstart 置标志、
-	   touchend 延迟 300ms 清除（覆盖惯性滚动），程序贴底滚动不受影响。 */
+	   touchend/touchcancel 延迟 300ms 清除（覆盖惯性滚动），程序贴底滚动不受影响。
+	   【2026-11-27 滑动卡住修复】①补 @touchcancel：手势被外层 list-view 抢占时只派发
+	   cancel 不派发 end，旧实现标志永真 → 内容长高的每次 scroll 都误停跟随；
+	   ②followBottom 在手势期（含 300ms 惯性窗）一律不下发 scroll-top——
+	   跟手期间程序设 scrollTop 会打断原生滚动手势（「上下滑动卡住」批次窗形态）。 */
 	const winTouching: Map<string, boolean> = new Map<string, boolean>()
+	const winInertia: Map<string, number> = new Map<string, number>()
 	function onWindowTouchStart(key: string): void {
 		winTouching.set(key, true)
 	}
 	function onWindowTouchEnd(key: string): void {
-		setTimeout((): void => { winTouching.set(key, false) }, 300)
+		winTouching.set(key, false)
+		winInertia.set(key, Date.now() + 300)
+	}
+	function winGesturing(key: string): boolean {
+		if (winTouching.get(key) == true) return true
+		const until: number | undefined = winInertia.get(key)
+		return until != null && Date.now() < until!
 	}
 
 	/** 用户滚动：距底部 ≤24px（lower-threshold 同值）视为贴底恢复跟随，离开即暂停 */
@@ -530,8 +661,9 @@
 		const d = e.detail
 		const gap: number = d.scrollHeight - d.scrollTop - (winHeightOf(key))
 		if (gap <= 24) { winPinned.set(key, true); return }
-		// 离开底部：仅用户手势期间才暂停跟随（内容长高的 anchoring 事件不算）
-		if (winTouching.get(key) == true) winPinned.set(key, false)
+		// 离开底部：仅用户手势期间（含 300ms 惯性窗）才暂停跟随
+		// （内容长高的 anchoring 事件不算；惯性期离底同样是用户在滑）
+		if (winGesturing(key)) winPinned.set(key, false)
 	}
 
 	/** scrolltolower 兜底：部分端 scroll 事件的 scrollHeight 不可靠，触底事件必真 */
@@ -558,6 +690,31 @@
 		if (rect.height > 0) winHeights.set(key, rect.height)
 	}
 
+	/** 实测内容层真实高度（tbcont-）：估算只是近似，实测偏小时收紧窗高
+	 *  （windowStyle 取 min），估算虚高不再变成屏上空白。只在变化超 2px
+	 *  时落表，避免每帧重建 Map 触发无谓重渲染。 */
+	function measureContent(key: string): void {
+		const el = uni.getElementById('tbcont-' + key)
+		if (el == null) return
+		const rect = el.getBoundingClientRect()
+		if (rect.height <= 0) return
+		const prev: number | undefined = winContentHeights.value.get(key)
+		if (prev != null && Math.abs(prev! - rect.height) <= 2) return
+		const m: Map<string, number> = new Map<string, number>()
+		winContentHeights.value.forEach((v: number, k: string): void => { m.set(k, v) })
+		m.set(key, rect.height)
+		winContentHeights.value = m
+	}
+
+	/** 气泡宽度实测（memberHeight 折行基准）：只测一次，>0 后不再量 */
+	function measureBubble(): void {
+		if (bubbleWidth > 0) return
+		const el = uni.getElementById('bub-' + props.message.id)
+		if (el == null) return
+		const rect = el.getBoundingClientRect()
+		if (rect.width > 0) bubbleWidth = rect.width
+	}
+
 	/* 内容签名：段内成员数 + 各行 body/preview 长度。任何可见高度变化都触发
 	   贴底跟随（新步骤到达 / 工具结果长高）；用户上滑（pinned=false）时不动。 */
 	const windowSig: ComputedRef<string> = computed<string>((): string => {
@@ -569,6 +726,9 @@
 				// args 流式增长与 changesOpen/rowOpen 展开同样改变高度，一并计入签名；
 				// body 默认折叠不占高（rowOpen 才计入），否则收起态估算虚高误开滚动窗
 				if (item.rowOpen || item.kind === 'text') w += Math.min(item.body.length, 2400)
+				// 展开卡体高度由 diff/command/todos 原始入参决定（edit/bash/todo 渲染源），
+				// 只看 body 会漏掉「diff 流式长高」的跟随触发
+				if (item.rowOpen) w += item.diffRaw.length + item.oldRaw.length + item.newRaw.length + item.commandRaw.length + item.todosRaw.length
 				w += item.preview.length + item.args.length + (item.changesOpen ? 1000 : 0)
 			})
 			parts.push(seg.key + ':' + w.toString())
@@ -582,15 +742,19 @@
 	   并补一次 60ms 延迟补滚（app-chat.uvue list-view 同款经验）。 */
 	watch(windowSig, (): void => {
 		nextTick((): void => {
+			measureBubble()
 			segments.value.forEach((seg: BubbleSegment): void => {
 				if (!seg.windowed) return
 				measureWindow(seg.key)
+				measureContent(seg.key)
 				followBottom(seg.key)
 			})
 			setTimeout((): void => {
+				measureBubble()
 				segments.value.forEach((seg: BubbleSegment): void => {
 					if (!seg.windowed) return
 					measureWindow(seg.key)
+					measureContent(seg.key)
 					followBottom(seg.key)
 				})
 			}, 60)
@@ -681,7 +845,9 @@
 	}
 
 	function onToggleCompact(): void {
-		props.message.compactOpen = !props.message.compactOpen
+		// 【2026-11-26 用户报障「收口后展开摘要只剩盖子行」】展开整轮摘要同步展开
+		// 批次盖子（成员立即可见），收回恢复收口折叠态——hook 内可测可锁。
+		toggleTurnCompact(props.message)
 	}
 
 	/** 点批次盖子折叠/展开组内成员。无成员的空批次不响应：点了也看不出变化，
@@ -700,6 +866,9 @@
 			winTops.value.delete(key)
 			winPinned.delete(key)
 			winHeights.delete(key)
+			winContentHeights.value.delete(key)
+			winTouching.delete(key)
+			winInertia.delete(key)
 			return
 		}
 		const live: boolean = head.status === 'loading'
@@ -708,11 +877,6 @@
 		winTops.value.forEach((v: number, k: string): void => { m.set(k, v) })
 		m.set(key, live ? 200000 : 0)
 		winTops.value = m
-	}
-
-	// 原生 text 节点承载超长工具结果容易卡顿；只展示有界预览（与点击态无关）
-	function displayText(text: string): string {
-		return text.length > 2400 ? text.slice(0, 2400) + '\n…' : text
 	}
 
 	/** 点过程行头展开/收起思考全文/工具结果（2026-11 用户拍板：默认折叠）。
@@ -1050,6 +1214,49 @@
 			overflow: hidden;
 		}
 
+		/* ── 压缩分隔线（PC .context-compacted-divider 同款 · 2026-11-27 用户报障
+		   「压缩显示和 PC 不一致」）：左右 1px 横线夹「图标 + 已压缩上下文」，
+		   12px 三级灰、上下 14px 呼吸感（PC margin:14px 0 同口径）。
+		   【可见文案严格对齐 PC】PC 的 beforeMessages→afterMessages 明细只进
+		   data-detail/title 悬停提示，分隔线可见文本恒为词条本身——移动端不上屏
+		   compactDetail（原生无 title 能力，明细仅留数据字段）。
+		   横线用真 view（rich-text/border 不可靠），flex:1 吃满两侧余宽。 ── */
+		&__ccd {
+			flex-direction: row;
+			align-items: center;
+			align-self: stretch;
+			margin-top: 14px;
+			margin-bottom: 14px;
+		}
+
+		&__ccd-line {
+			flex: 1;
+			height: 1px;
+			background-color: var(--color-border);
+		}
+
+		&__ccd-label {
+			flex-direction: row;
+			align-items: center;
+			flex-shrink: 0;
+			margin-left: 10px;
+			margin-right: 10px;
+		}
+
+		&__ccd-icon {
+			font-size: 12px;
+			color: var(--color-text-tertiary);
+			margin-right: 5px;
+		}
+
+		&__ccd-text {
+			font-size: 12px;
+			line-height: 16px;
+			color: var(--color-text-tertiary);
+			/* PC .ccd-text letter-spacing:.02em（12px → 0.24px） */
+			letter-spacing: 0.24px;
+		}
+
 		/* ── 错误块（PC .chunk-error：红底 + 左 2px 红条 + 纯错误文本，无图标无标题） ── */
 		&__error {
 			margin-top: 4px;
@@ -1168,27 +1375,15 @@
 			font-size: 12px;
 		}
 
-			/* 桌面卡体透明无底色；过程 text 用 DIM 次级文字与最终正文分层 */
-		&__row-body {
-			margin-top: 2px;
-			margin-bottom: 6px;
-			margin-left: 20px;
-			padding-top: 6px;
-			padding-bottom: 6px;
-			padding-left: 8px;
-			padding-right: 8px;
-			font-size: 13px;
-			line-height: 20px;
-			color: var(--color-text-secondary);
-			background-color: transparent;
-		}
-
-		/* 过程正文段容器：markdown 渲染态（app-md-text 自带字号/行距/主题变量），
-		   与行头保持缩进层次；替代旧纯文本 row-body--process-text（原文 dump 已废） */
+		/* 过程正文段容器：markdown 渲染态（app-md-text 自带字号/行距/主题变量）。
+		   【正文对齐 · 2026-11-27 用户报障「正文不应该缩进，应和折叠标头对齐」】
+		   旧 margin-left:20px 叠加成员 wrapper 26px，过程正文比盖子缩进 46px。
+		   正文段不是工具行，不参与「成员右移一列」：margin-left 归零，wrapper
+		   对 text 块同步豁免 __member（memberWrapClass），与盖子/标头左对齐。 */
 		&__process-md {
 			margin-top: 4px;
 			margin-bottom: 6px;
-			margin-left: 20px;
+			margin-left: 0;
 		}
 
 		&__meta {

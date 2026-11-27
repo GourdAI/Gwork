@@ -1,4 +1,4 @@
-/**
+﻿/**
  * 护栏：内部滚动不外溢 + 展开内容层级缩进 + 自绘滚动条与全站同源（2026-11-25 用户报障）。
  *
  * ── 用户原话（三个问题）────────────────────────────────────────────────────
@@ -157,7 +157,7 @@ function checkAll(dir) {
     /* 【codereview 补】轨道右缘必须与原生同缘（right:0）。旧值 2px 会让自绘轨道
        比原生滚动条内缩 2px —— 变异实测：改回 2px 时本护栏原先全绿（漏抓）。 */
     assert.match(sb, /right:\s*0(?![\d.])/, '轨道右缘必须 right:0（与原生占位同缘）');
-    assert.match(js, /scrollbarVar\(header,\s*'--scrollbar-thumb-min'/, '最小 thumb 高度必须读全站变量');
+    assert.match(js, /scrollbarVar\((?:header|host),\s*'--scrollbar-thumb-min'/, '最小 thumb 高度必须读全站变量');
     assert.doesNotMatch(js, /var SB_MIN_THUMB = 28/, '旧硬编码 28 残留');
     assert.doesNotMatch(js, /Math\.max\(SB_MIN_THUMB,/, '仍在用旧常量算 thumb');
     /* 【codereview 补】变量读不到时的回落值也必须等于规范值 36。变异实测：
@@ -327,7 +327,7 @@ test('★ C1 自绘 thumb 全部引用 --scrollbar-* 变量，不得再写独立
 test('★ C2 JS 最小 thumb 高度读 --scrollbar-thumb-min，不再硬编码 28', () => {
     for (const c of COPIES) {
         const js = norm(readRaw(path.join(c.dir, 'js', 'app-turn-display.js')));
-        assert.match(js, /scrollbarVar\(header,\s*'--scrollbar-thumb-min'/,
+        assert.match(js, /scrollbarVar\((?:header|host),\s*'--scrollbar-thumb-min'/,
             `${c.name}：最小 thumb 高度必须读全站变量`);
         assert.doesNotMatch(js, /var SB_MIN_THUMB = 28/, `${c.name}：旧硬编码 28 残留`);
         assert.doesNotMatch(js, /Math\.max\(SB_MIN_THUMB,/, `${c.name}：仍在用旧常量算 thumb`);

@@ -5,13 +5,59 @@
 			 无原生依赖：Android / iOS / 鸿蒙 / Web 同一份代码，标准基座直接生效
 			 （原生 markdown 插件已移除：标准基座不生效 + iOS 无实现，2026-11 用户拍板自研）。
 			 解析异常/无内容时回退纯文本，保证正文永远可见（不许白屏）。 -->
-		<!-- 每个 Markdown 块一个 rich-text：块间间隔必须落在外层已验证可用的 UCSS
-			 单边 margin-bottom 上，不能寄望 HTML 节点的 margin 简写（原生端会静默失效）。
+		<!-- 【块级载体 · 2026-11-27 用户报障「代码块无圆角、换行连在一起」】
+			 native rich-text（vapor C 实现）对 pre/blockquote 只认字色/底色等少数属性，
+			 border-radius / padding / border-left 静默丢弃 → 直角贴字、引用无竖线。
+			 围栏代码/引用改由原生 view 容器承载几何（圆角/内边距/竖线是 UCSS 原生
+			 能力，跨端可靠），rich-text 只排版容器内部文字。其余块仍走 rich-text。
+			 块间间隔落在外层单边 margin-bottom（HTML 节点 margin 简写原生静默失效），
 			 末段不加间距，对齐 PC .md-content > :last-child { margin-bottom:0 }。 -->
 		<view v-if="segments.length > 0" class="app-md-text__stack">
 			<view v-for="(seg, index) in segments" :key="seg.key" class="app-md-text__seg"
 				:style="index < segments.length - 1 ? 'margin-bottom:7px;' : ''">
-				<rich-text class="app-md-text__rich" :style="richStyle" :nodes="seg.html" mode="native"
+				<!-- 围栏代码块：主题化圆角原生容器（PC .md-content pre：亮色浅灰底 #f6f6f7/
+					 暗色深底 #0f0f11，圆角 10px + 16/18 内边距同口径）。
+					 【2026-11-27 第四轮核实】PC pre 只有底色+圆角+内边距，【没有任何
+					 box-shadow】（app.css .md-content pre 逐字核对）——此前移动端自造
+					 「代码阴影块」正是用户报障「亮色代码阴影块和 PC 不一致」的来源，
+					 已按用户拍板整体删除（亮暗两端都不再画阴影）。
+					 几何落在原生 view + overflow:hidden 裁剪：native rich-text 的
+					 border-radius/padding 静默失效，长行折行前文本可能溢出圆角边界。
+					 代码文本用原生 text 节点（等宽字体 + 显式行距，行间不粘连）。 -->
+				<view v-if="seg.kind === 'code'" class="app-md-text__code">
+					<text class="app-md-text__code-text" :user-select="true">{{ seg.inner }}</text>
+				</view>
+				<!-- 引用块：左竖线 + 缩进原生容器；内部语义 HTML 仍走样式管道 + rich-text。
+					 引用内若含围栏代码（剥壳后 <pre> 混在内部 HTML 里），rich-text 渲染
+					 不出几何——按 <pre> 边界拆子段，代码子段走同款原生容器。 -->
+				<view v-else-if="seg.kind === 'quote'" class="app-md-text__quote">
+					<view class="app-md-text__quote-bar"></view>
+					<view class="app-md-text__quote-col">
+						<!-- splitParts 已注样式（memo 内统一 prepareMdHtml），此处不得再套 prepareRich（双重注入） -->
+						<template v-for="(part, pi) in splitParts(seg.html)" :key="seg.key + '-q' + pi.toString()">
+							<view v-if="part.kind === 'code'" class="app-md-text__code app-md-text__seg-gap">
+								<text class="app-md-text__code-text" :user-select="true">{{ part.inner }}</text>
+							</view>
+							<rich-text v-else class="app-md-text__rich app-md-text__quote-rich" :style="quoteRichStyle"
+								:nodes="part.html" mode="native" :user-select="true" @itemclick="onItemClick"></rich-text>
+						</template>
+					</view>
+				</view>
+				<!-- 混合块（含 <pre> 但不以 <pre> 开头的块，典型是列表项内围栏代码）：
+					 按 <pre> 边界拆子段——rich 子段走样式管道，code 子段走原生容器。
+					 【真因】此前只有「整块恰以 <pre> 开头」才进原生容器，列表/引用里的
+					 代码块全走 rich-text → 直角无底色贴字（用户报障「亮色正文代码块
+					 圆角底色还是没有」的第二形态）。 -->
+				<template v-else-if="seg.html.indexOf('<pre') >= 0">
+					<template v-for="(part, pi) in splitParts(seg.html)" :key="seg.key + '-m' + pi.toString()">
+						<view v-if="part.kind === 'code'" class="app-md-text__code app-md-text__seg-gap">
+							<text class="app-md-text__code-text" :user-select="true">{{ part.inner }}</text>
+						</view>
+						<rich-text v-else class="app-md-text__rich" :style="richStyle" :nodes="part.html"
+							mode="native" :user-select="true" @itemclick="onItemClick"></rich-text>
+					</template>
+				</template>
+				<rich-text v-else class="app-md-text__rich" :style="richStyle" :nodes="seg.html" mode="native"
 					:user-select="true" @itemclick="onItemClick"></rich-text>
 			</view>
 		</view>
@@ -22,7 +68,8 @@
 <script setup lang="ts">
 	import { computed, ref, watch } from 'vue'
 	import type { ComputedRef, Ref } from 'vue'
-	import { prepareMdHtml } from '@/utils/markdown-html.ts'
+	import { prepareMdHtml, mdBlockKind, mdCodeInner, mdQuoteInner, splitRichCode } from '@/utils/markdown-html.ts'
+	import type { MdPart } from '@/utils/markdown-html.ts'
 	import { parseMarkdownBlocks } from '@/utils/markdown-parse.uts'
 	import type { MdBlock } from '@/utils/markdown-parse.uts'
 	import { useTheme } from '@/hooks/useTheme'
@@ -43,7 +90,9 @@
 
 	const { isDark } = useTheme()
 
-	type MdSegment = { key: string; html: string }
+	/** kind: 'rich' = rich-text 直渲；'code' = 原生代码容器（inner 为纯代码文本）；
+	 *  'quote' = 原生引用容器（html 为剥壳后的内部语义 HTML，已注样式） */
+	type MdSegment = { key: string; kind: string; html: string; inner: string }
 
 	const failed: Ref<boolean> = ref<boolean>(false)
 
@@ -53,14 +102,14 @@
 	 * rich-text 不销毁重建（防闪屏 + 原生视图反复创建的卡顿源，原生插件时代同款经验）。
 	 * 只有尾块（stable=false）随流式帧就地更新。
 	 *
-	 * 【PC createStreamMd 借鉴 · 稳定块样式缓存】stable 块的「语义 HTML → 内联样式」
+	 * 【PC createStreamMd 借鉴 · 稳定块样式缓存】stable 块的「语义 HTML → 展示形态」
 	 * 只算一次（prepareMdHtml 是十几趟字符串扫描，长回答里稳定块占大头）。
 	 * 命中条件三重校验：同序号 + 同语义 HTML + 同主题；任一不满足即重算——
 	 * 流式边界翻转（setext 下划线迟到把 p 变 h1）时 HTML 必变，缓存自动失效，
 	 * 不会把旧形态钉死（PC finish() 全量重渲纠偏的同款保守性）。
 	 * complete 收口帧全量重算一遍：消化流式期间的任何降级/累积偏差（PC finish 同款）。
 	 */
-	type MdCacheEntry = { src: string; dark: boolean; html: string }
+	type MdCacheEntry = { src: string; dark: boolean; kind: string; html: string; inner: string }
 	let stableCache: MdCacheEntry[] = []
 	let lastComplete: boolean = false
 
@@ -75,15 +124,33 @@
 			const next: MdCacheEntry[] = []
 			for (let i = 0; i < blocks.length; i++) {
 				const b: MdBlock = blocks[i]
-				let html: string = ''
 				const hit: MdCacheEntry | null = i < stableCache.length ? stableCache[i] : null
+				let kind: string = ''
+				let html: string = ''
+				let inner: string = ''
 				if (b.stable && hit != null && hit!.src === b.html && hit!.dark === isDark.value) {
+					kind = hit!.kind
 					html = hit!.html
+					inner = hit!.inner
 				} else {
-					html = prepareMdHtml(b.html, isDark.value)
+					kind = mdBlockKind(b.html)
+					if (kind === 'code') {
+						// 围栏：几何全在原生容器，代码文本剥壳还原（含流式未闭栏尾块）
+						inner = mdCodeInner(b.html)
+					} else if (kind === 'quote') {
+						// 引用：剥最外层壳保留语义 HTML，模板 splitParts 统一拆子段+注样式
+						// （含 <pre> 时 code 子段进原生容器；不得在此提前注样式——双重注入）
+						html = mdQuoteInner(b.html)
+					} else if (b.html.indexOf('<pre') >= 0) {
+						// 混合块（列表项内围栏等）：保留语义 HTML，模板 splitParts
+						// 统一拆子段 + memo 注样式（code 子段进原生容器）
+						html = b.html
+					} else {
+						html = prepareMdHtml(b.html, isDark.value)
+					}
 				}
-				if (b.stable) next.push({ src: b.html, dark: isDark.value, html: html } as MdCacheEntry)
-				out.push({ key: 'md-' + i.toString(), html: html } as MdSegment)
+				if (b.stable) next.push({ src: b.html, dark: isDark.value, kind: kind, html: html, inner: inner } as MdCacheEntry)
+				out.push({ key: 'md-' + i.toString(), kind: kind, html: html, inner: inner } as MdSegment)
 			}
 			stableCache = next
 			return out
@@ -97,6 +164,31 @@
 
 	// 新文本到达时解除失败标记（历史加载/重连重建后重试渲染）
 	watch((): string => props.text, (): void => { failed.value = false })
+
+	/** 混合/引用块的子段拆分 + rich 子段注样式（渲染期调用）。
+	 *  【codereview 修复 · 流式热路径】混合块作为流式尾块时模板每帧重渲染，
+	 *  旧实现每次求值都跑 splitRichCode + prepareMdHtml（十几趟字符串扫描）。
+	 *  单槽 memo：同 html + 同主题直接命中；混合块通常只有一个尾块，单槽足够。 */
+	let partsMemoSrc: string = ''
+	let partsMemoDark: boolean = false
+	let partsMemo: MdPart[] = []
+	function splitParts(html: string): MdPart[] {
+		if (html === partsMemoSrc && isDark.value === partsMemoDark) return partsMemo
+		const raw: MdPart[] = splitRichCode(html)
+		const out: MdPart[] = []
+		for (let i = 0; i < raw.length; i++) {
+			const p: MdPart = raw[i]
+			if (p.kind === 'code') {
+				out.push(p)
+			} else {
+				out.push({ kind: 'rich', html: prepareMdHtml(p.html, isDark.value), inner: '' } as MdPart)
+			}
+		}
+		partsMemoSrc = html
+		partsMemoDark = isDark.value
+		partsMemo = out
+		return out
+	}
 
 	function onItemClick(e: UniRichTextItemClickEvent): void {
 		const href = e.detail.href
@@ -117,6 +209,10 @@
 	// rich-text 不继承外层 color：正文字色必须写在组件根 style 上（随主题翻转）
 	const richStyle: ComputedRef<string> = computed<string>((): string => {
 		return 'font-size:14px;line-height:24px;color:' + (isDark.value ? '#e8eaed' : '#1f2328') + ';'
+	})
+	// 引用内文用次级字色（PC .md-content blockquote color:var(--text-secondary)）
+	const quoteRichStyle: ComputedRef<string> = computed<string>((): string => {
+		return 'font-size:14px;line-height:24px;color:' + (isDark.value ? '#9aa0a6' : '#6b7280') + ';'
 	})
 </script>
 
@@ -141,9 +237,76 @@
 			line-height: 24px;
 		}
 
+		/* 围栏代码块容器：PC .md-content pre 同口径（圆角 10px + 16/18 内边距 +
+		   --bg-code-block 主题底色）。几何必须落在原生 view：native rich-text 的
+		   border-radius/padding 静默失效（用户报障「移动端没有圆角」的真因）。
+		   overflow:hidden 把子内容裁进圆角（长行不越界）；UCSS 纪律：padding 拆单边。
+		   色值走 theme.scss 色板（AGENTS.md 9.2：组件内禁止写死色值）。
+		   【2026-11-27 用户拍板】PC pre 无任何 box-shadow（app.css 逐字核对），
+		   移动端此前自造的「代码阴影块」已删除——此处禁止再引入 box-shadow
+		   （verify-mobile-fixes 回归锁钉死；iOS 上阴影还会废掉 overflow 裁剪）。 */
+		&__code {
+			align-self: stretch;
+			flex-direction: column;
+			padding-top: 16px;
+			padding-bottom: 16px;
+			padding-left: 18px;
+			padding-right: 18px;
+			border-radius: 10px;
+			overflow: hidden;
+			background-color: var(--color-code-block-bg);
+		}
+
+		/* 混合块（列表内围栏等）子段间距：与外层分段 7px 同口径（单边 margin） */
+		&__seg-gap {
+			margin-bottom: 7px;
+		}
+
+		/* 引用内容列：竖线右侧的纵向子段容器（rich/code 子段交替） */
+		&__quote-col {
+			flex: 1;
+			min-width: 0;
+			flex-direction: column;
+		}
+
+		/* 代码文本：等宽 + 20px 行距（13px 字号，行间呼吸感对齐 PC pre code）。
+		   字色随主题（PC --text-code：亮色深字/暗色浅字）。
+		   word-break 保长行折行不横向溢出（移动端无横向滚动窗）。 */
+		&__code-text {
+			font-family: monospace;
+			font-size: 13px;
+			line-height: 20px;
+			color: var(--color-code-block-text);
+			word-break: break-all;
+		}
+
+		/* 引用容器：row 布局，左竖线 3px + 10px 间隙（PC border-left + padding-left 14px）。
+		   竖线用真 view 而非 border-left（rich-text 不渲染边框，view 的 border 亦拆单边）。 */
+		&__quote {
+			align-self: stretch;
+			flex-direction: row;
+			align-items: stretch;
+			padding-top: 2px;
+			padding-bottom: 2px;
+		}
+
+		&__quote-bar {
+			flex-shrink: 0;
+			width: 3px;
+			border-radius: 2px;
+			background-color: rgba(127, 127, 127, 0.38);
+			margin-right: 11px;
+		}
+
+		&__quote-rich {
+			flex: 1;
+			min-width: 0;
+		}
+
 		&__plain {
 			font-size: 14px;
 			line-height: 24px;
 		}
 	}
+
 </style>

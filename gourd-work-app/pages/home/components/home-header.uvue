@@ -1,7 +1,10 @@
 <template>
 	<view class="home-header">
 		<view v-if="!props.hideMenu" class="home-header__menu" @click="emit('menu')">
-			<text class="iconfont">&#xe634;</text>
+			<!-- 字体图标字号/字色必须显式声明（UCSS 不保证继承）：此前裸 .iconfont
+				 无 color，暗色下字形落默认深色 → 深底上隐形（用户报障「暗色看不见」）。
+				 与 app-chat__back 同口径：18px + --color-text-secondary 随主题翻转。 -->
+			<text class="iconfont home-header__menu-icon">&#xe634;</text>
 		</view>
 		<text class="home-header__brand" :class="props.hideMenu ? 'home-header__brand--solo' : ''">{{ t('home.brand') }}</text>
 		<!-- 头部只展示 设备 | 工作空间；权限入口在运行弹层内（与工作空间同组），不在头部露出 -->
@@ -51,6 +54,13 @@
 			align-items: center;
 			justify-content: center;
 			border-radius: 10px;
+		}
+
+		// 字体图标字号/字色必须在使用处显式声明（UCSS 不保证继承，app-chat__back 同款）：
+		// 暗色下裸 .iconfont 落默认深色字形，深底上隐形（用户报障真因）
+		&__menu-icon {
+			font-size: 18px;
+			color: var(--color-text-secondary);
 		}
 
 		&__brand {

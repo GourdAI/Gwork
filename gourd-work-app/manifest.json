@@ -2,8 +2,8 @@
 	"name": "GWork",
 	"appid": "__UNI__55E260E",
 	"description": "",
-	"versionName": "0.0.1",
-	"versionCode": "1",
+	"versionName": "0.0.2",
+	"versionCode": "2",
 	"uni-app-x": {
 		"vapor": true,
 		"styleIsolationVersion": "2",
@@ -49,11 +49,13 @@
 	"app-android": {
 		"distribute": {
 			// 录音权限：gwork-speech 系统语音识别依赖；运行时授权由插件内 UTSAndroid.requestSystemPermission 拉起。
-			// 必须放在 distribute 下（官方 schema：app-android.distribute.permissions）——
-			// 曾错放 app-android.permissions 顶层，云打包静默忽略，APK 缺 RECORD_AUDIO：
-			// 系统对未声明权限直接拒绝且不弹授权框，语音每次都报「麦克风不可用」
+			// 值必须是 <uses-permission/> XML 片段，不是裸权限名字符串：
+			// HBuilderX 预校验对 permissions.join("") 跑 isValidXml，裸名会直接报「格式不正确」拒绝打包；
+			// 即便 --skipPrecheck 绕过，云端同样按 XML 注入 AndroidManifest，裸名会被静默忽略 → APK 缺 RECORD_AUDIO，
+			// 系统对未声明权限直接拒绝且不弹授权框，语音每次都报「麦克风不可用」。
+			// （位置也必须在 app-android.distribute.permissions 下，放 app-android 顶层同样被忽略）
 			"permissions": [
-				"android.permission.RECORD_AUDIO"
+				"<uses-permission android:name=\"android.permission.RECORD_AUDIO\"/>"
 			],
 			// 只打 64 位 ARM：2019 年后机型全是 arm64。
 			// 不显式声明时云打包默认带 armeabi-v7a 运行时（每 ABI 数 MB），是 APK 虚胖的来源之一

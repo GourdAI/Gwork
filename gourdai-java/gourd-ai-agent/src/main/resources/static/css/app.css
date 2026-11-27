@@ -755,36 +755,63 @@ body.is-electron.is-mac:not(.code-mode) .sidebar-header { padding-top: 40px; }
    会把消息流撑出数屏；edit 400px、兜底 320px、bash/read 无限——三档并存正是
    「展开体验不统一」的另一半。全部收敛到与卡体基线同一 320px（内部滚动）。 */
 .tool-card-body.is-bash, .tool-card-body.is-file, .tool-card-body.is-edit { max-height: 320px; }
-/* 【clip-path 合成层隔离修复 2026-11】paintWindow 把 clip-path:inset(...) 写到成员卡上时，
-   Chromium 将其提升为合成层/stacking context，通配符 *::-webkit-scrollbar-* 在该层内失效，
-   .tool-card-body / .thinking-block-body / .agent-card-body 的 overflow:auto 回退为系统
-   原生滚条（宽轨道 + 灰底）。显式声明三个容器的 webkit 滚条规则，不靠 * 通配符继承。
-   几何值与 theme.css 变量同源，视觉完全统一；合成层隔断问题由此绕过。 */
+/* 【㉖ 2026-11-27 用户拍板：过程卡体一律不使用原生滚动条，滚条只有一套统一样式】
+   事故链（两次报障同一处）：
+     ㉔ 之前 —— paintWindow 给成员卡写 clip-path 后 Chromium 提升合成层，通配符
+       *::-webkit-scrollbar-* 在该层内失效，卡体回退成 Windows 平台原生粗灰条；
+     ㉔ 修法 —— 给三个卡体【再显式声明一套】webkit 滚条规则绕过合成层隔断。
+       它确实不再是平台原生观感，但代价是：同一界面里同时存在「浏览器绘制的滚条」
+       与「批次限高窗自绘的滚条」两条独立管线，几何/圆角/hover 时序各写一份，
+       任何一侧漂移就又不统一（用户 2026-11-27 报「怎么有两个滚动条，样式还不统一」）。
+   现口径（唯一一套）：卡体的浏览器滚条【完全不绘制】（display:none + width/height 0，
+   与 code.css / skills.css 里既有的「滚条不占位」写法同源，不是新造规则），
+   滚动能力仍由 overflow-y:auto 提供 —— scrollTop / 滚轮 / overscroll-behavior /
+   流式置底跟随全部保持原生语义不变；可见滚条改由【与限高窗同一条 ::after 规则】
+   绘制（见下方 .gourd-sb::after 与 .turn-batch-header.turn-batch-windowed::after
+   合并选择器），几何一律取 theme.css 的 --scrollbar-* 变量。
+   ⇒ 全站只有这一套滚条视觉，浏览器不再参与绘制，合成层/标准属性冲突彻底无从发生。 */
 .tool-card-body::-webkit-scrollbar,
 .thinking-block-body::-webkit-scrollbar,
-.agent-card-body::-webkit-scrollbar { width: var(--scrollbar-size, 12px); }
-.tool-card-body::-webkit-scrollbar-track,
-.thinking-block-body::-webkit-scrollbar-track,
-.agent-card-body::-webkit-scrollbar-track { background: transparent; }
-.tool-card-body::-webkit-scrollbar-thumb,
-.thinking-block-body::-webkit-scrollbar-thumb,
-.agent-card-body::-webkit-scrollbar-thumb {
-    background: var(--scrollbar-thumb, rgba(150,152,158,.35));
-    border-radius: var(--scrollbar-radius, 8px);
-    border: var(--scrollbar-thumb-inset, 3px) solid transparent;
-    background-clip: padding-box;
-    min-height: var(--scrollbar-thumb-min, 36px);
-}
-.tool-card-body::-webkit-scrollbar-thumb:hover,
-.thinking-block-body::-webkit-scrollbar-thumb:hover,
-.agent-card-body::-webkit-scrollbar-thumb:hover {
-    background: var(--scrollbar-thumb-hover, rgba(150,152,158,.65));
-    background-clip: padding-box;
-    border-width: var(--scrollbar-thumb-inset-hover, 2px);
-}
-.tool-card-body::-webkit-scrollbar-button,
-.thinking-block-body::-webkit-scrollbar-button,
-.agent-card-body::-webkit-scrollbar-button { display: none; }
+.agent-card-body::-webkit-scrollbar { display: none; width: 0; height: 0; }
+/* 自绘滚条宿主 = 【不滚动的外层卡片】而不是滚动体本身：
+   绝对定位的 ::after 若是滚动容器的后代，会随内容一起滚走（thumb 漂移）。
+   挂在卡片上则恒定居于卡体视口右缘，与限高窗把 thumb 挂在盖子上的做法完全同构。 */
+.tool-card.gourd-sb,
+.thinking-block.gourd-sb,
+.agent-card.gourd-sb { position: relative; }
+/* 轨道占位：浏览器滚条不绘制后内容会回涨一个轨道宽，用等宽右内距让回来，
+   保持全站规范「滚条占据布局宽度、绝不压住正文」（theme.css :root 注释），
+   也让隐藏滚条前后的换行/高度完全一致（限高窗几何不因本次改造漂移）。
+   宽度与自绘轨道同源 --scrollbar-size，两侧永远同值。
+   【量测口径】占位写在【样式表】而不是 inline margin：inline 写法每轮 refreshWindow
+   清补偿时会连同它一起清掉，于是「量的是整宽、画的是窄宽」，每秒一次全宽↔窄宽重排，
+   长行卡在换行阈值上高度来回跳（㉕ 实测缺陷）。样式表占位跨 tick 恒定，无此问题。 */
+.tool-card.gourd-sb > .tool-card-body,
+.thinking-block.gourd-sb > .thinking-block-body,
+.agent-card.gourd-sb > .agent-card-body { padding-right: var(--scrollbar-size, 12px); }
+/* 建窗期间成员同时存在两条滚条（外层批次窗 + 卡体自身），必须并列不重叠：
+   卡体让出【两个】轨道宽，自己的 thumb 内移一列，最右一列留给批次窗。
+   两条由同一条 CSS 规则绘制 ⇒ 同宽同色同圆角同最小长度，观感完全一致。
+   类由 JS 在建窗/拆窗时增删（paintWindow / clearWindowPaint），不写 inline 几何。
+   【特异性】必须逐条压过上面的单轨道规则：.turn-win-member.gourd-sb > .xxx-body
+   是 (0,3,0)，而 .tool-card.gourd-sb > .tool-card-body 是 (0,2,1) —— 只写后代式
+   `.turn-win-member .gourd-sb > …` 会漏掉「成员自身就是那张卡」这一最常见情形
+   （真机实测：漏写时 padding 仍 12px、两条轨道 gap=0 完全重叠）。 */
+.turn-win-member > .tool-card-body,
+.turn-win-member > .thinking-block-body,
+.turn-win-member > .agent-card-body,
+.tool-card.turn-win-member.gourd-sb > .tool-card-body,
+.thinking-block.turn-win-member.gourd-sb > .thinking-block-body,
+.agent-card.turn-win-member.gourd-sb > .agent-card-body,
+.turn-win-member .tool-card.gourd-sb > .tool-card-body,
+.turn-win-member .thinking-block.gourd-sb > .thinking-block-body,
+.turn-win-member .agent-card.gourd-sb > .agent-card-body { padding-right: calc(var(--scrollbar-size, 12px) * 2); }
+.tool-card.turn-win-member.gourd-sb::after,
+.thinking-block.turn-win-member.gourd-sb::after,
+.agent-card.turn-win-member.gourd-sb::after,
+.turn-win-member .tool-card.gourd-sb::after,
+.turn-win-member .thinking-block.gourd-sb::after,
+.turn-win-member .agent-card.gourd-sb::after { right: var(--scrollbar-size, 12px); }
 
 /* 参数流式生成中的骨架卡（action_draft 建卡 → action_start 原地转正）。
    为何只改轮廓与头部文案、不动状态点：状态点四态（loading/done/warn/reject）语义已满，
@@ -4608,8 +4635,21 @@ pre:hover .code-copy-btn { opacity: 1; }
        + background-clip:padding-box 收窄（与原生 thumb 同一手法，不是另画一条）；
      · 圆角 = --scrollbar-radius（8px）⇒ 两端胶囊弧度与原生一致；
      · 最小高由 JS 读 --scrollbar-thumb-min 下发（app-turn-display.js paintWindowScrollbar → scrollbarVar，读不到时回落 SB_MIN_THUMB_FALLBACK=36；浏览器实测 ::after width 12px / radius 8px / border 3px / clip padding-box / right 0px）。
-   轨道本体透明（原生 track 也是 transparent），只画滑块。 */
-.turn-batch-header.turn-batch-windowed::after {
+   轨道本体透明（原生 track 也是 transparent），只画滑块。
+【㉕→㉖ 2026-11-27 用户报「内部滚动条怎么有两个，样式还不统一」+ 拍板「不能使用原生
+滚动条，我们的滚动条都是统一样式的」】真机 2×DPR 截图实锤：成员卡体的浏览器滚条
+（gutter 12px）与本轨道重叠 11px，同一竖条区域里两个比例 thumb 长短/圆角/深浅各异。
+㉕ 曾用「几何让位」把两条轨道错开 1px —— 那只是不再重叠，**第二条滚条依旧存在**，
+且仍是浏览器绘制、与本自绘管线两套时序，不满足用户规约。
+㉖ 终态：卡体的浏览器滚条整体不绘制（见 :758 ㉖ 块 display:none），可见滚条由
+【下面这一条规则】同时承担两种宿主 —— 批次限高窗（盖子）与过程卡体（外层卡片）。
+一条规则 = 一套几何 = 一种观感，不存在第二套写法可漂移。
+本轨道刻意不加 hover 变色：thumb 是 pointer-events:none 的伪元素，CSS :hover
+在盖子上永不成立（指针实际落在成员行）；常态色同源即视觉统一。 */
+.turn-batch-header.turn-batch-windowed::after,
+.tool-card.gourd-sb::after,
+.thinking-block.gourd-sb::after,
+.agent-card.gourd-sb::after {
     content: ''; position: absolute; pointer-events: none;
     right: 0; top: var(--win-sb-top, 100%);
     box-sizing: border-box;
@@ -4622,6 +4662,15 @@ pre:hover .code-copy-btn { opacity: 1; }
     background-clip: padding-box;
     background-origin: padding-box;
 }
+/* 静息只留一条：卡体自绘 thumb 常态透明，指针进入该卡 / 正在拖动或滚动时浮现。
+   宿主是真实卡片元素，:hover 天然成立。常驻可见的那条始终是外层限高窗滚条。 */
+.tool-card.gourd-sb::after,
+.thinking-block.gourd-sb::after,
+.agent-card.gourd-sb::after { opacity: 0; transition: opacity .16s ease; }
+.tool-card.gourd-sb:hover::after,
+.thinking-block.gourd-sb:hover::after,
+.agent-card.gourd-sb:hover::after,
+.gourd-sb.sb-active::after { opacity: 1; }
 /* 成员折叠：JS 管理类的单一窄规则；:empty 的正文壳本就不占位，无需特判 */
 .msg-bubble > .turn-batch-collapsed { display: none !important; }
 /* 【方案A · 卡内批次】智能体卡体内成员折叠同口径（2026-11 用户拍板卡内与外部同构） */

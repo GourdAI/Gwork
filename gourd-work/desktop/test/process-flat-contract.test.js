@@ -85,6 +85,15 @@ test('② 全选择器扫描：过程行四基类不得有任何卡片残料（�
             if (!BASE_CLASS.test(sel)) continue;
             /* 唯一豁免：待审批 HITL 卡保留整圈警示描边 + 6px 圆角（产品口径，不得弱化） */
             if (/\.hitl-pending/.test(sel)) continue;
+            /* 【㉖ 2026-11-27】自绘滚动条 thumb 豁免：它画在【卡片/盖子的 ::after】上，
+               不是卡片盒子本体。border-left/right 是与原生同手法的【透明内衬】
+               （把 12px 轨道收窄成 6px 可见滑块），border-radius 是全站规范胶囊圆角，
+               background 是滑块色 —— 三者都是滚动条几何，不是「卡片残料」。
+               豁免口径极窄：选择器每一项都必须以 ::after 结尾且带自绘滚条标记
+               （.gourd-sb / .turn-batch-windowed），任何盒子本体规则一律照旧扫描。 */
+            const selItems = sel.split(',').map(s => s.trim()).filter(Boolean);
+            if (selItems.length && selItems.every(s => /::after$/.test(s)
+                    && /(\.gourd-sb|\.turn-batch-windowed)/.test(s))) continue;
             for (const d of body.split(';')) {
                 const m = d.trim().match(RESIDUE);
                 if (!m) continue;
